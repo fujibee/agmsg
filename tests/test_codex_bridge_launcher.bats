@@ -1148,3 +1148,71 @@ EOF
   cp "$TEST_SKILL_DIR/saved-config.json" "$TEST_SKILL_DIR/teams/team/config.json"
   wait_for_bridge_capture
 }
+
+@test "launcher: valid JSON with a broken registration schema stays unknown until repaired" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  cp "$TEST_SKILL_DIR/teams/team/config.json" "$TEST_SKILL_DIR/saved-config.json"
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  wait_for_bridge_capture
+  local bridge_pid
+  bridge_pid="$(cat "$RUN_DIR"/codex-bridge.*.pid)"
+  printf '{"name":"team","agents":{"alice":{"registrations":[{}]}}}' > "$TEST_SKILL_DIR/teams/team/config.json"
+  local i pending=0
+  for i in {1..100}; do
+    if grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+    sleep 0.1
+  done
+  [ "$pending" -eq 1 ]
+  sleep 3
+  kill -0 "$bridge_pid"
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  printf '{"name":"team","agents":{"alice":null}}' > "$TEST_SKILL_DIR/teams/team/config.json"
+  sleep 3
+  kill -0 "$bridge_pid"
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  cp "$TEST_SKILL_DIR/saved-config.json" "$TEST_SKILL_DIR/teams/team/config.json"
+  local recovered=0
+  for i in {1..100}; do
+    if ! grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+    sleep 0.1
+  done
+  [ "$recovered" -eq 1 ]
+  kill -0 "$bridge_pid"
+}
+
+@test "launcher: repeated failed identity observations retain the polling backoff" {
+  # Load the actual functions without starting a dispatcher or bridge. Override
+  # only the registry observation and sleep transports; reset policy is real.
+  run bash -s "$LAUNCHER" "$TEST_SKILL_DIR" <<'EOF'
+set -euo pipefail
+launcher="$1"; sandbox="$2"
+source "$SCRIPTS/lib/hash.sh"
+NOTICE_COMPONENT=test
+NOTICE_REASON=''
+RUN_DIR="$sandbox/run"
+TEAMS_DIR="$sandbox/teams"
+IDENTITY_CACHE=''
+IDENTITY_CACHE_COUNT=-1
+IDENTITY_CACHE_MARKER="$RUN_DIR/cache-probe"
+IDENTITY_CACHE_FRESH=0
+IDENTITY_CACHE_CHANGED=0
+IDENTITY_OBSERVATION_STATE=unobserved
+extract() { sed -n "/^$1()/,/^}/p" "$launcher"; }
+eval "$(extract identity_cache_is_fresh)"
+eval "$(extract refresh_identity_cache)"
+eval "$(sed -n '/^POLL_STEPS=/,/^# Any change/p' "$launcher" | sed '$d')"
+resolve_identity() { return 1; }
+identity_pending() { :; }
+sleep() { printf '%s\n' "$1"; }
+for tick in 1 2 3 4 5; do
+  refresh_identity_cache
+  [ "$IDENTITY_CACHE_CHANGED" != 1 ] || poll_reset
+  poll_sleep
+done
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = $'0.3\n0.6\n1.2\n2\n2' ]
+}

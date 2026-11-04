@@ -163,7 +163,8 @@ acquire_runtime_lock() {
 if ! declare -F down_notice_set >/dev/null 2>&1; then
   source "$SCRIPT_DIR/../../../lib/down-notice.sh"
 fi
-NOTICE_COMPONENT="codex-identity.${PROJECT_HASH:0:8}.$(printf '%s\n%s' "$SEAT_KEY" "$ROLE_PAIR" | agmsg_sha1)"
+NOTICE_PROJECT_HASH="$(printf '%s' "$PROJECT_PHYS" | agmsg_sha1)"
+NOTICE_COMPONENT="codex-identity.$NOTICE_PROJECT_HASH.$(printf '%s\n%s' "$SEAT_KEY" "$ROLE_PAIR" | agmsg_sha1)"
 NOTICE_REASON="unobserved"
 IDENTITY_PROJECT_SQL_IN="$(agmsg_project_sql_in_list "$PROJECT")"
 identity_ready() {
@@ -191,16 +192,31 @@ role_removed() {
   answer="$(sqlite3 :memory: "
     WITH raw(j) AS (SELECT CAST(readfile('$config_sql') AS TEXT)),
     valid(j) AS (SELECT j FROM raw WHERE json_valid(j)),
-    target(value) AS (
-      SELECT value FROM valid, json_each(json_extract(j, '$.agents')) WHERE key='$name_sql'
+    target(value,kind) AS (
+      SELECT value,type FROM valid, json_each(json_extract(j, '$.agents')) WHERE key='$name_sql'
     ),
     registrations(regs) AS (
-      SELECT CASE WHEN json_type(value, '$.registrations')='array'
-        THEN json_extract(value, '$.registrations')
-        ELSE json_array(json_object('type',json_extract(value,'$.type'),'project',json_extract(value,'$.project')))
-        END FROM target
+      SELECT CASE WHEN kind='object' THEN
+        CASE WHEN json_type(value, '$.registrations')='array'
+          THEN json_extract(value, '$.registrations')
+          WHEN json_type(value, '$.registrations') IS NULL
+          THEN json_array(json_object('type',json_extract(value,'$.type'),'project',json_extract(value,'$.project')))
+        END END FROM target
+    ),
+    entries(value,kind) AS (
+      SELECT value,type FROM registrations, json_each(COALESCE(regs,'[]'))
     )
-    SELECT count(*) FROM registrations, json_each(regs)
+    SELECT CASE
+      WHEN EXISTS(SELECT 1 FROM registrations WHERE regs IS NULL)
+        OR EXISTS(SELECT 1 FROM target WHERE kind!='object')
+        OR EXISTS(SELECT 1 FROM entries WHERE kind!='object'
+          OR COALESCE(json_type(value,'$.type'),'')!='text'
+          OR COALESCE(json_type(value,'$.project'),'')!='text'
+          OR length(trim(COALESCE(json_extract(value,'$.type'),'')))=0
+          OR length(trim(COALESCE(json_extract(value,'$.project'),'')))=0)
+        THEN 'unknown'
+      ELSE count(*) END
+    FROM entries
     WHERE json_extract(value,'$.type')='codex'
       AND json_extract(value,'$.project') IN ($IDENTITY_PROJECT_SQL_IN)
     HAVING (SELECT json_type(j, '$.agents') FROM valid)='object';
@@ -273,6 +289,8 @@ IDENTITY_CACHE=""
 IDENTITY_CACHE_COUNT=-1
 IDENTITY_CACHE_MARKER="$RUN_DIR/.identity-cache.$$"
 IDENTITY_CACHE_FRESH=0   # 1 when the last refresh served the cache unchanged
+IDENTITY_CACHE_CHANGED=0
+IDENTITY_OBSERVATION_STATE=unobserved
 
 identity_cache_is_fresh() {
   local f count=0
@@ -287,6 +305,7 @@ identity_cache_is_fresh() {
 }
 
 refresh_identity_cache() {
+  IDENTITY_CACHE_CHANGED=0
   if identity_cache_is_fresh; then
     IDENTITY_CACHE_FRESH=1
     return 0
@@ -299,14 +318,19 @@ refresh_identity_cache() {
     count=$((count + 1))
   done
   IDENTITY_CACHE_COUNT=$count
-  local observed
+  local observed previous="$IDENTITY_CACHE" previous_state="$IDENTITY_OBSERVATION_STATE"
   if observed="$(resolve_identity)" && [ -n "$observed" ]; then
     IDENTITY_CACHE="$observed"
+    IDENTITY_OBSERVATION_STATE=ready
   else
     # Do not cache an empty/error result: retry even if config mtimes stay put.
     rm -f "$IDENTITY_CACHE_MARKER"
     IDENTITY_CACHE=""
+    IDENTITY_OBSERVATION_STATE=pending
     identity_pending "Codex identity discovery is unavailable; launcher is retrying"
+  fi
+  if [ "$previous" != "$IDENTITY_CACHE" ] || [ "$previous_state" != "$IDENTITY_OBSERVATION_STATE" ]; then
+    IDENTITY_CACHE_CHANGED=1
   fi
 }
 
@@ -355,7 +379,8 @@ build_safety_state() {
   SAFETY_STATE="request=$request"
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
-    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || return 1
+    [ -n "$AGMSG_ROLE_SESSION_UUID" ] && [ -n "$AGMSG_ROLE_SESSION_PROJECT" ] || return 1
     SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
   done <<< "$identity"
 }
@@ -377,9 +402,11 @@ if [ -z "$ROLE_PAIR" ]; then
       && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
       seat_pairs="$REQUEST_PAIR"
     fi
-    [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+    [ "$IDENTITY_CACHE_CHANGED" != "1" ] || poll_reset
     if [ -z "$seat_pairs" ]; then
-      identity_pending "Codex destination is missing or unproven; launcher is waiting for this seat's request"
+      if [ "$IDENTITY_OBSERVATION_STATE" != pending ]; then
+        identity_pending "Codex destination is missing or unproven; launcher is waiting for this seat's request"
+      fi
       # No owned pair is authoritative: forget any children this seat used to
       # own so a later re-registration can be dispatched again.
       known_pairs=""
@@ -441,9 +468,6 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   poll_sleep
 done
 [ -n "$ids" ] || exit 0
-build_safety_state "$ids"
-safety_state="$SAFETY_STATE"
-
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
 # without a record may share the current project TUI. If the hook could not
@@ -461,38 +485,50 @@ if [ -f "$REQUEST_FILE" ]; then
   _hint_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
   [ -n "${_hint_thread:-}" ] && thread_hint="$_hint_thread"
 fi
+# Wait in this process for a readable, matching role record. Re-exec on every
+# empty observation would reset backoff and repeatedly rebuild all helpers.
 safe_ids=""
-raw_identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
-while IFS="$TAB" read -r candidate_team candidate_name; do
-  [ -n "$candidate_team" ] || continue
-  # This loop runs in the launcher's own shell (herestring, not a pipeline), so
-  # it is also what warms the record-path memo for the rest of the process.
-  agmsg_role_session_load "$candidate_team" "$candidate_name" 2>/dev/null || true
-  candidate_thread="$AGMSG_ROLE_SESSION_UUID"
-  if [ -n "$candidate_thread" ]; then
-    candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
-    candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
-    # A record for another project proves this role's current seat is elsewhere:
-    # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
-    # before a concrete request thread is available; multiplexed roles require
-    # proof and are excluded while the hint is only `loaded`.
-    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
+while _agmsg_pid_alive_local "$PARENT_PID"; do
+  safe_ids=""
+  raw_identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
+  while IFS="$TAB" read -r candidate_team candidate_name; do
+    [ -n "$candidate_team" ] || continue
+    # This loop runs in the launcher's own shell (herestring, not a pipeline), so
+    # it is also what warms the record-path memo for the rest of the process.
+    agmsg_role_session_load "$candidate_team" "$candidate_name" 2>/dev/null || true
+    candidate_thread="$AGMSG_ROLE_SESSION_UUID"
+    if [ -n "$candidate_thread" ]; then
+      candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
+      candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
+      # A record for another project proves this role's current seat is elsewhere:
+      # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
+      # before a concrete request thread is available; multiplexed roles require
+      # proof and are excluded while the hint is only `loaded`.
+      if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
+        continue
+      fi
+    else
+      # A role without a recorded seat has no live TUI to receive its turn.
       continue
     fi
-  else
-    # A role without a recorded seat has no live TUI to receive its turn.
-    continue
-  fi
-  safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
-done <<< "$ids"
+    safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
+  done <<< "$ids"
+  if [ -n "$safe_ids" ]; then break; fi
+  role_removed && { identity_ready; exit 0; }
+  identity_pending "Codex role has no matching thread record; launcher is retrying"
+  poll_sleep
+done
 ids="$safe_ids"
-# A role record may be written by actas later in this same first turn. An empty
-# safe set is therefore transient, not terminal: retry while the parent lives.
-if [ -z "$ids" ]; then
-  _agmsg_pid_alive_local "$PARENT_PID" || exit 0
-  sleep 0.3
-  exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
-fi
+[ -n "$ids" ] || { identity_ready; exit 0; }
+SAFETY_STATE=""
+while _agmsg_pid_alive_local "$PARENT_PID"; do
+  if build_safety_state "$ids"; then break; fi
+  role_removed && { identity_ready; exit 0; }
+  identity_pending "Codex role record cannot be read; launcher is retrying"
+  poll_sleep
+done
+[ -n "$SAFETY_STATE" ] || { identity_ready; exit 0; }
+safety_state="$SAFETY_STATE"
 
 identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
 if [ "$identity_count" = "1" ]; then
@@ -832,7 +868,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # the resolve is served from the mtime-guarded cache.
   refresh_identity_cache
   current_ids="$IDENTITY_CACHE"
-  [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+  [ "$IDENTITY_CACHE_CHANGED" != "1" ] || poll_reset
   if [ -z "$current_ids" ]; then
     if role_removed; then
       retire_recorded_bridge
@@ -881,7 +917,11 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  build_safety_state "$current_ids"
+  if ! build_safety_state "$current_ids"; then
+    identity_pending "Codex role record cannot be read; launcher is retrying"
+    poll_sleep
+    continue
+  fi
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
     retire_recorded_bridge
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
