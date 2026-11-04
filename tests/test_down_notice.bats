@@ -180,6 +180,37 @@ teardown() { teardown_test_env; }
   printf '%s\n' "$output" | grep -qF "could not clear the record for c7"
 }
 
+@test "clear returns 1 when the directory cannot be searched: absence is established, not inferred" {
+  [ "$(id -u)" -ne 0 ] || skip "root can search anywhere"
+  down_notice_set c9 down "r" "c"
+  chmod 000 "$DIR"
+  run down_notice_clear c9
+  chmod 700 "$DIR"
+  [ "$status" -eq 1 ]
+  printf '%s\n' "$output" | grep -qF "could not clear the record for c9"
+  [ -f "$DIR/c9.json" ]
+}
+
+@test "a failed write prints exactly one line, whichever way it fails" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere"
+  mkdir -p "$DIR"
+  chmod 500 "$DIR"
+  run down_notice_set c10 down "r" "c"
+  [ "$status" -eq 1 ]
+  [ "${#lines[@]}" -eq 1 ]
+  run /bin/bash -c '. "$1"; down_notice_set c10 down r c' _ "$SCRIPTS/lib/down-notice.sh"
+  chmod 700 "$DIR"
+  [ "$status" -eq 1 ]
+  [ "${#lines[@]}" -eq 1 ]
+}
+
+@test "with no install root, set and clear fail with one line instead of claiming success" {
+  run /bin/bash -c '. "$1"; unset AGMSG_DOWN_NOTICE_ROOT; _AGMSG_DOWN_NOTICE_ROOT=""; down_notice_set c11 down r c; echo "set=$?"; down_notice_clear c11; echo "clear=$?"' _ "$SCRIPTS/lib/down-notice.sh"
+  printf '%s\n' "$output" | grep -qF "set=1"
+  printf '%s\n' "$output" | grep -qF "clear=1"
+  [ "$(printf '%s\n' "$output" | grep -c 'could not')" -eq 2 ]
+}
+
 @test "a caller that guards the call with || : keeps going on a failed write" {
   : > "$TEST_SKILL_DIR/run/down"
   run bash -c '. "$1"; down_notice_set c8 down r c 2>/dev/null || :; echo after' _ "$SCRIPTS/lib/down-notice.sh"

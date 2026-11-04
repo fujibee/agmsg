@@ -137,7 +137,10 @@ down_notice_set() {   # <component> <down|degraded> <reason> <recovery>
   [ -n "$since" ] || since="$now"
   line="$(printf '{"component":"%s","state":"%s","reason":"%s","recovery":"%s","since":"%s","updated":"%s"}' \
     "$key" "$state" "$(_down_notice_clean "${3-}")" "$(_down_notice_clean "${4-}")" "$since" "$now")"
-  if ! printf '%s\n' "$line" >"$tmp" 2>/dev/null; then
+  # 2>/dev/null FIRST: redirections are processed left to right, and the shell's
+  # own "Permission denied" for the failed open of $tmp would otherwise print
+  # before the redirection that hides it, giving two lines for one failure.
+  if ! printf '%s\n' "$line" 2>/dev/null >"$tmp"; then
     rm -f "$tmp" 2>/dev/null
     echo "agmsg: could not record that $key is $state (cannot write in $dir)" >&2
     return 1
@@ -155,15 +158,18 @@ down_notice_set() {   # <component> <down|degraded> <reason> <recovery>
   return 0
 }
 
-# 0 = the record is gone (or never existed), 1 = it could not be removed,
-# 2 = an invalid key.
+# 0 = the record is gone (or never existed), 1 = it could not be removed or
+# its absence could not be established, 2 = an invalid key.
 down_notice_clear() {   # <component>
   local dir
   _down_notice_key_ok "${1-}" || return 2
-  dir="$(_down_notice_dir)" || return 0
+  dir="$(_down_notice_dir)" || { echo "agmsg: could not clear the record for $1 (no install root)" >&2; return 1; }
   rm -f "$dir/$1.json.shown" 2>/dev/null
-  rm -f "$dir/$1.json" 2>/dev/null
-  if [ -e "$dir/$1.json" ]; then
+  # The result of the removal itself decides, not a look at the path afterwards:
+  # under an unsearchable directory the removal fails AND the path cannot be seen,
+  # and "I cannot see it" is not "it is gone". `rm -f` returns 0 for a record that
+  # was never there and for one it removed, and non-zero for one it could not.
+  if ! rm -f "$dir/$1.json" 2>/dev/null; then
     echo "agmsg: could not clear the record for $1 (cannot remove $dir/$1.json)" >&2
     return 1
   fi
