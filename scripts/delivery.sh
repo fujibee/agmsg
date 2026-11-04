@@ -937,6 +937,20 @@ _status_project_on_agmsgd() {   # <type> <project>
   return 1
 }
 
+# Hook diagnostics are separate from the hook's machine-readable stdout.
+print_hook_input_notice() {
+  local type="$1" project="$2" component key reason recovery since state
+  [ -r "$SCRIPT_DIR/lib/down-notice.sh" ] || return 0
+  . "$SCRIPT_DIR/lib/down-notice.sh"
+  . "$SCRIPT_DIR/lib/hash.sh"
+  key="$(printf '%s\n%s' "$type" "$project" | agmsg_sha1)"
+  while IFS=$'\t' read -r component state since reason recovery; do
+    [ "$component" = "hook-input.$key" ] || continue
+    printf 'hook input degraded: %s\n' "$reason"
+    printf '  inspect with: %s\n' "$recovery"
+  done < <(down_notice_list)
+}
+
 do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
@@ -961,6 +975,7 @@ do_status() {
       agmsg_delivery_status "$TYPE" "$PROJECT"
       [ -z "${STATUS_AGMSGD_NOTE:-}" ] || echo "note: $STATUS_AGMSGD_NOTE"
     fi
+    print_hook_input_notice "$TYPE" "$PROJECT"
     case "$TYPE" in
       claude-code)
         cat <<'EOF'

@@ -89,12 +89,48 @@ emit_status_json() {
 # the command substitution buffer by the time the deadline fires), just a few
 # seconds late instead of never. Fails open when `timeout` isn't on PATH
 # (stock macOS) -- same unbounded read as before, no regression there. #381
+# The shared helper owns persistence and presentation. Missing helper code is
+# reported, never made into a new hook refusal during a rolling update.
+_hook_input_notice() {
+  local action="$1" reason="${2:-}" component recovery project_key
+  if ! declare -F down_notice_set >/dev/null 2>&1; then
+    if [ -r "$SCRIPT_DIR/lib/down-notice.sh" ]; then
+      . "$SCRIPT_DIR/lib/down-notice.sh"
+    else
+      [ "$action" = clear ] || printf 'agmsg: hook input notice could not be recorded: shared notice helper is unavailable.\n' >&2
+      return 0
+    fi
+  fi
+  . "$SCRIPT_DIR/lib/hash.sh"
+  project_key="$(printf '%s\n%s' "$TYPE" "$PROJECT" | agmsg_sha1)"
+  component="hook-input.$project_key"
+  if [ "$action" = clear ]; then
+    down_notice_clear "$component" >&2 || printf 'agmsg: could not clear the recovered hook input notice.\n' >&2
+  else
+    printf -v recovery 'bash %q status %q %q' "$SCRIPT_DIR/delivery.sh" "$TYPE" "$PROJECT"
+    down_notice_set "$component" degraded "$reason" "$recovery" >&2 || printf 'agmsg: could not record the degraded hook input notice.\n' >&2
+  fi
+}
+
 INPUT=""
+INPUT_RC=0
 if [ ! -t 0 ]; then
   if command -v timeout >/dev/null 2>&1; then
-    INPUT=$(timeout "${AGMSG_HOOK_STDIN_TIMEOUT:-2}" cat 2>/dev/null || true)
+    INPUT=$(timeout "${AGMSG_HOOK_STDIN_TIMEOUT:-2}" cat 2>/dev/null) || INPUT_RC=$?
   else
-    INPUT=$(cat 2>/dev/null || true)
+    INPUT=$(cat 2>/dev/null) || INPUT_RC=$?
+  fi
+  if [ "$INPUT_RC" -ne 0 ]; then
+    case "$INPUT_RC" in
+      124)
+        INPUT_REASON="hook stdin did not close within ${AGMSG_HOOK_STDIN_TIMEOUT:-2}s; continuing with the captured payload, which may be incomplete"
+        ;;
+      *) INPUT_REASON="hook stdin read failed (exit $INPUT_RC); continuing with the captured payload, which may be incomplete" ;;
+    esac
+    printf 'agmsg: %s (%s). The next successful hook read clears this notice.\n' "$INPUT_REASON" "$TYPE" >&2
+    _hook_input_notice set "$INPUT_REASON ($TYPE, project $PROJECT)"
+  else
+    _hook_input_notice clear
   fi
 fi
 

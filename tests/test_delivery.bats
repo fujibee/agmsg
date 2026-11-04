@@ -1728,6 +1728,58 @@ EOF
   [[ "$output" =~ "ping copilot" ]]
 }
 
+@test "check-inbox: degraded stdin reports and records without adding stdout, then clears on a complete read" {
+  local bindir="$TEST_SKILL_DIR/input-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/timeout" <<'EOF'
+#!/bin/sh
+printf '%s' '{"stop_hook_active":true}'
+exit "${HOOK_READ_EXIT:-0}"
+EOF
+  chmod +x "$bindir/timeout"
+  # The shared helper's interface, not a second persistence implementation.
+  # Capture arguments separately from hook stdout so a warning cannot pass as
+  # valid hook output and another project's healthy read cannot clear this one.
+  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
+down_notice_set() { printf '%s\n' "$@" > "$SKILL_DIR/run/input-notice-set"; }
+down_notice_clear() { printf '%s\n' "$1" > "$SKILL_DIR/run/input-notice-clear"; }
+EOF
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local rc out="$TEST_PROJECT/hook.stdout" err="$TEST_PROJECT/hook.stderr" key
+  source "$SCRIPTS/lib/hash.sh"
+  key="$(printf '%s\n%s' codex "$TEST_PROJECT" | agmsg_sha1)"
+  for rc in 124 1; do
+    run env PATH="$bindir:$PATH" HOOK_READ_EXIT="$rc" bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
+    [ "$status" -eq 0 ]
+    [ ! -s "$out" ]
+    grep -q 'captured payload, which may be incomplete' "$err"
+    [ "$(head -1 "$TEST_SKILL_DIR/run/input-notice-set")" = "hook-input.$key" ]
+    grep -q 'delivery.sh' "$TEST_SKILL_DIR/run/input-notice-set"
+  done
+  run env PATH="$bindir:$PATH" HOOK_READ_EXIT=0 bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
+  [ "$status" -eq 0 ]
+  [ ! -s "$out" ]
+  [ ! -s "$err" ]
+  [ "$(cat "$TEST_SKILL_DIR/run/input-notice-clear")" = "hook-input.$key" ]
+}
+
+@test "delivery status: shows only this project's degraded hook input record" {
+  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
+down_notice_list() {
+  printf '%s\t%s\t%s\t%s\t%s\n' "$HOOK_COMPONENT" degraded 'test-time' 'stdin timed out' 'check the hook runtime'
+  printf '%s\t%s\t%s\t%s\t%s\n' 'hook-input.other-project' degraded 'test-time' 'foreign reason' 'foreign recovery'
+}
+EOF
+  source "$SCRIPTS/lib/hash.sh"
+  local key
+  key="$(printf '%s\n%s' codex "$TEST_PROJECT" | agmsg_sha1)"
+  run env HOOK_COMPONENT="hook-input.$key" bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -q 'hook input degraded: stdin timed out' <<<"$output"
+  grep -q 'inspect with: check the hook runtime' <<<"$output"
+  if [[ "$output" == *'foreign reason'* ]]; then return 1; fi
+}
+
 @test "check-inbox: does not hang when stdin is a non-TTY pipe that never reaches EOF (#381)" {
   # A minimal `timeout` shim so this test exercises check-inbox.sh's own
   # `command -v timeout` code path deterministically, regardless of whether
