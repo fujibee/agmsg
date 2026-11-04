@@ -43,6 +43,8 @@ source "$SCRIPT_DIR/../../../lib/role-session.sh"
 # already fixed once for a different recovery line).
 # shellcheck source=../../../lib/shquote.sh
 source "$SCRIPT_DIR/../../../lib/shquote.sh"
+# shellcheck source=../../../lib/down-notice.sh
+source "$SCRIPT_DIR/../../../lib/down-notice.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -101,7 +103,7 @@ case "$CODEX_COMMAND" in
     ;;
 esac
 
-PROJECT="$(cd "$PROJECT" && pwd)"
+PROJECT="$(agmsg_canonical_path "$PROJECT")"
 
 # Direct monitor-wrapper users follow the same intent rule as shim users.
 # This path must run before creating the seat or any long-lived process.
@@ -191,69 +193,92 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # report it ("listening on: ws://127.0.0.1:<port>"). This keeps codex-monitor.sh
 # free of any Node dependency — only the bridge (codex-bridge.js) needs Node, and
 # it degrades on its own if Node is missing rather than taking down the TUI. See #170.
-: > "$SEAT_LOG"
-# fds 3 and 4 are closed for the same reason remote.sh closes them around the
-# sync engine: under bats, fd 3 is the TAP pipe, and a daemon that inherits it
-# holds the whole test file open until the CI timeout. This app-server is
-# built to outlive its caller and is stopped only by codex-bridge-launcher.sh
-# once this seat's TUI exits (see _seat-key.sh's stop function).
-#
-# AGMSG_CODEX_SEAT_KEY is set on the app-server's OWN command, not just
-# exported below: its children (the shell-tool-command processes Codex runs
-# under --remote) inherit THIS process's environment directly, which is the
-# whole point -- no ancestry walk is needed anywhere downstream to find a
-# seat's own server (design review, replacing an earlier ancestry-walk design).
-#
-# Also passed as a `shell_environment_policy.set` override: under a
-# `shell_environment_policy.inherit` other than the default "all" (e.g.
-# "core" or "none"), Codex 0.158+ no longer lets tool-command children see a
-# var the policy excludes, so the plain env var above stops reaching them.
-# `set` is applied after `inherit`/exclude, so this reaches the tool
-# environment regardless of `inherit`; a user's own `include_only` still
-# filters after `set` and must list the var themselves (#1537). The key is
-# generated internally as digits and dots only (_agmsg_codex_seat_key_new),
-# so it is always safe inside this double-quoted TOML string unescaped.
-AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
-  AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
-  "$REAL_CODEX" app-server \
-    -c "shell_environment_policy.set.AGMSG_CODEX_SEAT_KEY=\"$SEAT_KEY\"" \
-    --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
-server_bg="$!"
+start_app_server() {
+  : > "$SEAT_LOG"
+  # fds 3 and 4 are closed for the same reason remote.sh closes them around the
+  # sync engine: under bats, fd 3 is the TAP pipe, and a daemon that inherits it
+  # holds the whole test file open until the CI timeout. This app-server is
+  # built to outlive its caller and is stopped only by codex-bridge-launcher.sh
+  # once this seat's TUI exits (see _seat-key.sh's stop function).
+  #
+  # AGMSG_CODEX_SEAT_KEY is set on the app-server's OWN command, not just
+  # exported below: its children (the shell-tool-command processes Codex runs
+  # under --remote) inherit THIS process's environment directly, which is the
+  # whole point -- no ancestry walk is needed anywhere downstream to find a
+  # seat's own server (design review, replacing an earlier ancestry-walk design).
+  #
+  # Also passed as a `shell_environment_policy.set` override: under a
+  # `shell_environment_policy.inherit` other than the default "all" (e.g.
+  # "core" or "none"), Codex 0.158+ no longer lets tool-command children see a
+  # var the policy excludes, so the plain env var above stops reaching them.
+  # `set` is applied after `inherit`/exclude, so this reaches the tool
+  # environment regardless of `inherit`; a user's own `include_only` still
+  # filters after `set` and must list the var themselves (#1537). The key is
+  # generated internally as digits and dots only (_agmsg_codex_seat_key_new),
+  # so it is always safe inside this double-quoted TOML string unescaped.
+  AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    "$REAL_CODEX" app-server \
+      -c "shell_environment_policy.set.AGMSG_CODEX_SEAT_KEY=\"$SEAT_KEY\"" \
+      --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
+  server_bg="$!"
+
+}
 
 PORT=""
-# codex 0.144+ colorizes this banner even when stdout is a redirected file
-# (NO_COLOR is ignored), so strip ANSI SGR sequences before matching.
 ansi_esc="$(printf '\033')"
-for _ in $(seq 1 100); do
+NOTICE_COMPONENT="codex-monitor.$PROJECT_HASH.$(printf '%s' "$SEAT_KEY" | agmsg_sha1)"
+startup_signature=""
+startup_notice() {
+  [ "$startup_signature" != "$1:$2" ] || return 0
+  startup_signature="$1:$2"
+  down_notice_set "$NOTICE_COMPONENT" "$1" "$2" "Check $SEAT_LOG; startup keeps retrying. Cancel this launch to stop it."
+  echo "codex-monitor: $2; see $SEAT_LOG" >&2
+}
+# Only an explicit cancellation stops our own still-running startup child.
+# jobs supplies ownership from this shell, rather than guessing from a PID.
+cancel_startup() {
+  local job_pid
+  for job_pid in $(jobs -pr); do
+    if [ "$job_pid" = "$server_bg" ]; then kill "$server_bg" 2>/dev/null || true; fi
+  done
+  down_notice_clear "$NOTICE_COMPONENT"
+  exit 130
+}
+server_bg=""
+trap cancel_startup INT TERM
+start_app_server
+startup_checks=0
+startup_poll=0.1
+while :; do
+  # A finite observation may fail; the intended resident service stays armed.
+  # The shell-owned PID is local to MSYS on Windows; tasklist cannot prove it dead.
+  if ! _agmsg_pid_alive_local "$server_bg"; then
+    wait "$server_bg" 2>/dev/null || true
+    startup_notice down "Codex app-server exited before readiness; retrying after 5s"
+    sleep 5
+    start_app_server
+    PORT=""
+    startup_checks=0
+    startup_poll=0.1
+    continue
+  fi
   PORT="$(sed -n -e "s/${ansi_esc}\[[0-9;]*m//g" -e 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SEAT_LOG" | head -1)"
-  [ -n "$PORT" ] && break
-  # Stop waiting the moment the app-server exits (e.g. a codex release dropped
-  # `app-server --listen ws://`): no point burning the full timeout before we
-  # fail open.
-  #
-  # _local, deliberately: this pid came from $! in this shell, so it is numbered
-  # in the MSYS pid space, and `tasklist` -- which is what the plain helper asks
-  # under MSYSTEM -- has no record of it. It answered "dead" on the first pass
-  # here, seconds before the banner, and every Windows launch since 1.1.12 fell
-  # back to plain codex with no bridge (#567). Not a bare `kill -0` either: the
-  # EPERM reading still has to hold, or a sandbox that cannot signal our own
-  # child fails us open the same way (#505).
-  _agmsg_pid_alive_local "$server_bg" || break
-  sleep 0.1
+  if [ -n "$PORT" ]; then
+    if port_alive "$PORT"; then break; fi
+    startup_notice degraded "Codex app-server port is not reachable yet; keeping the live server and retrying"
+  fi
+  startup_checks=$((startup_checks + 1))
+  if [ "$startup_checks" -ge 100 ]; then
+    if [ -z "$PORT" ]; then
+      startup_notice degraded "Codex app-server has not reported a listening port yet; keeping the live server and retrying"
+    fi
+    startup_poll=2
+  fi
+  sleep "$startup_poll"
 done
-if [ -z "$PORT" ]; then
-  echo "codex-monitor: app-server did not report a listening port; starting codex without the agmsg bridge" >&2
-  echo "codex-monitor: see $SEAT_LOG" >&2
-  kill "$server_bg" 2>/dev/null || true
-  exec_plain_codex
-fi
-
-if ! port_alive "$PORT"; then
-  echo "codex-monitor: app-server not reachable on ws://127.0.0.1:$PORT; starting codex without the agmsg bridge" >&2
-  echo "codex-monitor: see $SEAT_LOG" >&2
-  kill "$server_bg" 2>/dev/null || true
-  exec_plain_codex
-fi
+down_notice_clear "$NOTICE_COMPONENT"
+trap - INT TERM
 SOCKET_URL="ws://127.0.0.1:$PORT"
 
 # Best-effort: a platform that cannot supply a start witness at all
