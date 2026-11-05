@@ -1,9 +1,9 @@
 import type { RawState } from "./agentStatus";
-import { batchText, hold, INJECT_SETTLE_MS, restore, takeReady, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
+import { batchText, hold, INJECT_SETTLE_MS, restore, takeReady, STARTUP_WAIT_MS, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
 
 export type FlusherDeps = {
-  // Types `text` and Enter into the pane. Resolves once the app accepted the request (pty_inject's ack is the start
-  // of its writer thread, not the end of the write: the Enter follows about 300 ms later).
+  // Types `text` and Enter into the pane. Resolves once the Enter has been written (pty_inject resolves after its
+  // whole text+Enter transaction), so the next write to the pane never starts inside the previous one.
   inject: (paneId: string, text: string) => Promise<unknown>;
   livePanes: () => string[];
   now: () => number;
@@ -11,7 +11,14 @@ export type FlusherDeps = {
   onHeldChange: (queues: Queues) => void;
   // Notices typed although the pane never gave a ready signal; called after the app accepted them.
   onWithoutReadySignal: (count: number) => void;
+  // Typing into a pane failed; `attempt` counts consecutive failures. The notices are kept and tried again later.
+  onInjectFailed: (paneId: string, attempt: number, reason: string) => void;
 };
+
+// Retry delay after consecutive failures: doubles from RETRY_BASE_MS up to RETRY_MAX_MS. It never gives up while
+// the pane is open, and closing the pane drops the notices, which ends the retries.
+export const RETRY_BASE_MS = 1000;
+export const RETRY_MAX_MS = 30_000;
 
 // Feeds app-typed notices into panes: a new pane's first notices wait for its first idle; each pane gets one line
 // per write, and is not written to again until the previous write has settled.
@@ -20,6 +27,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
   const states: Record<string, RawState> = {};
   const released = new Set<string>();
   const busy = new Set<string>();
+  const failures: Record<string, number> = {};
 
   const setQueues = (q: Queues) => {
     if (q === queues) return;
@@ -40,10 +48,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     for (const id of Object.keys(q)) {
       if (busy.has(id)) continue;
       const { send, rest } = takeReady(q, id, released.has(id), states[id], deps.now());
-      if (send.length > 0) {
-        released.add(id);
-        toType.push({ id, sent: send });
-      }
+      if (send.length > 0) toType.push({ id, sent: send });
       q = rest;
     }
     setQueues(q);
@@ -52,17 +57,26 @@ export function createNoticeFlusher(deps: FlusherDeps) {
       deps
         .inject(id, batchText(sent))
         .then(() => {
+          // Only a notice that was actually typed ends the pane's startup hold.
+          released.add(id);
+          delete failures[id];
           const late = sent.filter((n) => n.late).length;
           if (late > 0) deps.onWithoutReadySignal(late);
-        })
-        .catch(() => {
-          if (deps.livePanes().includes(id)) setQueues(restore(queues, id, sent));
-        })
-        .finally(() => {
           deps.setTimer(() => {
             busy.delete(id);
             flush();
           }, INJECT_SETTLE_MS);
+        })
+        .catch((e: unknown) => {
+          const attempt = (failures[id] = (failures[id] ?? 0) + 1);
+          if (deps.livePanes().includes(id)) {
+            setQueues(restore(queues, id, sent));
+            deps.onInjectFailed(id, attempt, String(e));
+          }
+          deps.setTimer(() => {
+            busy.delete(id);
+            flush();
+          }, Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS));
         });
     }
   };
@@ -72,7 +86,10 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     // A notice for `paneId` arrived.
     notice(paneId: string, text: string) {
       setQueues(hold(queues, paneId, text, deps.now()));
-      if (!released.has(paneId)) deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);
+      if (!released.has(paneId)) {
+        deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);
+        deps.setTimer(flush, STARTUP_WAIT_MS + 100);
+      }
       flush();
     },
     // The pane's agent-state changed; read synchronously by the next flush.

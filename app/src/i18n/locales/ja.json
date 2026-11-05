@@ -40,7 +40,7 @@
     },
     "member": {
       "held": "起動中、{{count}} 件待機",
-      "heldTitle": "エージェントの起動が終わるまで通知を保留しています",
+      "heldTitle": "エージェントの起動が終わるまで通知を保留しています(最長10分)",
       "checkboxTitle": "チームルームに表示",
       "titleRunning": "実行中 — クリックしてフォーカス",
       "titleSpawn": "PTYペインで起動",
@@ -164,6 +164,7 @@
     "renameTeam": "チーム「{{from}}」の名前を「{{to}}」に変えました。",
     "deleteTeam": "チーム「{{team}}」を削除しました。",
     "deleteTeamForce": "チーム「{{team}}」を削除しました（メンバー{{count}}人を外しました）。",
+    "noticeInjectFailed": "エージェントの端末へ通知を入力できませんでした({{reason}})。通知は保持し、再試行します。",
     "noticeWithoutReadySignal": "準備完了の合図が無いエージェントへ、{{count}} 件の通知をそのまま届けました。",
     "purgeMessages": "チーム「{{team}}」のメッセージを削除しました。",
     "actionFailed": "失敗しました: {{reason}}"

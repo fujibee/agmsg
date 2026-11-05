@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { batchText, heldCount, hold, restore, takeReady, UNKNOWN_WAIT_MS } from "./noticeQueue";
+import { batchText, heldCount, hold, restore, takeReady, STARTUP_WAIT_MS, UNKNOWN_WAIT_MS } from "./noticeQueue";
 
 describe("noticeQueue", () => {
   it("a fresh pane working through its startup turn holds the notice until its first idle", () => {
@@ -16,10 +16,11 @@ describe("noticeQueue", () => {
     expect(takeReady(q, "p1", false, undefined, 5000).send).toEqual([]);
     expect(UNKNOWN_WAIT_MS).toBe(180_000);
   });
-  it("a working or blocked fresh pane is never cut short, however long it takes", () => {
+  it("a working or blocked fresh pane waits well past the unknown cap, then is typed at the startup cap with the note", () => {
     const q = hold({}, "p1", "n1", 0);
     for (const st of ["working", "blocked"] as const) {
-      expect(takeReady(q, "p1", false, st, UNKNOWN_WAIT_MS * 100).send).toEqual([]);
+      expect(takeReady(q, "p1", false, st, STARTUP_WAIT_MS - 1).send).toEqual([]);
+      expect(takeReady(q, "p1", false, st, STARTUP_WAIT_MS).send.map((x) => x.late)).toEqual([true]);
     }
   });
   it("an unknown or silent fresh pane gets the notice after the cap, flagged as without a ready signal", () => {

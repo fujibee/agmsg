@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createNoticeFlusher } from "./noticeFlusher";
-import { INJECT_SETTLE_MS, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
+import { createNoticeFlusher, RETRY_MAX_MS } from "./noticeFlusher";
+import { INJECT_SETTLE_MS, STARTUP_WAIT_MS, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
 
 type Call = { id: string; text: string; settle: (ok: boolean) => void };
 
 function setup(live = ["p1"]) {
   const calls: Call[] = [];
   const banner: number[] = [];
+  const failed: number[] = [];
   let held: Queues = {};
   const f = createNoticeFlusher({
     inject: (id, text) => new Promise((resolve, reject) => calls.push({ id, text, settle: (ok) => (ok ? resolve(undefined) : reject(new Error("pty"))) })),
@@ -14,9 +15,10 @@ function setup(live = ["p1"]) {
     now: () => Date.now(),
     setTimer: (fn, ms) => void setTimeout(fn, ms),
     onHeldChange: (q) => (held = q),
+    onInjectFailed: (_id, attempt) => failed.push(attempt),
     onWithoutReadySignal: (n) => banner.push(n),
   });
-  return { f, calls, banner, held: () => held };
+  return { f, calls, banner, failed, live, held: () => held };
 }
 
 describe("noticeFlusher", () => {
@@ -61,7 +63,7 @@ describe("noticeFlusher", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(banner).toEqual([]);
     expect(held().p1?.map((h) => h.text)).toEqual(["n1", "n2"]);
-    await vi.advanceTimersByTimeAsync(INJECT_SETTLE_MS);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(calls).toHaveLength(2);
     expect(calls[1].text).toContain("n1");
   });
@@ -78,12 +80,14 @@ describe("noticeFlusher", () => {
     expect(banner).toEqual([1]);
   });
 
-  it("a pane that is working keeps waiting past the unknown cap", async () => {
+  it("a pane that is working keeps waiting past the unknown cap and is typed at the startup cap", async () => {
     const { f, calls } = setup();
     f.state("p1", "working");
     f.notice("p1", "n1");
-    await vi.advanceTimersByTimeAsync(UNKNOWN_WAIT_MS * 10);
+    await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS - 1000);
     expect(calls).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(calls).toHaveLength(1);
   });
 
   it("notices for a pane that has closed are dropped", async () => {
@@ -93,6 +97,64 @@ describe("noticeFlusher", () => {
     live.length = 0;
     f.state("p1", "idle");
     expect(calls).toHaveLength(0);
+    expect(held()).toEqual({});
+  });
+
+  it("a rejected first fallback does not end the startup hold: a later working state keeps the notice held", async () => {
+    const { f, calls } = setup();
+    f.notice("p1", "n1");
+    await vi.advanceTimersByTimeAsync(UNKNOWN_WAIT_MS + 100);
+    expect(calls).toHaveLength(1);
+    calls[0].settle(false);
+    await vi.advanceTimersByTimeAsync(0);
+    f.state("p1", "working");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a successful retry of a fallback still shows the without-ready-signal banner", async () => {
+    const { f, calls, banner } = setup();
+    f.notice("p1", "n1");
+    await vi.advanceTimersByTimeAsync(UNKNOWN_WAIT_MS + 100);
+    calls[0].settle(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(calls).toHaveLength(2);
+    calls[1].settle(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(banner).toEqual([1]);
+  });
+
+  it("with every write rejected, retries back off to a cap, the failure is reported, and closing ends them", async () => {
+    const { f, calls, failed, live } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    for (let i = 0; i < 40; i++) {
+      calls[calls.length - 1].settle(false);
+      await vi.advanceTimersByTimeAsync(RETRY_MAX_MS);
+    }
+    expect(calls.length).toBeGreaterThanOrEqual(40);
+    expect(failed.slice(0, 3)).toEqual([1, 2, 3]);
+    // In 10 s of persistent failure there are only a handful of attempts, not one every 500 ms.
+    const before = calls.length;
+    calls[calls.length - 1].settle(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls.length - before).toBeLessThanOrEqual(1);
+    live.length = 0;
+    calls[calls.length - 1].settle(false);
+    const n = calls.length;
+    await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * 3);
+    expect(calls.length).toBe(n);
+  });
+
+  it("after a rejection the pane recovers once a write succeeds", async () => {
+    const { f, calls, held } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    calls[0].settle(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toHaveLength(2);
+    calls[1].settle(true);
+    await vi.advanceTimersByTimeAsync(0);
     expect(held()).toEqual({});
   });
 });

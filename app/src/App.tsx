@@ -843,6 +843,10 @@ export default function App() {
       now: () => Date.now(),
       setTimer: (fn, ms) => void window.setTimeout(fn, ms),
       onHeldChange: setHeldNotices,
+      onInjectFailed: (_id, attempt, reason) => {
+        // Said once per run of failures; the notices stay held and are retried with a growing delay.
+        if (attempt === 1) pushCompletionNoticeRef.current("error", { key: "toast.noticeInjectFailed", vars: { reason } });
+      },
       onWithoutReadySignal: (count) =>
         pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count } }),
     });

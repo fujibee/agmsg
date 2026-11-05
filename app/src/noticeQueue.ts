@@ -2,10 +2,12 @@ import type { RawState } from "./agentStatus";
 
 // Notices the app types into an agent's terminal. A pane the app has just opened is still working through its
 // startup turn, and a notice typed then is lost. So the first notices for a pane wait for its first Idle. While the
-// pane is working (or blocked on a dialog the user can see) there is no cap: the startup turn ends by itself. When
-// its state is unknown, or never reported, the wait is capped at UNKNOWN_WAIT_MS. After the first delivery (or once
+// pane is working (or blocked on a dialog the user can see) the wait is capped at STARTUP_WAIT_MS; when its state is
+// unknown, or never reported, at UNKNOWN_WAIT_MS. At the cap the notices are typed with a visible note. After the first delivery (or once
 // the pane has been seen idle) notices are typed as they come, whatever the state. Nothing is dropped or refused.
 export const UNKNOWN_WAIT_MS = 180_000;
+// A pane that is working or blocked on a dialog through its startup is given longer, but not without end.
+export const STARTUP_WAIT_MS = 600_000;
 
 export type Held = { text: string; at: number; late?: boolean };
 export type Queues = Record<string, Held[]>;
@@ -16,8 +18,8 @@ export function hold(queues: Queues, paneId: string, text: string, now: number):
 
 // What to type now into `paneId`. `released` = the pane has been seen idle, or has already been given notices.
 //   released or idle -> every held notice.
-//   working / blocked -> nothing.
-//   unknown / no state -> nothing, until the oldest has waited UNKNOWN_WAIT_MS; then every held notice, flagged
+//   otherwise -> nothing, until the oldest has waited UNKNOWN_WAIT_MS (unknown / no state) or STARTUP_WAIT_MS
+//   (working / blocked); then every held notice, flagged
 //   `late` (typed without a ready signal).
 export function takeReady(
   queues: Queues,
@@ -29,7 +31,8 @@ export function takeReady(
   const held = queues[paneId] ?? [];
   if (held.length === 0) return { send: [], rest: queues };
   const ready = released || state === "idle";
-  const timedOut = (state === undefined || state === "unknown") && now - held[0].at >= UNKNOWN_WAIT_MS;
+  const cap = state === undefined || state === "unknown" ? UNKNOWN_WAIT_MS : STARTUP_WAIT_MS;
+  const timedOut = now - held[0].at >= cap;
   if (!ready && !timedOut) return { send: [], rest: queues };
   const rest = { ...queues };
   delete rest[paneId];

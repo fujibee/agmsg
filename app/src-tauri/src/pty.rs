@@ -47,6 +47,13 @@ struct PtySession {
 #[derive(Default)]
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    /// One lock per pane id: an injection (text, gap, Enter) holds it for the whole transaction, so two
+    /// injections into one pane can never interleave, whatever order the workers run in.
+    inject_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+}
+
+fn pane_lock(locks: &Mutex<HashMap<String, Arc<Mutex<()>>>>, id: &str) -> Arc<Mutex<()>> {
+    Arc::clone(locks.lock().unwrap().entry(id.to_string()).or_default())
 }
 
 impl PtyManager {
@@ -369,27 +376,39 @@ fn outer_terminal_vars(names: impl IntoIterator<Item = String>) -> Vec<String> {
 /// paste (the trailing newline is swallowed as pasted content rather than
 /// submitting), so the Enter is held back a beat after the text — long
 /// enough that the agent's input parser has processed the text as typed
-/// input first. Runs on a background thread so the ~300ms gap doesn't block
-/// the Tauri command handler.
+/// input first. The gap runs on a blocking worker so it does not hold the
+/// Tauri command handler, and the command resolves only once the Enter has
+/// been written: the caller can serialise whole text+Enter transactions on
+/// one pane by waiting for it.
 #[tauri::command]
-pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> Result<(), String> {
-    // Fail fast, synchronously, if the pane is already gone.
+pub async fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> Result<(), String> {
+    // Fail fast if the pane is already gone.
     if !manager.sessions.lock().unwrap().contains_key(&id) {
         return Err("no such pty session".to_string());
     }
     let sessions = Arc::clone(&manager.sessions);
-    thread::spawn(move || {
-        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
-            let _ = s.writer.write_all(text.as_bytes());
-            let _ = s.writer.flush();
+    let lock = pane_lock(&manager.inject_locks, &id);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _transaction = lock.lock().unwrap();
+        match sessions.lock().unwrap().get_mut(&id) {
+            Some(s) => {
+                let _ = s.writer.write_all(text.as_bytes());
+                let _ = s.writer.flush();
+            }
+            None => return Err("no such pty session".to_string()),
         }
         thread::sleep(Duration::from_millis(300));
-        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
-            let _ = s.writer.write_all(b"\r");
-            let _ = s.writer.flush();
+        match sessions.lock().unwrap().get_mut(&id) {
+            Some(s) => {
+                let _ = s.writer.write_all(b"\r");
+                let _ = s.writer.flush();
+                Ok(())
+            }
+            None => Err("no such pty session".to_string()),
         }
-    });
-    Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -402,6 +421,31 @@ mod tests {
     }
 
     use super::windows_shell_argv;
+
+    #[test]
+    fn two_injections_into_one_pane_never_interleave_even_when_the_first_is_slow() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        let locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>> = Default::default();
+        let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let run = |text: &'static str, enter: &'static str, gap_ms: u64| {
+            let lock = super::pane_lock(&locks, "p1");
+            let log = Arc::clone(&log);
+            move || {
+                let _t = lock.lock().unwrap();
+                log.lock().unwrap().push(text);
+                std::thread::sleep(Duration::from_millis(gap_ms));
+                log.lock().unwrap().push(enter);
+            }
+        };
+        // The first writer's gap (700 ms) is longer than any settle delay the caller uses.
+        let a = std::thread::spawn(run("text1", "enter1", 700));
+        std::thread::sleep(Duration::from_millis(50));
+        let b = std::thread::spawn(run("text2", "enter2", 10));
+        a.join().unwrap();
+        b.join().unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["text1", "enter1", "text2", "enter2"]);
+    }
 
     #[test]
     fn wraps_the_agent_name_through_cmd_slash_c() {
