@@ -368,6 +368,20 @@ fn outer_terminal_vars(names: impl IntoIterator<Item = String>) -> Vec<String> {
     names.into_iter().filter(|n| n.starts_with("HERDR_") || OUTER_SESSION_VARS.contains(&n.as_str())).collect()
 }
 
+/// One injection: under the pane's lock, write the text, wait `gap`, write Enter. Any write or flush error ends the
+/// transaction with that error, so a dead terminal is never reported as delivered.
+fn inject_transaction(
+    lock: &Mutex<()>,
+    gap: Duration,
+    text: &[u8],
+    mut write: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let _transaction = lock.lock().unwrap();
+    write(text)?;
+    thread::sleep(gap);
+    write(b"\r")
+}
+
 /// Inject `text` (then Enter) into the agent's stdin — the universal,
 /// agent-agnostic agmsg delivery. No idle wait before writing the text; see
 /// the module doc comment for why waiting for quiescence was worse than not
@@ -389,23 +403,16 @@ pub async fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String
     let sessions = Arc::clone(&manager.sessions);
     let lock = pane_lock(&manager.inject_locks, &id);
     tauri::async_runtime::spawn_blocking(move || {
-        let _transaction = lock.lock().unwrap();
-        match sessions.lock().unwrap().get_mut(&id) {
-            Some(s) => {
-                let _ = s.writer.write_all(text.as_bytes());
-                let _ = s.writer.flush();
+        inject_transaction(&lock, Duration::from_millis(300), text.as_bytes(), |bytes| {
+            match sessions.lock().unwrap().get_mut(&id) {
+                Some(s) => s
+                    .writer
+                    .write_all(bytes)
+                    .and_then(|_| s.writer.flush())
+                    .map_err(|e| format!("could not write to the terminal: {e}")),
+                None => Err("no such pty session".to_string()),
             }
-            None => return Err("no such pty session".to_string()),
-        }
-        thread::sleep(Duration::from_millis(300));
-        match sessions.lock().unwrap().get_mut(&id) {
-            Some(s) => {
-                let _ = s.writer.write_all(b"\r");
-                let _ = s.writer.flush();
-                Ok(())
-            }
-            None => Err("no such pty session".to_string()),
-        }
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -427,24 +434,49 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
         let locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>> = Default::default();
-        let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
-        let run = |text: &'static str, enter: &'static str, gap_ms: u64| {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let run = |text: &'static str, gap_ms: u64| {
             let lock = super::pane_lock(&locks, "p1");
             let log = Arc::clone(&log);
             move || {
-                let _t = lock.lock().unwrap();
-                log.lock().unwrap().push(text);
-                std::thread::sleep(Duration::from_millis(gap_ms));
-                log.lock().unwrap().push(enter);
+                super::inject_transaction(&lock, Duration::from_millis(gap_ms), text.as_bytes(), |b| {
+                    log.lock().unwrap().push(String::from_utf8_lossy(b).into_owned());
+                    Ok(())
+                })
+                .unwrap()
             }
         };
         // The first writer's gap (700 ms) is longer than any settle delay the caller uses.
-        let a = std::thread::spawn(run("text1", "enter1", 700));
+        let a = std::thread::spawn(run("text1", 700));
         std::thread::sleep(Duration::from_millis(50));
-        let b = std::thread::spawn(run("text2", "enter2", 10));
+        let b = std::thread::spawn(run("text2", 10));
         a.join().unwrap();
         b.join().unwrap();
-        assert_eq!(*log.lock().unwrap(), vec!["text1", "enter1", "text2", "enter2"]);
+        assert_eq!(*log.lock().unwrap(), vec!["text1", "\r", "text2", "\r"]);
+    }
+
+    #[test]
+    fn a_failed_text_or_enter_write_fails_the_injection() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+        let lock = Mutex::new(());
+        // Text write fails: Err, and Enter is never attempted.
+        let mut calls = 0;
+        let r = super::inject_transaction(&lock, Duration::ZERO, b"x", |_| {
+            calls += 1;
+            Err("broken pipe".to_string())
+        });
+        assert_eq!(r, Err("broken pipe".to_string()));
+        assert_eq!(calls, 1);
+        // Text goes through, the Enter write fails: still Err.
+        let mut n = 0;
+        let r = super::inject_transaction(&lock, Duration::ZERO, b"x", |_| {
+            n += 1;
+            if n == 2 { Err("flush failed".to_string()) } else { Ok(()) }
+        });
+        assert_eq!(r, Err("flush failed".to_string()));
+        // The lock is released after a failure.
+        assert!(lock.try_lock().is_ok());
     }
 
     #[test]
