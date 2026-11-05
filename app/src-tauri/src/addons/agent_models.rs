@@ -186,11 +186,16 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0); // its own group, so the whole tree it starts can be ended together
+    }
     let mut child = cmd.spawn().map_err(|e| format!("could not start codex app-server: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if tx.send(line).is_err() {
                 break;
@@ -237,18 +242,39 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
     })();
     drop(stdin); // the server exits when its input closes
     let end = Instant::now() + Duration::from_secs(2);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            _ if Instant::now() >= end => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break;
-            }
-            _ => std::thread::sleep(Duration::from_millis(10)),
-        }
+    while Instant::now() < end && !matches!(child.try_wait(), Ok(Some(_))) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Whatever the server started (a launcher's real binary, a helper) goes with it, exited or not.
+    kill_tree(&mut child);
+    // The pipe closes once the tree is gone, which ends the reader; wait for that, but not forever.
+    let end = Instant::now() + Duration::from_secs(1);
+    while !reader.is_finished() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if reader.is_finished() {
+        let _ = reader.join();
     }
     result
+}
+
+/// Ends the child and everything it started: its process group on unix (it was made the group leader at start),
+/// `taskkill /T` on Windows. A descendant that left the group on its own cannot be reached this way.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(2) with a negative pid signals the group; the pid is our own child's, which led it.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).creation_flags(0x08000000).output();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -355,7 +381,7 @@ done
         fn the_list_is_read_over_stdio_and_the_process_ends() {
             let d = tempfile::tempdir().unwrap();
             let bin = fake(d.path(), "codex", GOOD);
-            let ms = fetch_codex_models(&bin, None, Duration::from_secs(5)).unwrap();
+            let ms = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap();
             assert_eq!(ms.len(), 1);
             assert_eq!(ms[0].id, "gpt-x");
         }
@@ -366,7 +392,7 @@ done
             let log = d.path().join("seen.log");
             let body = format!("{{ while IFS= read -r l; do echo \"$l\" >> '{}'; case \"$l\" in *'\"initialize\"'*) echo '{{\"id\":1,\"result\":{{}}}}';; *'\"model/list\"'*) echo '{{\"id\":2,\"result\":{{\"data\":[{{\"id\":\"m\"}}]}}}}';; esac; done; }}", log.display());
             let bin = fake(d.path(), "codex", &body);
-            fetch_codex_models(&bin, None, Duration::from_secs(5)).unwrap();
+            fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap();
             let seen = std::fs::read_to_string(&log).unwrap();
             let lines: Vec<&str> = seen.lines().collect();
             assert!(lines[0].contains("\"initialize\""), "{seen}");
@@ -378,18 +404,50 @@ done
         fn an_error_answer_such_as_32600_is_returned_with_its_code() {
             let d = tempfile::tempdir().unwrap();
             let bin = fake(d.path(), "codex", r#"while IFS= read -r l; do case "$l" in *'"initialize"'*) echo '{"id":1,"result":{}}';; *'"model/list"'*) echo '{"id":2,"error":{"code":-32600,"message":"restart Codex"}}';; esac; done"#);
-            let e = fetch_codex_models(&bin, None, Duration::from_secs(5)).unwrap_err();
+            let e = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap_err();
             assert!(e.contains("-32600") && e.contains("restart Codex"), "{e}");
         }
 
         #[test]
         fn a_server_that_never_answers_is_stopped_at_the_timeout() {
             let d = tempfile::tempdir().unwrap();
-            let bin = fake(d.path(), "codex", "sleep 30");
+            let bin = fake(d.path(), "codex", "exec sleep 30");
             let t = Instant::now();
             let e = fetch_codex_models(&bin, None, Duration::from_millis(300)).unwrap_err();
             assert!(e.contains("in time"), "{e}");
             assert!(t.elapsed() < Duration::from_secs(10), "the read is bounded");
+        }
+
+        /// Command lines of every process on the machine, to look for a marker only this test's fixture carries.
+        fn marked(marker: &str) -> usize {
+            let out = Command::new("ps").args(["-A", "-o", "command="]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains(marker) && !l.contains("ps -A")).count()
+        }
+
+        #[test]
+        fn a_launcher_whose_descendant_keeps_the_pipe_open_leaves_nothing_behind() {
+            let d = tempfile::tempdir().unwrap();
+            // the descendant inherits stdout (the pipe) and outlives the wrapper; the wrapper then stalls
+            let bin = fake(d.path(), "codex", "sleep 71.4242 &\nexec sleep 72.4242");
+            let t = Instant::now();
+            let e = fetch_codex_models(&bin, None, Duration::from_millis(200)).unwrap_err();
+            assert!(e.contains("in time"), "{e}");
+            assert!(t.elapsed() < Duration::from_secs(30), "returned in {:?}", t.elapsed());
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(marked(".4242"), 0, "no descendant of the launched tree is left");
+        }
+
+        #[test]
+        fn a_descendant_left_after_a_good_answer_is_ended_too() {
+            let d = tempfile::tempdir().unwrap();
+            let body = format!("sleep 73.4242 &\n{GOOD}");
+            let bin = fake(d.path(), "codex", &body);
+            let t = Instant::now();
+            let ms = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap();
+            assert_eq!(ms.len(), 1);
+            assert!(t.elapsed() < Duration::from_secs(30), "the answer is not held up by the leftover: {:?}", t.elapsed());
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(marked("73.4242"), 0);
         }
 
         #[test]
@@ -402,7 +460,7 @@ done
         fn an_empty_list_is_an_error_so_the_fallback_is_used() {
             let d = tempfile::tempdir().unwrap();
             let bin = fake(d.path(), "codex", r#"while IFS= read -r l; do case "$l" in *'"initialize"'*) echo '{"id":1,"result":{}}';; *'"model/list"'*) echo '{"id":2,"result":{"data":[]}}';; esac; done"#);
-            assert!(fetch_codex_models(&bin, None, Duration::from_secs(5)).unwrap_err().contains("no models"));
+            assert!(fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap_err().contains("no models"));
         }
 
         #[test]

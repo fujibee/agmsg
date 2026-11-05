@@ -60,6 +60,10 @@ tempfile = "3"
 # the tests that mutate it so they don't race under the default parallel runner.
 serial_test = "3"
 
+# Ends the process group a short-lived child (codex app-server) was started in.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Engine hardening (WKPreferences) for add-on panes.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
