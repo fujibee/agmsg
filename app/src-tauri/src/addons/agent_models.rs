@@ -180,6 +180,10 @@ const GRACE: Duration = Duration::from_millis(300);
 const MAX_LINE: usize = 1 << 20;
 /// Lines waiting for the caller at most; the reader blocks (it does not grow memory) when the caller is behind.
 const QUEUE_LINES: usize = 64;
+/// The longest page cursor followed. A cursor is sent back to the server in the next request, and the server may
+/// have stopped reading by then; a request of at most this plus a few hundred bytes cannot fill a pipe (4 KiB is the
+/// smallest pipe buffer on the supported systems), so the write cannot block. A longer cursor is an error.
+const MAX_CURSOR: usize = 2048;
 const TIMED_OUT: &str = "codex app-server did not answer in time";
 
 enum Line {
@@ -214,12 +218,13 @@ impl OwnedTree {
         }
     }
 
-    fn kill(self, child: &mut std::process::Child) {
+    fn kill(self, child: &mut std::process::Child, cleanup_end: Instant) {
         #[cfg(unix)]
         {
             // SAFETY: kill(2) with a negative pid signals the group the child led. The group exists while any
             // member lives, so its id is not reused for another group meanwhile; this runs within milliseconds of
             // the child being reaped.
+            let _ = cleanup_end;
             unsafe {
                 libc::kill(-self.pgid, libc::SIGKILL);
             }
@@ -228,7 +233,7 @@ impl OwnedTree {
         {
             match self.job {
                 Some(j) => drop(j), // closing the job kills every member
-                None => taskkill_bounded(self.pid, Duration::from_millis(1000)),
+                None => taskkill_bounded(self.pid, cleanup_end.saturating_duration_since(Instant::now()).min(Duration::from_millis(1000))),
             }
         }
         let _ = child.kill();
@@ -359,8 +364,15 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
                 return v.get("result").cloned().ok_or_else(|| "the answer has no result".to_string());
             }
         };
-        // The requests are a few hundred bytes, far below a pipe's buffer, so these writes do not block.
-        let send = |stdin: &mut std::process::ChildStdin, s: String| stdin.write_all(s.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("codex app-server closed its input: {e}"));
+        // A request is sent only after the previous one was answered (so the pipe is empty) and is at most a few
+        // hundred bytes plus a cursor of at most MAX_CURSOR, far below any pipe's buffer: the write cannot block
+        // on a server that stopped reading. The deadline is checked before every send.
+        let send = |stdin: &mut std::process::ChildStdin, s: String| {
+            if Instant::now() >= deadline {
+                return Err(TIMED_OUT.to_string());
+            }
+            stdin.write_all(s.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("codex app-server closed its input: {e}"))
+        };
         send(&mut stdin, rpc(1, "initialize", json!({ "clientInfo": { "name": "agmsg-app", "title": "agmsg", "version": env!("CARGO_PKG_VERSION") } })))?;
         wait_for(1)?;
         send(&mut stdin, format!("{}\n", json!({ "method": "initialized" })))?;
@@ -368,6 +380,9 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
         let mut cursor: Option<String> = None;
         for page in 0..MAX_PAGES {
             let id = 2 + page as u64;
+            if cursor.as_deref().is_some_and(|c| c.len() > MAX_CURSOR) {
+                return Err(format!("the server's page cursor is longer than {MAX_CURSOR} bytes; not following it"));
+            }
             send(&mut stdin, rpc(id, "model/list", json!({ "includeHidden": false, "cursor": cursor })))?;
             let (mut got, next) = parse_model_page(&wait_for(id)?)?;
             models.append(&mut got);
@@ -387,16 +402,17 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
         }
         Ok(models)
     })();
-    // Cleanup, every path: close the input, give the server a moment to exit, end the whole tree, let the reader finish.
+    // Cleanup, every path, inside one absolute deadline: close the input, give the server a moment to exit, end the
+    // whole tree, let the reader finish.
+    let cleanup_end = Instant::now() + CLEANUP_ALLOWANCE;
     drop(stdin);
-    let end = Instant::now() + GRACE;
-    while Instant::now() < end && !matches!(child.try_wait(), Ok(Some(_))) {
+    let grace_end = (Instant::now() + GRACE).min(cleanup_end);
+    while Instant::now() < grace_end && !matches!(child.try_wait(), Ok(Some(_))) {
         std::thread::sleep(Duration::from_millis(10));
     }
-    tree.kill(&mut child);
+    tree.kill(&mut child, cleanup_end);
     drop(rx); // a reader blocked on a full queue is released
-    let end = Instant::now() + (CLEANUP_ALLOWANCE - GRACE);
-    while !reader.is_finished() && Instant::now() < end {
+    while !reader.is_finished() && Instant::now() < cleanup_end {
         std::thread::sleep(Duration::from_millis(5));
     }
     if reader.is_finished() {
@@ -623,6 +639,29 @@ done
             let bin = fake(d.path(), "codex", r#"IFS= read -r l; head -c 3000000 /dev/zero | tr '\0' x; echo; sleep 5"#);
             let e = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap_err();
             assert!(e.contains("over"), "{e}");
+        }
+
+        #[test]
+        fn a_huge_cursor_and_a_server_that_stopped_reading_cannot_block_the_call() {
+            let d = tempfile::tempdir().unwrap();
+            let m = unique("75");
+            let body = format!(
+                r#"IFS= read -r l
+echo '{{"id":1,"result":{{}}}}'
+IFS= read -r l
+IFS= read -r l
+c=$(head -c 200000 /dev/zero | tr '\0' a)
+echo '{{"id":2,"result":{{"data":[{{"id":"m"}}],"nextCursor":"'"$c"'"}}}}'
+exec sleep {m}"#
+            );
+            let bin = fake(d.path(), "codex", &body);
+            let t = Instant::now();
+            let timeout = Duration::from_secs(3);
+            let e = fetch_codex_models(&bin, None, timeout).unwrap_err();
+            assert!(e.contains("cursor"), "{e}");
+            assert!(t.elapsed() < timeout + CLEANUP_ALLOWANCE + Duration::from_secs(1), "returned in {:?}", t.elapsed());
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(marked(&m), 0, "the stalled server is ended");
         }
 
         #[test]
