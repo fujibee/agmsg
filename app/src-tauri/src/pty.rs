@@ -368,6 +368,11 @@ fn outer_terminal_vars(names: impl IntoIterator<Item = String>) -> Vec<String> {
     names.into_iter().filter(|n| n.starts_with("HERDR_") || OUTER_SESSION_VARS.contains(&n.as_str())).collect()
 }
 
+/// Write `bytes` and flush; either failing is an error.
+fn write_and_flush(w: &mut dyn Write, bytes: &[u8]) -> Result<(), String> {
+    w.write_all(bytes).and_then(|_| w.flush()).map_err(|e| format!("could not write to the terminal: {e}"))
+}
+
 /// One injection: under the pane's lock, write the text, wait `gap`, write Enter. Any write or flush error ends the
 /// transaction with that error, so a dead terminal is never reported as delivered.
 fn inject_transaction(
@@ -405,11 +410,7 @@ pub async fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String
     tauri::async_runtime::spawn_blocking(move || {
         inject_transaction(&lock, Duration::from_millis(300), text.as_bytes(), |bytes| {
             match sessions.lock().unwrap().get_mut(&id) {
-                Some(s) => s
-                    .writer
-                    .write_all(bytes)
-                    .and_then(|_| s.writer.flush())
-                    .map_err(|e| format!("could not write to the terminal: {e}")),
+                Some(s) => write_and_flush(&mut s.writer, bytes),
                 None => Err("no such pty session".to_string()),
             }
         })
@@ -453,6 +454,47 @@ mod tests {
         a.join().unwrap();
         b.join().unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["text1", "\r", "text2", "\r"]);
+    }
+
+    /// A terminal whose writes are accepted but whose flushes fail from the `fail_from`-th flush on.
+    struct FlushFails {
+        flushes: usize,
+        fail_from: usize,
+        written: Vec<u8>,
+    }
+    impl std::io::Write for FlushFails {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flushes >= self.fail_from {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn a_flush_error_alone_fails_the_injection_for_the_text_and_for_the_enter() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+        let lock = Mutex::new(());
+        // Only the text's flush fails: Err, and the Enter is never written.
+        let mut w = FlushFails { flushes: 0, fail_from: 1, written: vec![] };
+        let r = super::inject_transaction(&lock, Duration::ZERO, b"hi", |b| super::write_and_flush(&mut w, b));
+        assert!(r.unwrap_err().contains("pipe closed"));
+        assert_eq!(w.written, b"hi");
+        // The text's flush works, only the Enter's fails.
+        let mut w = FlushFails { flushes: 0, fail_from: 2, written: vec![] };
+        let r = super::inject_transaction(&lock, Duration::ZERO, b"hi", |b| super::write_and_flush(&mut w, b));
+        assert!(r.unwrap_err().contains("pipe closed"));
+        assert_eq!(w.written, b"hi\r");
+        // Nothing failing: Ok.
+        let mut w = FlushFails { flushes: 0, fail_from: usize::MAX, written: vec![] };
+        assert!(super::inject_transaction(&lock, Duration::ZERO, b"hi", |b| super::write_and_flush(&mut w, b)).is_ok());
     }
 
     #[test]
