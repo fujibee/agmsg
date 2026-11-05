@@ -1,43 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { heldCount, hold, takeReady, UNKNOWN_WAIT_MS } from "./noticeQueue";
+import { batchText, heldCount, hold, restore, takeReady, UNKNOWN_WAIT_MS } from "./noticeQueue";
 
 describe("noticeQueue", () => {
-  it("a notice typed while the pane is working is held, then delivered when it goes idle", () => {
+  it("a fresh pane working through its startup turn holds the notice until its first idle", () => {
     const q = hold({}, "p1", "n1", 0);
-    const w = takeReady(q, "p1", "working", 1000);
+    const w = takeReady(q, "p1", false, "working", 1000);
     expect(w.send).toEqual([]);
     expect(heldCount(w.rest, "p1")).toBe(1);
-    const i = takeReady(w.rest, "p1", "idle", 2000);
+    const i = takeReady(w.rest, "p1", false, "idle", 2000);
     expect(i.send.map((s) => [s.text, s.late])).toEqual([["n1", false]]);
     expect(heldCount(i.rest, "p1")).toBe(0);
   });
-  it("a fresh pane (no state yet) waits for its first idle", () => {
+  it("a pane with no state yet waits for its first idle", () => {
     const q = hold({}, "p1", "n1", 0);
-    expect(takeReady(q, "p1", undefined, 5000).send).toEqual([]);
-    expect(takeReady(q, "p1", "idle", 5000).send).toHaveLength(1);
+    expect(takeReady(q, "p1", false, undefined, 5000).send).toEqual([]);
   });
-  it("a blocked pane keeps its notices and the count is visible", () => {
-    let q = hold({}, "p1", "n1", 0);
-    q = hold(q, "p1", "n2", 1);
-    const r = takeReady(q, "p1", "blocked", UNKNOWN_WAIT_MS * 10);
-    expect(r.send).toEqual([]);
-    expect(heldCount(r.rest, "p1")).toBe(2);
-  });
-  it("an unknown pane gets the notice after the wait, flagged as without a ready signal", () => {
+  it("the wait is bounded: after the limit the notice is typed with the without-ready-signal flag", () => {
     const q = hold({}, "p1", "n1", 0);
-    expect(takeReady(q, "p1", "unknown", UNKNOWN_WAIT_MS - 1).send).toEqual([]);
-    const r = takeReady(q, "p1", "unknown", UNKNOWN_WAIT_MS);
+    expect(takeReady(q, "p1", false, "blocked", UNKNOWN_WAIT_MS - 1).send).toEqual([]);
+    const r = takeReady(q, "p1", false, "blocked", UNKNOWN_WAIT_MS);
     expect(r.send.map((s) => [s.text, s.late])).toEqual([["n1", true]]);
     expect(heldCount(r.rest, "p1")).toBe(0);
   });
-  it("a working pane is never fed by the timeout", () => {
+  it("once released, notices go out at once whatever the state", () => {
     const q = hold({}, "p1", "n1", 0);
-    expect(takeReady(q, "p1", "working", UNKNOWN_WAIT_MS * 10).send).toEqual([]);
+    for (const st of ["working", "blocked", "unknown", undefined] as const) {
+      expect(takeReady(q, "p1", true, st, 1).send.map((s) => s.late)).toEqual([false]);
+    }
   });
   it("panes are independent", () => {
     const q = hold(hold({}, "a", "x", 0), "b", "y", 0);
-    const r = takeReady(q, "a", "idle", 1);
+    const r = takeReady(q, "a", false, "idle", 1);
     expect(r.send).toHaveLength(1);
     expect(heldCount(r.rest, "b")).toBe(1);
+  });
+  it("two ready notices become one submission, so no second write can interleave with the first", () => {
+    const q = hold(hold({}, "p1", "n1", 0), "p1", "n2", 1);
+    const r = takeReady(q, "p1", false, "idle", 2);
+    expect(r.send).toHaveLength(2);
+    const text = batchText(r.send);
+    expect(text.startsWith("n1")).toBe(true);
+    expect(text).toContain("+1 more");
+    expect(text).not.toContain("n2");
+    expect(batchText([{ text: "solo" }])).toBe("solo");
+  });
+  it("notices whose typing was rejected go back to the front of the pane's queue, in order", () => {
+    const q = hold(hold({}, "p1", "n1", 0), "p1", "n2", 1);
+    const r = takeReady(q, "p1", false, "idle", 2);
+    const later = hold(r.rest, "p1", "n3", 3);
+    const back = restore(later, "p1", r.send);
+    expect(back.p1.map((h) => h.text)).toEqual(["n1", "n2", "n3"]);
+    expect(takeReady(back, "p1", true, "working", 4).send).toHaveLength(3);
   });
 });

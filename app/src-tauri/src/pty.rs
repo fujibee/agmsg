@@ -342,7 +342,7 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
 /// started in an app terminal that inherits them believes it is a child of that session: CLAUDE_CODE_CHILD_SESSION
 /// turns its transcript saving off, and the others tie it to the outer session's id, socket and token. User
 /// configuration (CLAUDE_CONFIG_DIR, API keys, model settings) is not listed and is passed through.
-const OUTER_SESSION_VARS: [&str; 10] = [
+const OUTER_SESSION_VARS: [&str; 11] = [
     "TMUX",
     "TMUX_PANE",
     "ORCA_TERMINAL_HANDLE",
@@ -353,6 +353,7 @@ const OUTER_SESSION_VARS: [&str; 10] = [
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_ENTRYPOINT",
 ];
 
 /// The names, among `names`, that identify the terminal the app itself runs in.
@@ -395,9 +396,9 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
 mod tests {
     #[test]
     fn variables_of_the_outer_terminal_are_not_passed_to_the_child() {
-        let names = ["PATH", "HOME", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV", "TMUX", "TMUX_PANE", "ORCA_TERMINAL_HANDLE", "TMUXINATOR", "TERM", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "ANTHROPIC_API_KEY"];
+        let names = ["PATH", "HOME", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV", "TMUX", "TMUX_PANE", "ORCA_TERMINAL_HANDLE", "TMUXINATOR", "TERM", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "ANTHROPIC_API_KEY"];
         let got = super::outer_terminal_vars(names.iter().map(|s| s.to_string()));
-        assert_eq!(got, vec!["HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV", "TMUX", "TMUX_PANE", "ORCA_TERMINAL_HANDLE", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH"]);
+        assert_eq!(got, vec!["HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV", "TMUX", "TMUX_PANE", "ORCA_TERMINAL_HANDLE", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_ENTRYPOINT"]);
     }
 
     use super::windows_shell_argv;

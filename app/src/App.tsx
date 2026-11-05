@@ -22,7 +22,7 @@ import { useOpenRequests } from "./addons/useOpenRequests";
 import { useOpenRequestsSetting } from "./addons/openRequestsSetting";
 import { useAddonCatalog } from "./addons/catalog";
 import { mockOpenView, mockSnapshot } from "./addons/mock";
-import { heldCount, hold, takeReady, type Queues } from "./noticeQueue";
+import { batchText, heldCount, hold, INJECT_SETTLE_MS, restore, takeReady, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
@@ -835,6 +835,9 @@ export default function App() {
   // twin only drives the held count shown next to the agent.
   const paneStatusRef = useRef<PaneStatusMap>({});
   const noticeQueuesRef = useRef<Queues>({});
+  const noticeBusyRef = useRef<Set<string>>(new Set());
+  const noticeReleasedRef = useRef<Set<string>>(new Set());
+  const flushNoticesRef = useRef<() => void>(() => {});
   const [heldNotices, setHeldNotices] = useState<Queues>({});
   const flushNotices = useCallback(() => {
     let queues = noticeQueuesRef.current;
@@ -845,12 +848,13 @@ export default function App() {
         delete queues[id];
       }
     }
-    let late = 0;
+    const toType: Array<{ id: string; sent: ReturnType<typeof takeReady>["send"] }> = [];
     for (const id of Object.keys(queues)) {
-      const { send, rest } = takeReady(queues, id, paneStatusRef.current[id]?.state, Date.now());
-      for (const n of send) {
-        void invoke("pty_inject", { id, text: n.text });
-        if (n.late) late += 1;
+      if (noticeBusyRef.current.has(id)) continue;
+      const { send, rest } = takeReady(queues, id, noticeReleasedRef.current.has(id), paneStatusRef.current[id]?.state, Date.now());
+      if (send.length > 0) {
+        noticeReleasedRef.current.add(id);
+        toType.push({ id, sent: send });
       }
       queues = rest;
     }
@@ -858,9 +862,31 @@ export default function App() {
       noticeQueuesRef.current = queues;
       setHeldNotices(queues);
     }
-    if (late > 0) pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count: late } });
+    // One submission per pane; the queue only forgets a notice once the app accepted it, and the pane is not
+    // written to again until the previous write has finished.
+    for (const { id, sent } of toType) {
+      noticeBusyRef.current.add(id);
+      invoke("pty_inject", { id, text: batchText(sent) })
+        .then(() => {
+          const late = sent.filter((n) => n.late).length;
+          if (late > 0) pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count: late } });
+        })
+        .catch(() => {
+          if (!panesRef.current.some((p) => p.id === id)) return;
+          noticeQueuesRef.current = restore(noticeQueuesRef.current, id, sent);
+          setHeldNotices(noticeQueuesRef.current);
+        })
+        .finally(() =>
+          window.setTimeout(() => {
+            noticeBusyRef.current.delete(id);
+            flushNoticesRef.current();
+          }, INJECT_SETTLE_MS),
+        );
+    }
   }, []);
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    paneStatusRef.current = applyStateChange(paneStatusRef.current, paneId, state);
+    if (state === "idle") noticeReleasedRef.current.add(paneId);
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
 
@@ -1191,6 +1217,8 @@ export default function App() {
         const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
         noticeQueuesRef.current = hold(noticeQueuesRef.current, pane.id, kickoff, Date.now());
         setHeldNotices(noticeQueuesRef.current);
+        // One timeout per held burst bounds the wait for a pane's first idle.
+        if (!noticeReleasedRef.current.has(pane.id)) window.setTimeout(flushNotices, UNKNOWN_WAIT_MS + 100);
         flushNotices();
       }
     });
@@ -1202,10 +1230,7 @@ export default function App() {
   useEffect(() => {
     flushNotices();
   }, [paneStatus, flushNotices]);
-  useEffect(() => {
-    const timer = window.setInterval(flushNotices, 5000);
-    return () => window.clearInterval(timer);
-  }, [flushNotices]);
+  flushNoticesRef.current = flushNotices;
 
   useEffect(() => {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
