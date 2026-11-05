@@ -22,6 +22,7 @@ import { useOpenRequests } from "./addons/useOpenRequests";
 import { useOpenRequestsSetting } from "./addons/openRequestsSetting";
 import { useAddonCatalog } from "./addons/catalog";
 import { mockOpenView, mockSnapshot } from "./addons/mock";
+import { heldCount, hold, takeReady, type Queues } from "./noticeQueue";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
@@ -569,6 +570,8 @@ export default function App() {
     },
     [t],
   );
+  const pushCompletionNoticeRef = useRef<(kind: "success" | "error", spec: ToastSpec) => void>(() => {});
+  pushCompletionNoticeRef.current = pushCompletionNotice;
   useEffect(() => {
     if (!completionNotice || completionNotice.kind !== "success") return;
     const timer = window.setTimeout(() => {
@@ -828,6 +831,35 @@ export default function App() {
   // suppress in different ways (see shouldSuppressClickAfterDrag's own doc
   // and git history; review, PR #481, rounds 2 and 3).
   const dragJustFinishedRef = useRef<DragFinishInfo>(null);
+  // Notices wait for a pane to be ready for input (see noticeQueue.ts). The ref is what the flush reads; the state
+  // twin only drives the held count shown next to the agent.
+  const paneStatusRef = useRef<PaneStatusMap>({});
+  const noticeQueuesRef = useRef<Queues>({});
+  const [heldNotices, setHeldNotices] = useState<Queues>({});
+  const flushNotices = useCallback(() => {
+    let queues = noticeQueuesRef.current;
+    const live = new Set(panesRef.current.map((p) => p.id));
+    for (const id of Object.keys(queues)) {
+      if (!live.has(id)) {
+        queues = { ...queues };
+        delete queues[id];
+      }
+    }
+    let late = 0;
+    for (const id of Object.keys(queues)) {
+      const { send, rest } = takeReady(queues, id, paneStatusRef.current[id]?.state, Date.now());
+      for (const n of send) {
+        void invoke("pty_inject", { id, text: n.text });
+        if (n.late) late += 1;
+      }
+      queues = rest;
+    }
+    if (queues !== noticeQueuesRef.current) {
+      noticeQueuesRef.current = queues;
+      setHeldNotices(queues);
+    }
+    if (late > 0) pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count: late } });
+  }, []);
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -1157,11 +1189,23 @@ export default function App() {
         const flat = e.payload.body.replace(/\s+/g, " ").trim();
         const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
         const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
-        void invoke("pty_inject", { id: pane.id, text: kickoff });
+        noticeQueuesRef.current = hold(noticeQueuesRef.current, pane.id, kickoff, Date.now());
+        setHeldNotices(noticeQueuesRef.current);
+        flushNotices();
       }
     });
     return () => void p.then((u) => u());
-  }, [team, cmdName]);
+  }, [team, cmdName, flushNotices]);
+
+  // A state change can make a pane ready; the timer covers a pane that never reports a state.
+  paneStatusRef.current = paneStatus;
+  useEffect(() => {
+    flushNotices();
+  }, [paneStatus, flushNotices]);
+  useEffect(() => {
+    const timer = window.setInterval(flushNotices, 5000);
+    return () => window.clearInterval(timer);
+  }, [flushNotices]);
 
   useEffect(() => {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
@@ -2597,6 +2641,11 @@ export default function App() {
                         }
                       >
                         <span className="member-name">{m.name}</span>
+                        {pane && heldCount(heldNotices, pane.id) > 0 && (
+                          <span className="member-held" title={t("sidebar.member.heldTitle")}>
+                            {t("sidebar.member.held", { count: heldCount(heldNotices, pane.id) })}
+                          </span>
+                        )}
                         <span className="member-types">
                           {m.types.join(", ") || t("sidebar.member.noTypes")}
                         </span>

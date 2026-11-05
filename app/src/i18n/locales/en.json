@@ -49,6 +49,8 @@
       "none": "none"
     },
     "member": {
+      "held": "{{count}} waiting",
+      "heldTitle": "Notices are held until the agent is ready for input",
       "checkboxTitle": "show in team room",
       "titleRunning": "already running — click to focus",
       "titleSpawn": "spawn in a PTY pane",
@@ -172,6 +174,7 @@
     "renameTeam": "Renamed team '{{from}}' to '{{to}}'.",
     "deleteTeam": "Deleted team '{{team}}'.",
     "deleteTeamForce": "Deleted team '{{team}}' (removed {{count}} member(s)).",
+    "noticeWithoutReadySignal": "Delivered {{count}} message notice(s) to an agent that gave no ready signal.",
     "purgeMessages": "Deleted messages for team '{{team}}'.",
     "actionFailed": "Failed: {{reason}}"
   },

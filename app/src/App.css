@@ -1736,3 +1736,9 @@ body.resizing-row {
 button[aria-busy="true"] { cursor: progress; }
 .addon-frame-wrap { position: relative; width: 100%; height: 100%; }
 .addon-frame-loading { position: absolute; inset: 0; pointer-events: none; background: var(--bg); }
+
+.member-held {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.75;
+}
