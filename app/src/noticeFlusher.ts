@@ -12,6 +12,8 @@ export type FlusherDeps = {
   // Notices typed although the pane never gave a ready signal; called after the app accepted them.
   onWithoutReadySignal: (count: number) => void;
   // Typing into a pane failed; `attempt` counts consecutive failures. The notices are kept and tried again later.
+  // The notice path says what it did with a notice (typed, held past a cap, dropped, failed) in one line.
+  log: (line: string) => void;
   onInjectFailed: (paneId: string, attempt: number, reason: string) => void;
 };
 
@@ -40,6 +42,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     let q = queues;
     for (const id of Object.keys(q)) {
       if (!live.has(id)) {
+        deps.log(`notices for ${id} dropped: the pane is closed (${q[id].length})`);
         q = { ...q };
         delete q[id];
       }
@@ -54,6 +57,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     setQueues(q);
     for (const { id, sent } of toType) {
       busy.add(id);
+      deps.log(`typing ${sent.length} notice(s) into ${id}${sent.some((n) => n.late) ? " without a ready signal" : ""}`);
       deps
         .inject(id, batchText(sent))
         .then(() => {
@@ -69,6 +73,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
         })
         .catch((e: unknown) => {
           const attempt = (failures[id] = (failures[id] ?? 0) + 1);
+          deps.log(`typing into ${id} failed (attempt ${attempt}): ${String(e)}`);
           if (deps.livePanes().includes(id)) {
             setQueues(restore(queues, id, sent));
             deps.onInjectFailed(id, attempt, String(e));
@@ -85,6 +90,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     flush,
     // A notice for `paneId` arrived.
     notice(paneId: string, text: string) {
+      deps.log(`notice for ${paneId} held (released=${released.has(paneId)}, state=${states[paneId] ?? "none"})`);
       setQueues(hold(queues, paneId, text, deps.now()));
       if (!released.has(paneId)) {
         deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);

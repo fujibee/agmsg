@@ -401,15 +401,30 @@ export function routeMessage(
   msg: { team: string; to: string },
   windows: ReadonlyArray<Pick<Window, "team" | "root">>,
   panes: ReadonlyArray<Pick<Pane, "id" | "label" | "native">>,
-): { feed: boolean; pane: Pick<Pane, "id" | "label" | "native"> | undefined } {
+): { feed: boolean; pane: Pick<Pane, "id" | "label" | "native"> | undefined; why?: string } {
   const inTeam = new Set(windows.filter((w) => w.team === msg.team).flatMap((w) => leaves(w.root)));
-  return { feed: msg.team === selectedTeam, pane: panes.find((pn) => pn.label === msg.to && !pn.native && inTeam.has(pn.id)) };
+  const feed = msg.team === selectedTeam;
+  const named = panes.filter((pn) => pn.label === msg.to);
+  const pane = named.find((pn) => !pn.native && inTeam.has(pn.id));
+  if (pane) return { feed, pane };
+  const why =
+    named.length === 0
+      ? `no open pane is named ${msg.to}`
+      : named.every((pn) => pn.native)
+        ? `pane ${msg.to} is native (it has its own delivery)`
+        : `pane ${msg.to} is not in a window of team ${msg.team}`;
+  return { feed, pane: undefined, why };
 }
 
 // The one-line notice typed into an agent whose pane the app feeds (no delivery of its own). It says how to read
 // the inbox and how to answer, with this install's name, the team, the agent's own name and the sender spelled
 // out: an agent that is not told where a reply goes writes it in its own chat, where nobody reads it. The
 // scripts are the install's own (`--cmd` renames the skill folder), run through bash.
+// One line to the app's own log (stderr), for the notice path: what was typed, held, or dropped and why.
+function appLog(line: string) {
+  void invoke("app_log", { line }).catch(() => {});
+}
+
 export function kickoffText(cmdName: string, team: string, to: string, from: string, preview: string): string {
   const scripts = `~/.agents/skills/${cmdName}/scripts`;
   return (
@@ -843,6 +858,7 @@ export default function App() {
       now: () => Date.now(),
       setTimer: (fn, ms) => void window.setTimeout(fn, ms),
       onHeldChange: setHeldNotices,
+      log: appLog,
       onInjectFailed: (_id, attempt, reason) => {
         // Said once per run of failures; the notices stay held and are retried with a growing delay.
         if (attempt === 1) pushCompletionNoticeRef.current("error", { key: "toast.noticeInjectFailed", vars: { reason } });
@@ -1160,7 +1176,8 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
-      const { feed, pane } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
+      const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
+      if (!pane) appLog(`notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}`);
       if (feed) setMessages((prev) => [...prev, e.payload]);
       if (pane) {
         // Inject a kickoff notice, not the raw message body verbatim. The

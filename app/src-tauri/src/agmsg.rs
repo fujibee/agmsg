@@ -1324,6 +1324,7 @@ pub fn start_watcher(app: AppHandle) {
         // never showed it, until I restarted" is a bug report nobody can
         // diagnose.
         let mut ticks_until_rescan = 0u32;
+        let mut first_scan = true;
         // Teams the app cannot read directly, and how far each has been read.
         // Polled on the rescan beat, not the fast one: this path costs a
         // subprocess per team per poll.
@@ -1365,11 +1366,17 @@ pub fn start_watcher(app: AppHandle) {
                                 })
                                 .unwrap_or(0),
                         };
+                        // A store that shows up after the first look starts at its current end: what was written
+                        // into it before this moment (up to one rescan beat) is not emitted. Say so in the log.
+                        if !first_scan {
+                            eprintln!("[agmsg-app] watcher opened a store after startup, starting at seq {} / id {}; earlier rows are not emitted", cursors.seq, cursors.legacy_id);
+                        }
                         open.push((path, conn, cursors));
                     }
                 }
             }
             ticks_until_rescan -= 1;
+            first_scan = false;
 
             // A read failure is transient here (a WAL checkpoint, a store
             // being recreated), not a reason to end the thread — the previous

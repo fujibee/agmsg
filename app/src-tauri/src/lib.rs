@@ -197,6 +197,12 @@ pub struct LoginShellInfo {
     home: String,
 }
 
+/// One line from the window to the app's log, for the notice path (what was typed, held, dropped, and why).
+#[tauri::command]
+fn app_log(line: String) {
+    eprintln!("[agmsg-app] {}", line.chars().take(300).collect::<String>());
+}
+
 #[tauri::command]
 fn login_shell() -> LoginShellInfo {
     #[cfg(unix)]
@@ -699,6 +705,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_inject,
+            app_log,
             pty::agent_state,
             login_shell,
             agmsg::agmsg_is_installed,

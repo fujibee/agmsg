@@ -78,6 +78,13 @@ describe("routeMessage", () => {
   it("a message for nobody with a pane feeds nothing", () => {
     expect(routeMessage("B", { team: "B", to: "ghost" }, windows, panes).pane).toBeUndefined();
   });
+
+  it("every miss says why, so none is silent", () => {
+    expect(routeMessage("B", { team: "B", to: "ghost" }, windows, panes).why).toContain("no open pane is named ghost");
+    expect(routeMessage("B", { team: "B", to: "black" }, windows, panes).why).toContain("native");
+    expect(routeMessage("B", { team: "C", to: "white" }, windows, panes).why).toContain("not in a window of team C");
+    expect(routeMessage("B", { team: "B", to: "white" }, windows, panes).why).toBeUndefined();
+  });
 });
 
 describe("kickoffText", () => {

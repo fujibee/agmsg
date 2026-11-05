@@ -8,6 +8,7 @@ function setup(live = ["p1"]) {
   const calls: Call[] = [];
   const banner: number[] = [];
   const failed: number[] = [];
+  const logs: string[] = [];
   let held: Queues = {};
   const f = createNoticeFlusher({
     inject: (id, text) => new Promise((resolve, reject) => calls.push({ id, text, settle: (ok) => (ok ? resolve(undefined) : reject(new Error("pty"))) })),
@@ -15,10 +16,11 @@ function setup(live = ["p1"]) {
     now: () => Date.now(),
     setTimer: (fn, ms) => void setTimeout(fn, ms),
     onHeldChange: (q) => (held = q),
+    log: (l) => logs.push(l),
     onInjectFailed: (_id, attempt) => failed.push(attempt),
     onWithoutReadySignal: (n) => banner.push(n),
   });
-  return { f, calls, banner, failed, live, held: () => held };
+  return { f, calls, banner, failed, live, logs, held: () => held };
 }
 
 describe("noticeFlusher", () => {
@@ -156,5 +158,14 @@ describe("noticeFlusher", () => {
     calls[1].settle(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(held()).toEqual({});
+  });
+
+  it("a notice dropped because its pane closed is logged", async () => {
+    const live = ["p1"];
+    const { f, logs } = setup(live);
+    f.notice("p1", "n1");
+    live.length = 0;
+    f.state("p1", "idle");
+    expect(logs.some((l) => l.includes("dropped") && l.includes("closed"))).toBe(true);
   });
 });
