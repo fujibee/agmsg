@@ -171,9 +171,130 @@ fn rpc(id: u64, method: &str, params: Value) -> String {
     format!("{}\n", json!({ "id": id, "method": method, "params": params }))
 }
 
-/// Starts `binary app-server` over stdio, asks `model/list` once (includeHidden false), and ends the process.
+/// What the call may take beyond `timeout` to end the process tree and let the reader finish. The whole call
+/// returns within `timeout + CLEANUP_ALLOWANCE`: the exchange itself is cut off at `timeout`, never later.
+pub const CLEANUP_ALLOWANCE: Duration = Duration::from_millis(1500);
+/// How long the server gets to exit by itself after its input closes, before the tree is ended (part of the allowance).
+const GRACE: Duration = Duration::from_millis(300);
+/// The longest line read from the server (a model list is a few KB); a longer one is an error, not a buffer.
+const MAX_LINE: usize = 1 << 20;
+/// Lines waiting for the caller at most; the reader blocks (it does not grow memory) when the caller is behind.
+const QUEUE_LINES: usize = 64;
+const TIMED_OUT: &str = "codex app-server did not answer in time";
+
+enum Line {
+    Text(String),
+    TooLong,
+}
+
+/// Owns everything the server starts, so ending it ends the whole tree on every path.
+/// Unix: the child leads its own process group and the group is signalled. Windows: the child is put in a job
+/// object that kills its members when closed, which also reaches descendants of a wrapper that already exited;
+/// if the job cannot be made, `taskkill /T` on the recorded pid is the (bounded) fallback, and a descendant of a
+/// wrapper that has already exited is then out of reach. A descendant that starts before the child is assigned to
+/// the job, or one that leaves its group by itself, cannot be reached either.
+struct OwnedTree {
+    #[cfg(unix)]
+    pgid: i32,
+    #[cfg(windows)]
+    job: Option<job::Job>,
+    #[cfg(windows)]
+    pid: u32,
+}
+
+impl OwnedTree {
+    fn adopt(child: &std::process::Child) -> OwnedTree {
+        #[cfg(unix)]
+        {
+            OwnedTree { pgid: child.id() as i32 }
+        }
+        #[cfg(windows)]
+        {
+            OwnedTree { job: job::Job::assign(child), pid: child.id() }
+        }
+    }
+
+    fn kill(self, child: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            // SAFETY: kill(2) with a negative pid signals the group the child led. The group exists while any
+            // member lives, so its id is not reused for another group meanwhile; this runs within milliseconds of
+            // the child being reaped.
+            unsafe {
+                libc::kill(-self.pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        {
+            match self.job {
+                Some(j) => drop(j), // closing the job kills every member
+                None => taskkill_bounded(self.pid, Duration::from_millis(1000)),
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(windows)]
+fn taskkill_bounded(pid: u32, within: Duration) {
+    use std::os::windows::process::CommandExt;
+    let Ok(mut k) = Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x08000000).spawn() else { return };
+    let end = Instant::now() + within;
+    while Instant::now() < end {
+        if matches!(k.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = k.kill();
+    let _ = k.wait();
+}
+
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+
+    pub struct Job(HANDLE);
+
+    impl Job {
+        pub fn assign(child: &std::process::Child) -> Option<Job> {
+            // SAFETY: plain Win32 calls on a handle created here and a process handle owned by `child`.
+            unsafe {
+                let h = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let set = SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32);
+                if set.is_err() || AssignProcessToJobObject(h, HANDLE(child.as_raw_handle() as _)).is_err() {
+                    let _ = CloseHandle(h);
+                    return None;
+                }
+                Some(Job(h))
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the handle is ours and closed once; KILL_ON_JOB_CLOSE ends the members.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// Starts `binary app-server` over stdio, asks `model/list` (includeHidden false) and ends the process tree.
 /// The child inherits this app's environment as it is (`CODEX_HOME` included), so the list is the one the CLI the
-/// app starts for an agent would show. It has no port, socket or daemon, and the whole read is bounded by `timeout`.
+/// app starts for an agent would show. It has no port, socket or daemon.
+///
+/// Time: the exchange is cut off at `timeout` (the deadline is checked before every line is looked at, so lines
+/// already queued after it are not used), and ending the tree and the reader takes at most `CLEANUP_ALLOWANCE`
+/// more. A list that continues past `MAX_PAGES` pages, a line over `MAX_LINE`, or an empty list is an error: a
+/// partial list is never returned as the whole one.
 pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Duration) -> Result<Vec<ModelOption>, String> {
     let deadline = Instant::now() + timeout;
     let mut cmd = Command::new(binary);
@@ -192,12 +313,23 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
         cmd.process_group(0); // its own group, so the whole tree it starts can be ended together
     }
     let mut child = cmd.spawn().map_err(|e| format!("could not start codex app-server: {e}"))?;
+    let tree = OwnedTree::adopt(&child);
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::sync_channel::<Line>(QUEUE_LINES);
     let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
+        use std::io::Read;
+        let mut r = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match (&mut r).take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = if buf.len() > MAX_LINE { Line::TooLong } else { Line::Text(String::from_utf8_lossy(&buf).trim_end().to_string()) };
+            let stop = matches!(line, Line::TooLong);
+            if tx.send(line).is_err() || stop {
                 break;
             }
         }
@@ -205,8 +337,16 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
     let result = (|| -> Result<Vec<ModelOption>, String> {
         let wait_for = |id: u64| -> Result<Value, String> {
             loop {
-                let left = deadline.saturating_duration_since(Instant::now());
-                let line = rx.recv_timeout(left).map_err(|_| "codex app-server did not answer in time".to_string())?;
+                let left = deadline.checked_duration_since(Instant::now()).ok_or(TIMED_OUT)?;
+                let line = match rx.recv_timeout(left) {
+                    Ok(Line::Text(l)) => l,
+                    Ok(Line::TooLong) => return Err(format!("codex app-server sent a line over {MAX_LINE} bytes")),
+                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(TIMED_OUT.into()),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Err("codex app-server ended before it answered".into()),
+                };
+                if Instant::now() >= deadline {
+                    return Err(TIMED_OUT.into()); // a line that was already waiting does not count past the deadline
+                }
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
                 if v.get("id").and_then(Value::as_u64) != Some(id) {
                     continue; // a notification or another id
@@ -219,6 +359,7 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
                 return v.get("result").cloned().ok_or_else(|| "the answer has no result".to_string());
             }
         };
+        // The requests are a few hundred bytes, far below a pipe's buffer, so these writes do not block.
         let send = |stdin: &mut std::process::ChildStdin, s: String| stdin.write_all(s.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("codex app-server closed its input: {e}"));
         send(&mut stdin, rpc(1, "initialize", json!({ "clientInfo": { "name": "agmsg-app", "title": "agmsg", "version": env!("CARGO_PKG_VERSION") } })))?;
         wait_for(1)?;
@@ -232,23 +373,29 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
             models.append(&mut got);
             match next {
                 Some(c) => cursor = Some(c),
-                None => break,
+                None => {
+                    cursor = None;
+                    break;
+                }
             }
+        }
+        if cursor.is_some() {
+            return Err(format!("the model list continues past {MAX_PAGES} pages; not showing a partial list"));
         }
         if models.is_empty() {
             return Err("codex app-server returned no models".into());
         }
         Ok(models)
     })();
-    drop(stdin); // the server exits when its input closes
-    let end = Instant::now() + Duration::from_secs(2);
+    // Cleanup, every path: close the input, give the server a moment to exit, end the whole tree, let the reader finish.
+    drop(stdin);
+    let end = Instant::now() + GRACE;
     while Instant::now() < end && !matches!(child.try_wait(), Ok(Some(_))) {
         std::thread::sleep(Duration::from_millis(10));
     }
-    // Whatever the server started (a launcher's real binary, a helper) goes with it, exited or not.
-    kill_tree(&mut child);
-    // The pipe closes once the tree is gone, which ends the reader; wait for that, but not forever.
-    let end = Instant::now() + Duration::from_secs(1);
+    tree.kill(&mut child);
+    drop(rx); // a reader blocked on a full queue is released
+    let end = Instant::now() + (CLEANUP_ALLOWANCE - GRACE);
     while !reader.is_finished() && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -256,25 +403,6 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
         let _ = reader.join();
     }
     result
-}
-
-/// Ends the child and everything it started: its process group on unix (it was made the group leader at start),
-/// `taskkill /T` on Windows. A descendant that left the group on its own cannot be reached this way.
-fn kill_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(2) with a negative pid signals the group; the pid is our own child's, which led it.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).creation_flags(0x08000000).output();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -418,6 +546,12 @@ done
             assert!(t.elapsed() < Duration::from_secs(10), "the read is bounded");
         }
 
+        /// A fixture sleep length no other test run (or seat) can share: `<prefix>.<this process id>.<counter>`.
+        fn unique(prefix: &str) -> String {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            format!("{prefix}.{}{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        }
+
         /// Command lines of every process on the machine, to look for a marker only this test's fixture carries.
         fn marked(marker: &str) -> usize {
             let out = Command::new("ps").args(["-A", "-o", "command="]).output().unwrap();
@@ -428,26 +562,67 @@ done
         fn a_launcher_whose_descendant_keeps_the_pipe_open_leaves_nothing_behind() {
             let d = tempfile::tempdir().unwrap();
             // the descendant inherits stdout (the pipe) and outlives the wrapper; the wrapper then stalls
-            let bin = fake(d.path(), "codex", "sleep 71.4242 &\nexec sleep 72.4242");
+            let m = unique("71");
+            let bin = fake(d.path(), "codex", &format!("sleep {m} &\nexec sleep 1{m}"));
             let t = Instant::now();
-            let e = fetch_codex_models(&bin, None, Duration::from_millis(200)).unwrap_err();
+            let timeout = Duration::from_millis(200);
+            let e = fetch_codex_models(&bin, None, timeout).unwrap_err();
             assert!(e.contains("in time"), "{e}");
-            assert!(t.elapsed() < Duration::from_secs(30), "returned in {:?}", t.elapsed());
+            assert!(t.elapsed() < timeout + CLEANUP_ALLOWANCE + Duration::from_secs(2), "returned in {:?}", t.elapsed());
             std::thread::sleep(Duration::from_millis(200));
-            assert_eq!(marked(".4242"), 0, "no descendant of the launched tree is left");
+            assert_eq!(marked(&m), 0, "no descendant of the launched tree is left");
         }
 
         #[test]
         fn a_descendant_left_after_a_good_answer_is_ended_too() {
             let d = tempfile::tempdir().unwrap();
-            let body = format!("sleep 73.4242 &\n{GOOD}");
+            let m = unique("73");
+            let body = format!("sleep {m} &\n{GOOD}");
             let bin = fake(d.path(), "codex", &body);
             let t = Instant::now();
             let ms = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap();
             assert_eq!(ms.len(), 1);
-            assert!(t.elapsed() < Duration::from_secs(30), "the answer is not held up by the leftover: {:?}", t.elapsed());
+            assert!(t.elapsed() < Duration::from_secs(5), "the answer is not held up by the leftover: {:?}", t.elapsed());
             std::thread::sleep(Duration::from_millis(200));
-            assert_eq!(marked("73.4242"), 0);
+            assert_eq!(marked(&m), 0);
+        }
+
+        #[test]
+        fn a_list_that_continues_past_the_page_cap_is_an_error_not_a_partial_list() {
+            let d = tempfile::tempdir().unwrap();
+            let bin = fake(d.path(), "codex", r#"while IFS= read -r l; do case "$l" in *'"initialize"'*) echo '{"id":1,"result":{}}';; *'"id":'*'"model/list"'*) id=$(echo "$l" | sed 's/.*"id":\([0-9]*\).*/\1/'); echo '{"id":'$id',"result":{"data":[{"id":"m"}],"nextCursor":"more"}}';; esac; done"#);
+            let e = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap_err();
+            assert!(e.contains("partial list"), "{e}");
+        }
+
+        #[test]
+        fn the_deadline_is_enforced_even_for_lines_already_queued() {
+            let d = tempfile::tempdir().unwrap();
+            let bin = fake(d.path(), "codex", GOOD);
+            let t = Instant::now();
+            let e = fetch_codex_models(&bin, None, Duration::ZERO).unwrap_err();
+            assert!(e.contains("in time"), "{e}");
+            assert!(t.elapsed() < CLEANUP_ALLOWANCE + Duration::from_secs(2), "{:?}", t.elapsed());
+        }
+
+        #[test]
+        fn an_answer_that_comes_after_the_timeout_is_not_used_and_the_call_stays_within_its_allowance() {
+            let d = tempfile::tempdir().unwrap();
+            let body = format!("sleep 0.6\n{GOOD}");
+            let bin = fake(d.path(), "codex", &body);
+            let t = Instant::now();
+            let timeout = Duration::from_millis(250);
+            let e = fetch_codex_models(&bin, None, timeout).unwrap_err();
+            assert!(e.contains("in time"), "{e}");
+            assert!(t.elapsed() < timeout + CLEANUP_ALLOWANCE + Duration::from_secs(1), "{:?}", t.elapsed());
+        }
+
+        #[test]
+        fn a_line_over_the_size_limit_is_an_error_and_the_reader_does_not_buffer_it() {
+            let d = tempfile::tempdir().unwrap();
+            let bin = fake(d.path(), "codex", r#"IFS= read -r l; head -c 3000000 /dev/zero | tr '\0' x; echo; sleep 5"#);
+            let e = fetch_codex_models(&bin, None, Duration::from_secs(30)).unwrap_err();
+            assert!(e.contains("over"), "{e}");
         }
 
         #[test]
@@ -477,6 +652,50 @@ done
             assert_eq!(find_real_codex(&shim_dir.to_string_lossy(), None), None, "only the shim: nothing real");
             let other = fake(d.path(), "other", "exit 0");
             assert_eq!(find_real_codex(&path, Some(&other.to_string_lossy())), Some(other));
+        }
+    }
+
+    /// Windows lifecycle check, run by hand on a Windows machine:
+    /// `cargo test --lib agent_models::tests::windows_process -- --nocapture`.
+    /// A launcher (.cmd) starts a uniquely named copy of ping.exe as its descendant; after a timeout (wrapper still
+    /// running) and after the wrapper has already exited, no process with that image name may remain.
+    #[cfg(windows)]
+    mod windows_process {
+        use super::*;
+
+        fn running(image: &str) -> bool {
+            let out = Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {image}"), "/NH"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).to_lowercase().contains(&image.to_lowercase())
+        }
+
+        fn fixture(wrapper_stays: bool) -> (tempfile::TempDir, PathBuf, String) {
+            let d = tempfile::tempdir().unwrap();
+            let image = format!("agmsgfx{}{}.exe", std::process::id(), if wrapper_stays { "a" } else { "b" });
+            let sys = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+            std::fs::copy(format!("{sys}\\System32\\PING.EXE"), d.path().join(&image)).unwrap();
+            let mut body = format!("@echo off\r\nstart /B \"\" \"%~dp0{image}\" -n 60 127.0.0.1 >nul\r\n");
+            if wrapper_stays {
+                body.push_str(&format!("\"%~dp0{image}\" -n 61 127.0.0.1 >nul\r\n"));
+            }
+            let bin = d.path().join("codex.cmd");
+            std::fs::write(&bin, body).unwrap();
+            (d, bin, image)
+        }
+
+        #[test]
+        fn a_timeout_with_the_wrapper_still_running_leaves_no_descendant() {
+            let (_d, bin, image) = fixture(true);
+            let e = fetch_codex_models(&bin, None, Duration::from_millis(500)).unwrap_err();
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(!running(&image), "{image} is still running after: {e}");
+        }
+
+        #[test]
+        fn a_wrapper_that_already_exited_leaves_no_descendant_behind_either() {
+            let (_d, bin, image) = fixture(false);
+            let e = fetch_codex_models(&bin, None, Duration::from_millis(500)).unwrap_err();
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(!running(&image), "{image} is still running after: {e}");
         }
     }
 }
