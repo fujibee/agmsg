@@ -180,9 +180,13 @@ const GRACE: Duration = Duration::from_millis(300);
 const MAX_LINE: usize = 1 << 20;
 /// Lines waiting for the caller at most; the reader blocks (it does not grow memory) when the caller is behind.
 const QUEUE_LINES: usize = 64;
-/// The longest page cursor followed. A cursor is sent back to the server in the next request, and the server may
-/// have stopped reading by then; a request of at most this plus a few hundred bytes cannot fill a pipe (4 KiB is the
-/// smallest pipe buffer on the supported systems), so the write cannot block. A longer cursor is an error.
+/// The longest serialized request written to the server, in bytes (envelope, escaping and all). A request is sent
+/// only after the previous one was answered, but the server may have stopped reading by then; one this small
+/// cannot fill a pipe (4 KiB is the smallest pipe buffer on the supported systems), so the write cannot block.
+/// A request that would be longer is an error with its reason, and is not sent.
+const MAX_REQUEST: usize = 3072;
+/// A cursor longer than this (as received) is refused early with its own reason; the byte limit above is the one
+/// that holds, since escaping can make a short cursor serialize far longer.
 const MAX_CURSOR: usize = 2048;
 const TIMED_OUT: &str = "codex app-server did not answer in time";
 
@@ -364,12 +368,15 @@ pub fn fetch_codex_models(binary: &Path, path_env: Option<&str>, timeout: Durati
                 return v.get("result").cloned().ok_or_else(|| "the answer has no result".to_string());
             }
         };
-        // A request is sent only after the previous one was answered (so the pipe is empty) and is at most a few
-        // hundred bytes plus a cursor of at most MAX_CURSOR, far below any pipe's buffer: the write cannot block
-        // on a server that stopped reading. The deadline is checked before every send.
+        // A request is sent only after the previous one was answered (so the pipe is empty) and its serialized
+        // length is checked here against MAX_REQUEST, below any pipe's buffer: the write cannot block on a server
+        // that stopped reading. The deadline is checked before every send.
         let send = |stdin: &mut std::process::ChildStdin, s: String| {
             if Instant::now() >= deadline {
                 return Err(TIMED_OUT.to_string());
+            }
+            if s.len() > MAX_REQUEST {
+                return Err(format!("a request would be {} bytes, over the {MAX_REQUEST} byte limit; not sending it", s.len()));
             }
             stdin.write_all(s.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("codex app-server closed its input: {e}"))
         };
@@ -662,6 +669,37 @@ exec sleep {m}"#
             assert!(t.elapsed() < timeout + CLEANUP_ALLOWANCE + Duration::from_secs(1), "returned in {:?}", t.elapsed());
             std::thread::sleep(Duration::from_millis(200));
             assert_eq!(marked(&m), 0, "the stalled server is ended");
+        }
+
+        #[test]
+        fn a_short_cursor_that_escapes_to_a_long_request_is_refused_by_the_serialized_size() {
+            let d = tempfile::tempdir().unwrap();
+            let m = unique("77");
+            // 2048 characters, each sent as the six-byte JSON escape \u0000: accepted by the cursor length check,
+            // but the request that would carry it back is over 12 KB
+            let body = format!(
+                r#"IFS= read -r l
+echo '{{"id":1,"result":{{}}}}'
+IFS= read -r l
+IFS= read -r l
+c=$(i=0; while [ $i -lt 2048 ]; do printf '\\u0000'; i=$((i+1)); done)
+echo '{{"id":2,"result":{{"data":[{{"id":"m"}}],"nextCursor":"'"$c"'"}}}}'
+exec sleep {m}"#
+            );
+            let bin = fake(d.path(), "codex", &body);
+            let t = Instant::now();
+            let timeout = Duration::from_secs(3);
+            let e = fetch_codex_models(&bin, None, timeout).unwrap_err();
+            assert!(e.contains("byte limit"), "{e}");
+            assert!(t.elapsed() < timeout + CLEANUP_ALLOWANCE + Duration::from_secs(1), "returned in {:?}", t.elapsed());
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(marked(&m), 0);
+        }
+
+        #[test]
+        fn quotes_and_backslashes_in_a_cursor_are_counted_after_escaping_too() {
+            assert!(rpc(2, "model/list", json!({ "includeHidden": false, "cursor": "\"\\".repeat(1500) })).len() > MAX_REQUEST);
+            assert!(rpc(2, "model/list", json!({ "includeHidden": false, "cursor": "abc" })).len() < 200);
         }
 
         #[test]
