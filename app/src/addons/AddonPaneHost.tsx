@@ -42,6 +42,8 @@ export function AddonPaneHost(props: {
   addons: InstalledAddon[];
   onClose: () => void;
   onOpenSettings: () => void;
+  /** The host's id for this pane once it has one (and undefined when it is gone): agents it starts open beside it. */
+  onHostId?: (id: number | undefined) => void;
 }) {
   return props.live ? <LiveAddonPane {...props} /> : <MockAddonPane pane={props.pane} onClose={props.onClose} />;
 }
@@ -60,6 +62,7 @@ function LiveAddonPane(props: {
   addons: InstalledAddon[];
   onClose: () => void;
   onOpenSettings: () => void;
+  onHostId?: (id: number | undefined) => void;
 }) {
   const { t } = useTranslation();
   const tt = t as never;
@@ -74,6 +77,12 @@ function LiveAddonPane(props: {
   const decl = addon?.panes.find((p) => p.name === pane.paneName);
   const isDev = pane.addonId.startsWith("dev:");
   const [added, setAdded] = useState<AddedPane | null>(null);
+  const hostIdRef = useRef(props.onHostId);
+  hostIdRef.current = props.onHostId;
+  const addedId = added?.id;
+  useEffect(() => {
+    hostIdRef.current?.(addedId);
+  }, [addedId]);
   const [state, setState] = useState<PaneState>({ kind: "frame" });
   const [steps, setSteps] = useState<Step[]>([]);
   const [folder, setFolder] = useState<string | null>(pane.openArgs?.path ?? null);

@@ -10,6 +10,7 @@ import {
   insertBeside,
   leaves,
   minRatioForPx,
+  placeAskedAgent,
   presetTree,
   renameLeaf,
   sameShapeAndRatio,
@@ -682,5 +683,33 @@ describe("dividerDragKey", () => {
     const transposed = applyAtPath(tree, (grabbed as Extract<DividerInfo, { kind: "grid-segment" }>).basePath, transposeGrid);
     const after = collectDividers(transposed);
     expect(after.some((d) => dividerDragKey(d) === keyBefore)).toBe(true);
+  });
+});
+
+describe("placeAskedAgent", () => {
+  const chess: SplitNode = { kind: "leaf", paneId: "chess" };
+  const rects = (n: SplitNode) => computeRects(n);
+  const column = (n: SplitNode) => leaves(n).filter((id) => id !== "chess").sort((a, b) => rects(n).get(a)!.top - rects(n).get(b)!.top);
+
+  it("opens the first agent to the right of the pane that asked", () => {
+    const n = placeAskedAgent(chess, "chess", [], "black", 0);
+    expect(leaves(n)).toEqual(["chess", "black"]);
+    expect(rects(n).get("black")!.left).toBeGreaterThan(rects(n).get("chess")!.left);
+  });
+
+  it("puts black above white whichever of them opens first", () => {
+    const blackFirst = placeAskedAgent(placeAskedAgent(chess, "chess", [], "black", 0), "chess", [{ id: "black", order: 0 }], "white", 1);
+    expect(column(blackFirst)).toEqual(["black", "white"]);
+    const whiteFirst = placeAskedAgent(placeAskedAgent(chess, "chess", [], "white", 1), "chess", [{ id: "white", order: 1 }], "black", 0);
+    expect(column(whiteFirst)).toEqual(["black", "white"]);
+    // the chess pane stays on the left of both
+    expect(rects(whiteFirst).get("chess")!.width).toBeCloseTo(50);
+  });
+
+  it("puts an agent with no order after the others, in the order they opened", () => {
+    const a = placeAskedAgent(chess, "chess", [], "a");
+    const b = placeAskedAgent(a, "chess", [{ id: "a" }], "b");
+    const c = placeAskedAgent(b, "chess", [{ id: "a" }, { id: "b" }], "c");
+    expect(column(c)).toEqual(["a", "b", "c"]);
   });
 });

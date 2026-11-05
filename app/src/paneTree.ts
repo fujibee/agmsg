@@ -392,6 +392,29 @@ export function insertAsNewLeaf(node: SplitNode, newPaneId: string): SplitNode {
 }
 
 /**
+ * Opens an agent that an add-on pane asked for beside that pane: the first one to its right, the rest in a column
+ * under each other, ordered by `order` (smaller is higher; none = after the others), whatever order they arrive in.
+ * `siblings` are the asker's agents already in this tree, in the order they opened.
+ */
+export function placeAskedAgent(
+  node: SplitNode,
+  askerPaneId: string,
+  siblings: { id: string; order?: number }[],
+  newPaneId: string,
+  order?: number,
+): SplitNode {
+  const here = siblings.filter((s) => contains(node, s.id));
+  if (here.length === 0) return insertBeside(node, askerPaneId, "right", newPaneId);
+  if (order !== undefined) {
+    const below = here.filter((s) => s.order !== undefined && s.order > order).sort((a, b) => a.order! - b.order!)[0];
+    if (below) return insertBeside(node, below.id, "top", newPaneId);
+  }
+  const placed = here.filter((s) => s.order !== undefined && (order === undefined || s.order <= order));
+  const last = order === undefined ? here[here.length - 1] : (placed.sort((a, b) => a.order! - b.order!).pop() ?? here[here.length - 1]);
+  return insertBeside(node, last.id, "bottom", newPaneId);
+}
+
+/**
  * Renames a single leaf's paneId in place — the cross-window swap building
  * block (see the design doc: cross-window swap is two independent
  * `renameLeaf` calls, one per tree, each renaming the OTHER tree's pane in).
