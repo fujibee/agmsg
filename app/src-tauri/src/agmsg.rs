@@ -2337,6 +2337,7 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
     }
 
     #[test]
+    #[serial]
     fn a_store_created_during_the_first_look_with_its_first_row_already_in_it_keeps_that_row() {
         let dir = tempfile::tempdir().unwrap();
         let started = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
