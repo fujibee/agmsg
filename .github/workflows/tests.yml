@@ -201,12 +201,17 @@ jobs:
   changes:
     name: detect docs-only
     runs-on: ubuntu-latest
+    # Read access to the Actions API for the whole-tree reuse lookup below.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       app_changed: ${{ steps.detect.outputs.app_changed }}
       server_changed: ${{ steps.detect.outputs.server_changed }}
       sync_changed: ${{ steps.detect.outputs.sync_changed }}
       contracts_needed: ${{ steps.detect.outputs.contracts_needed }}
+      reuse_run: ${{ steps.reuse.outputs.reuse_run }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -351,6 +356,43 @@ jobs:
           echo "sync_changed=$sync_changed" >> "$GITHUB_OUTPUT"
           echo "contracts_needed=$contracts_needed" >> "$GITHUB_OUTPUT"
 
+      # Whole-tree reuse, push only. A pull_request run tests GitHub's merge
+      # ref: the PR head merged into the base as it was at that moment. When
+      # the base has not moved by the time the PR is squashed in, the push
+      # run's tree is byte-identical to a tree that already passed every bats
+      # shard -- in the week after v1.7.0, 12 of the 31 push runs that ran the
+      # suite were exactly that. The pull_request run records each such tree
+      # as an artifact named green-tree-<tree hash> (see the end of the `bats`
+      # job); here the push run looks the name up and, on a hit, its shards
+      # skip the suite the way a docs-only diff does, saying which run passed
+      # it. Only artifacts from this repository's own branches count (a run
+      # from a fork cannot vouch for main), and any failure to look -- API
+      # error, malformed answer, expired record, no match -- runs the suite.
+      # The other jobs (age-v1, storage-jsonl, Windows, app, server) still run.
+      - id: reuse
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          run=""
+          if resp="$(curl -fsS --max-time 20 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts?name=green-tree-$tree&per_page=20")"; then
+            run="$(printf '%s' "$resp" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" \
+              '[.artifacts[]? | select(.expired == false and .workflow_run.head_repository_id == $repo)][0].workflow_run.id // empty' \
+              2>/dev/null || true)"
+          fi
+          case "$run" in ''|*[!0-9]*) run="" ;; esac
+          if [ -n "$run" ]; then
+            echo "Tree $tree already passed every bats shard in run $run; the suite will not run again."
+          else
+            echo "Tree $tree has no passing pull_request run on record; running the suite."
+          fi
+          echo "reuse_run=$run" >> "$GITHUB_OUTPUT"
+
   bats-shard:
     # The docs-only skip below reports this check green without running the
     # suite -- correctly, so the required aggregate can be satisfied -- but a
@@ -359,7 +401,7 @@ jobs:
     # the required contexts are `bats` (the aggregate) and the Windows install
     # leg, and neither is renamed, so branch protection sees exactly what it
     # saw. `needs` is one of the contexts a job name may read.
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/6)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/6)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}${{ needs.changes.outputs.reuse_run != '' && format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run) || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -408,8 +450,16 @@ jobs:
           echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
           echo "::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files; its green satisfies the required check and measures nothing (#798)"
 
+      - name: Tree already passed — skipping suite
+        if: needs.changes.outputs.reuse_run != ''
+        env:
+          REUSE_RUN: ${{ needs.changes.outputs.reuse_run }}
+        run: |
+          echo "This tree already passed every bats shard in run $REUSE_RUN; skipping the suite."
+          echo "::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN — this shard ran 0 test files"
+
       - name: Compute this shard's test files
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -425,7 +475,7 @@ jobs:
           fi
 
       - name: Ensure sqlite3 is available (Linux)
-        if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true'
+        if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
       # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
@@ -433,14 +483,14 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         run: |
           bash --version | head -1
           sqlite3 --version
@@ -453,7 +503,7 @@ jobs:
       # measuring. It closes fds 3 and 4 for the same reason, and gives itself a
       # hard lifetime so it cannot outlive the job it is watching.
       - name: Start hang sampler
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         run: |
           set +e
@@ -491,7 +541,7 @@ jobs:
           echo "sampler pid $!"
 
       - name: Run bats suite (this shard)
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -511,7 +561,7 @@ jobs:
       # pipelines for the same reason: it closes the pipe early and SIGPIPEs
       # whatever was writing.
       - name: Hang forensics
-        if: always() && needs.changes.outputs.docs_only != 'true'
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         run: |
           set +e
@@ -545,7 +595,7 @@ jobs:
           exit 0
 
       - name: Upload hang samples
-        if: always() && needs.changes.outputs.docs_only != 'true'
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -555,7 +605,7 @@ jobs:
           retention-days: 3
 
       - name: Upload bats timings
-        if: always() && needs.changes.outputs.docs_only != 'true'
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -597,8 +647,16 @@ jobs:
           echo "::notice title=bats::docs-only diff — the bats suite did not run on any shard; this green satisfies the required check and measures nothing (#798)"
           printf '%s\n' "## bats: docs-only, suite skipped" "" "The diff was documentation-only, so no shard ran the bats suite. This green satisfies the required check; it is not evidence that the suite passes (#798)." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Tree already passed — no suite run to verify
+        if: needs.changes.outputs.reuse_run != ''
+        env:
+          REUSE_RUN: ${{ needs.changes.outputs.reuse_run }}
+        run: |
+          echo "::notice title=bats::this tree already passed every bats shard in run $REUSE_RUN; the suite did not run again"
+          printf '%s\n' "## bats: tree already passed, suite skipped" "" "This push's tree is byte-identical to one that passed every bats shard in run $REUSE_RUN, so no shard ran the suite again." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Verify the shard partition covers the whole suite
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         # Recomputes the partition instead of collecting each shard's own
         # record of what it ran (a bats-manifest-* artifact, downloaded and
         # unioned here). That depended on every shard from THIS run having
@@ -628,6 +686,27 @@ jobs:
           # shards ran, so a full pass and a skip never read alike.
           count="$(printf '%s\n' "$expected" | grep -c .)"
           printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
+
+      # Record a tree whose suite ran and passed, for the push that may follow
+      # (the reuse step in `changes`). A pull_request run checks out the merge
+      # ref, so this is the exact tree a squash merge produces when the base has
+      # not moved in between. Steps above fail when a shard did not pass, and
+      # the condition keeps docs-only runs (nothing ran) from recording.
+      - name: Record this tree as passed
+        id: green
+        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        run: |
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          printf 'tree %s\nrun %s\nsha %s\n' "$tree" "$GITHUB_RUN_ID" "$GITHUB_SHA" > green-tree.txt
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the passed-tree record
+        if: steps.green.outputs.tree != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: green-tree-${{ steps.green.outputs.tree }}
+          path: green-tree.txt
+          retention-days: 14
 
   # The age-v1 vectors are shared normative fixtures. Exercise them with the
   # pinned standard age implementation instead of accepting only mock crypto
