@@ -49,7 +49,7 @@ _stub() {   # <name> <body>
   chmod +x "$BATS_TEST_TMPDIR/stubs/$1"
 }
 _stub_uname() { _stub uname "echo $1"; }
-_stub_ps() { _stub ps "echo '$$ $1 $2'"; }     # <etime> <lstart>, for the daemon.pid pid
+_stub_ps() { _stub ps "echo '$$ $1 ${3:-3.0} $2'"; }     # <etime> <lstart> [<%cpu>], for the daemon.pid pid
 # <MB>; phys_footprint in bytes as `footprint -f bytes` prints it, peak twice that
 _stub_footprint() { _stub footprint "printf 'Auxiliary data:\\n    phys_footprint: %s B\\n    phys_footprint_peak: %s B\\n' $(( $1 * 1048576 )) $(( $1 * 2097152 ))"; }
 
@@ -177,7 +177,7 @@ _field() {   # <n>  (1-based tab field of the first line)
     cp "$CODEX_HOME/app-server-daemon/daemon.pid" "$BATS_TEST_TMPDIR/p$i/app-server-daemon/daemon.pid"
     printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p$i" >> "$TEST_SKILL_DIR/run/role-session.x" 2>/dev/null || { mkdir -p "$TEST_SKILL_DIR/run"; printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p$i" >> "$TEST_SKILL_DIR/run/role-session.x"; }
   done
-  _stub ps "echo ps >> '$BATS_TEST_TMPDIR/ps-calls'; echo '$$ 5-00:00:00 $START'"
+  _stub ps "echo ps >> '$BATS_TEST_TMPDIR/ps-calls'; echo '$$ 5-00:00:00 3.0 $START'"
   _stub footprint "echo fp >> '$BATS_TEST_TMPDIR/fp-calls'; printf 'phys_footprint: 1048576 B\\nphys_footprint_peak: 2097152 B\\n'"
   _health
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 4 ]
@@ -271,4 +271,59 @@ _wait_child_pid() {
     exit "$rc"
   ' _ "$SCRIPTS" "$BATS_TEST_TMPDIR"
   [ "$status" -eq 0 ]
+}
+
+# --- CPU condition: %cpu >= 200 and at least 12 h old ---------------------------
+
+@test "health: 200% CPU at 12 h is over with cause cpu even though the footprint is small" {
+  _stub_footprint 1228
+  _stub_ps "12:00:00" "$START" "240.3"
+  _health
+  [ "$(_field 7)" = 1 ]
+  [ "$(_field 11)" = 240 ]
+  [ "$(_field 12)" = cpu ]
+}
+
+@test "health: 199.9% CPU, or a young daemon at 570%, is not over; %cpu costs no extra process" {
+  _stub_footprint 1228
+  _stub_ps "13:00:00" "$START" "199.9"
+  _health
+  [ "$(_field 7)" = 0 ]
+  [ "$(_field 11)" = 199 ]
+  _stub_ps "11:59:59" "$START" "570.0"
+  _health
+  [ "$(_field 7)" = 0 ]
+  [ "$(_field 12)" = "" ]
+}
+
+@test "health: memory and CPU together say both; memory alone says memory" {
+  _stub_footprint 6144
+  _stub_ps "13:00:00" "$START" "300.0"
+  _health
+  [ "$(_field 12)" = "memory+cpu" ]
+  _stub_ps "13:00:00" "$START" "10.0"
+  _health
+  [ "$(_field 12)" = memory ]
+}
+
+@test "health: a footprint that cannot be read still reports a CPU-over daemon, and an idle one stays unchecked" {
+  _stub footprint 'exit 1'
+  _stub_ps "13:00:00" "$START" "250.0"
+  _health
+  [ "$(_field 2)" = running ]
+  [ "$(_field 7)" = 1 ]
+  [ "$(_field 12)" = cpu ]
+  _stub_ps "13:00:00" "$START" "5.0"
+  _health
+  [ "$(_field 2)" = unchecked ]
+}
+
+@test "doctor: a busy old daemon warns with the CPU wording and the restart command" {
+  _stub_footprint 1228
+  _stub_ps "13:00:00" "$START" "240.0"
+  PATH="$BATS_TEST_TMPDIR/stubs:$PATH" run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 1 ]
+  case "$output" in *"cpu 240%"*) ;; *) false ;; esac
+  case "$output" in *"uses 240% CPU, over the 200% limit"*) ;; *) false ;; esac
+  case "$output" in *"daemon restart"*) ;; *) false ;; esac
 }

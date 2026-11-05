@@ -530,9 +530,9 @@ _doctor_codex_daemon_profile() {   # <profile dir>; the scan's callback
     unchecked) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: ${CDH_REASON:-}"$'\n' ;;
     running)
       if [ -n "${CDH_FOOTPRINT_MB:-}" ]; then
-        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}"), footprint $(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}")${CDH_PEAK_MB:+, peak $(agmsg_codex_daemon_footprint_text "$CDH_PEAK_MB")}"$'\n'
+        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}"), footprint $(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}")${CDH_PEAK_MB:+, peak $(agmsg_codex_daemon_footprint_text "$CDH_PEAK_MB")}${CDH_CPU:+, cpu ${CDH_CPU}%}"$'\n'
       else
-        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}") (footprint is read from 12 h on)"$'\n'
+        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}")${CDH_CPU:+, cpu ${CDH_CPU}%} ($([ "${CDH_AGE_SECONDS:-0}" -ge 43200 ] && echo "footprint could not be read" || echo "footprint is read from 12 h on"))"$'\n'
       fi
       if [ "${CDH_OVER:-}" = 1 ]; then
         _warn "$(_redact_text "$(agmsg_codex_daemon_warning_text "$profile")" "$SKILL_DIR")"

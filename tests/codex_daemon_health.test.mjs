@@ -181,3 +181,28 @@ test("fairness: with leading profiles hanging and a read that reaches only two p
   assert.ok(checks <= 6, `noticed within a bounded number of checks (took ${checks})`);
   rmSync(root, { recursive: true });
 });
+
+test("a CPU-only daemon is noticed on the second check, and the notice says CPU, not memory", async () => {
+  const cpuLine = `${PROFILE}\trunning\t100\tTue Nov 3 12:50:37 2026\t99000\t1228\t1\t\t\t2048\t240\tcpu\n`;
+  const h = harness([cpuLine, cpuLine]);
+  const ch = h.make();
+  await ch.pollOnce(); await ch.settled();
+  assert.equal(noticeCount(h.root), 0);
+  h.advance(10 * 60 * 1000);
+  await ch.pollOnce(); await ch.settled();
+  assert.equal(noticeCount(h.root), 1);
+  const text = logText(h.root);
+  assert.match(text, /uses 240% CPU, over the 200% limit/);
+  assert.doesNotMatch(text, /holds/);
+  assert.match(text, /It keeps running/);
+});
+
+test("memory and CPU together name both", async () => {
+  const both = `${PROFILE}\trunning\t100\tTue Nov 3 12:50:37 2026\t99000\t7000\t1\t\t\t8000\t300\tmemory+cpu\n`;
+  const h = harness([both, both]);
+  const ch = h.make();
+  await ch.pollOnce(); await ch.settled();
+  h.advance(10 * 60 * 1000);
+  await ch.pollOnce(); await ch.settled();
+  assert.match(logText(h.root), /holds 6\.8 GB, over the 6 GB limit and uses 300% CPU, over the 200% limit/);
+});

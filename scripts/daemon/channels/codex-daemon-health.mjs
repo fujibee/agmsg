@@ -57,7 +57,7 @@ export function parseHealthLines(output) {
   for (const line of String(output).split("\n")) {
     const f = line.split("\t");
     if (f.length < 9) continue;
-    rows.push({ profile: f[0], state: f[1], pid: f[2], start: f[3], ageSeconds: Number(f[4]), footprintMb: Number(f[5]), over: f[6] === "1", clients: f[7], reason: f[8] });
+    rows.push({ profile: f[0], state: f[1], pid: f[2], start: f[3], ageSeconds: Number(f[4]), footprintMb: Number(f[5]), over: f[6] === "1", clients: f[7], reason: f[8], cpuPercent: f[10] === undefined || f[10] === "" ? null : Number(f[10]), cause: f[11] ?? "" });
   }
   return rows;
 }
@@ -98,9 +98,11 @@ export function foldReadings(previous, rows) {
 
 function noticeText(row) {
   const hours = Math.floor(row.ageSeconds / 3600);
-  const gb = (row.footprintMb / 1024).toFixed(1);
   const clients = row.clients === "" ? "" : ` with ${row.clients} client(s)`;
-  return `Codex app-server daemon pid ${row.pid} for ${row.profile} has run ${hours}h${clients} and holds ${gb} GB, over the 6 GB / 12 h limit on two checks in a row. It keeps running. To restart it: CODEX_HOME=${row.profile} codex app-server daemon restart`;
+  const parts = [];
+  if (row.cause === "" || row.cause.includes("memory")) parts.push(`holds ${(row.footprintMb / 1024).toFixed(1)} GB, over the 6 GB limit`);
+  if (row.cause.includes("cpu")) parts.push(`uses ${row.cpuPercent}% CPU, over the 200% limit`);
+  return `Codex app-server daemon pid ${row.pid} for ${row.profile} has run ${hours}h${clients} and ${parts.join(" and ")} (age over 12h) on two checks in a row. It keeps running. To restart it: CODEX_HOME=${row.profile} codex app-server daemon restart`;
 }
 
 // Runs the reader. Profiles are printed as each is finished, so a read cut short

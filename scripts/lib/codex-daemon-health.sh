@@ -15,6 +15,7 @@
 # Sourced by doctor.sh and by codex-daemon-health.sh (which agmsgd runs).
 
 AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB=6144
+AGMSG_CODEX_DAEMON_CPU_LIMIT_PERCENT=200
 AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS=43200
 
 # One profile directory per line: this environment's own (CODEX_HOME, else
@@ -76,7 +77,10 @@ _agmsg_cdh_pid_alive() {
 #   CDH_AGE_SECONDS    (running)
 #   CDH_FOOTPRINT_MB CDH_PEAK_MB   (running AND at least the age limit old; empty
 #                                    for a younger daemon, which cannot be over)
+#   CDH_CPU        whole percent of one core from the same ps (running; macOS ps %cpu is
+#                  the kernel's decayed recent average, not the lifetime ratio)
 #   CDH_OVER       1 or 0
+#   CDH_CAUSE      memory | cpu | memory+cpu, when over
 #   CDH_CLIENTS    only when over the limit; empty when it could not be counted
 # Spawns: one single-pid ps per live daemon, plus per daemon at least 12 h old one
 # footprint, and readlink/lsof/grep only for
@@ -125,7 +129,7 @@ agmsg_codex_daemon_scan() {   # <run_dir> <callback>
   # a ps naming one takes about 8 ms, so two single-pid calls are 30x cheaper.
   _AGMSG_CDH_PS=""
   for pid in $pids; do
-    _AGMSG_CDH_PS="${_AGMSG_CDH_PS}$(ps -o pid=,etime=,lstart= -p "$pid" 2>/dev/null)"$'\n'
+    _AGMSG_CDH_PS="${_AGMSG_CDH_PS}$(ps -o pid=,etime=,%cpu=,lstart= -p "$pid" 2>/dev/null)"$'\n'
   done
   # Phase 2: age, pid reuse, footprint (only from the age limit on). Starting at
   # AGMSG_CODEX_DAEMON_START_AT (mod the profile count) lets the caller rotate
@@ -147,7 +151,7 @@ agmsg_codex_daemon_scan() {   # <run_dir> <callback>
 }
 
 _agmsg_cdh_reset() {
-  CDH_STATE=absent CDH_REASON="" CDH_PID="" CDH_START="" CDH_AGE_SECONDS="" CDH_FOOTPRINT_MB="" CDH_PEAK_MB="" CDH_OVER=0 CDH_CLIENTS=""
+  CDH_STATE=absent CDH_REASON="" CDH_PID="" CDH_START="" CDH_AGE_SECONDS="" CDH_FOOTPRINT_MB="" CDH_PEAK_MB="" CDH_OVER=0 CDH_CLIENTS="" CDH_CPU="" CDH_CAUSE=""
 }
 
 # Is the read this shell started still running? The shell's own job table answers
@@ -212,15 +216,15 @@ agmsg_codex_daemon_reap_child() {
 # A live pid: match it to the shared ps output, then read its footprint if it is
 # old enough to matter.
 _agmsg_cdh_finish() {   # <profile dir>
-  local profile="${1:-}" line pid etime lstart fpout bytes peak sock n
-  etime="" lstart=""
+  local profile="${1:-}" line pid etime cpu lstart fpout bytes peak sock n mem=0 busy=0 fp_ok=1
+  etime="" lstart="" cpu=""
   while IFS= read -r line; do
     set -f
     # shellcheck disable=SC2086
     set -- $line
     set +f
     [ "${1:-}" = "$CDH_PID" ] || continue
-    etime="${2:-}"; shift 2 2>/dev/null || true; lstart="$*"
+    etime="${2:-}"; cpu="${3:-}"; shift 3 2>/dev/null || true; lstart="$*"
     break
   done <<< "${_AGMSG_CDH_PS:-}"
   pid="$CDH_PID"
@@ -234,6 +238,12 @@ _agmsg_cdh_finish() {   # <profile dir>
     CDH_STATE=unchecked CDH_REASON="could not read the daemon's age"; return 0
   }
   CDH_STATE=running
+  # %cpu from the same ps: whole percent of one core ("105.7" -> 105). Unreadable
+  # means the CPU condition is not evaluated, never that it is met.
+  case "$cpu" in
+    *[!0-9.]*|''|.*) ;;
+    *) CDH_CPU="${cpu%%.*}" ;;
+  esac
   [ "$CDH_AGE_SECONDS" -ge "$AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS" ] || return 0
   [ -n "${_AGMSG_CDH_TMP:-}" ] || _AGMSG_CDH_TMP="$(mktemp 2>/dev/null)" || _AGMSG_CDH_TMP=""
   fpout=""
@@ -241,13 +251,22 @@ _agmsg_cdh_finish() {   # <profile dir>
     fpout="$(<"$_AGMSG_CDH_TMP")"
   fi
   [[ "$fpout" =~ phys_footprint:[[:space:]]*([0-9]+) ]] && bytes="${BASH_REMATCH[1]}" || bytes=""
-  CDH_FOOTPRINT_MB="$(_agmsg_codex_daemon_bytes_mb "$bytes")" || {
+  [ -z "$CDH_CPU" ] || [ "$CDH_CPU" -lt "$AGMSG_CODEX_DAEMON_CPU_LIMIT_PERCENT" ] || busy=1
+  CDH_FOOTPRINT_MB="$(_agmsg_codex_daemon_bytes_mb "$bytes")" || fp_ok=0
+  if [ "$fp_ok" = 0 ]; then
+    # Without the footprint only the CPU condition can still be answered.
+    if [ "$busy" = 1 ]; then
+      CDH_OVER=1 CDH_CAUSE=cpu
+      return 0
+    fi
     CDH_STATE=unchecked CDH_REASON="could not read the daemon's memory footprint"; return 0
-  }
+  fi
   [[ "$fpout" =~ phys_footprint_peak:[[:space:]]*([0-9]+) ]] && peak="${BASH_REMATCH[1]}" || peak=""
   CDH_PEAK_MB="$(_agmsg_codex_daemon_bytes_mb "$peak")" || CDH_PEAK_MB=""
-  if [ "$CDH_FOOTPRINT_MB" -ge "$AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB" ]; then
+  [ "$CDH_FOOTPRINT_MB" -lt "$AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB" ] || mem=1
+  if [ "$mem" = 1 ] || [ "$busy" = 1 ]; then
     CDH_OVER=1
+    if [ "$mem" = 1 ] && [ "$busy" = 1 ]; then CDH_CAUSE="memory+cpu"; elif [ "$mem" = 1 ]; then CDH_CAUSE=memory; else CDH_CAUSE=cpu; fi
     sock="$(readlink "$profile/app-server-control/app-server-control.sock" 2>/dev/null)" || sock=""
     if [ -n "$sock" ]; then
       if _agmsg_cdh_bounded "$_AGMSG_CDH_TMP" lsof -a -p "$pid" -U; then
@@ -272,13 +291,25 @@ agmsg_codex_daemon_footprint_text() {   # <MB>
   if [ "$mb" -ge 1024 ]; then printf '%s.%s GB' $(( mb / 1024 )) $(( mb % 1024 * 10 / 1024 )); else printf '%s MB' "$mb"; fi
 }
 
+# What is over the limit, in words: "holds 6.5 GB, over the 6 GB limit" and/or
+# "uses 240% CPU, over the 200% limit".
+agmsg_codex_daemon_cause_text() {
+  local text=""
+  case "${CDH_CAUSE:-memory}" in *memory*)
+    text="holds $(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}"), over the $(agmsg_codex_daemon_footprint_text "$AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB") limit" ;;
+  esac
+  case "${CDH_CAUSE:-}" in *cpu*)
+    text="${text:+$text and }uses ${CDH_CPU:-}% CPU, over the ${AGMSG_CODEX_DAEMON_CPU_LIMIT_PERCENT}% limit" ;;
+  esac
+  printf '%s' "$text"
+}
+
 # The warning text, one line. Printing the remediation is all this does.
 agmsg_codex_daemon_warning_text() {   # <profile dir>
   local clients=""
   [ -z "${CDH_CLIENTS:-}" ] || clients=" with ${CDH_CLIENTS:-} client(s)"
-  printf 'Codex app-server daemon (pid %s) for %s has run %s%s and holds %s, over the %s / %sh limit. It keeps running. To restart it: CODEX_HOME=%s codex app-server daemon restart (idle TUIs reconnect by themselves in about 6 s and keep their drafts; running turns drain for up to 60 s).' \
+  printf 'Codex app-server daemon (pid %s) for %s has run %s%s and %s (age over %sh). It keeps running. To restart it: CODEX_HOME=%s codex app-server daemon restart (idle TUIs reconnect by themselves in about 6 s and keep their drafts; running turns drain for up to 60 s).' \
     "${CDH_PID:-}" "$1" "$(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}")" "$clients" \
-    "$(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}")" \
-    "$(agmsg_codex_daemon_footprint_text "$AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB")" \
+    "$(agmsg_codex_daemon_cause_text)" \
     $(( AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS / 3600 )) "$1"
 }
