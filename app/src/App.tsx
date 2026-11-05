@@ -22,6 +22,7 @@ import { useOpenRequests } from "./addons/useOpenRequests";
 import { useOpenRequestsSetting } from "./addons/openRequestsSetting";
 import { useAddonCatalog } from "./addons/catalog";
 import { mockOpenView, mockSnapshot } from "./addons/mock";
+import { createLatestOnly } from "./latestOnly";
 import { createNoticeFlusher } from "./noticeFlusher";
 import { heldCount, type Queues } from "./noticeQueue";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
@@ -433,7 +434,8 @@ export function mergeById<T extends { id: string }>(history: ReadonlyArray<T>, l
 }
 
 // True the first time a message id is seen for a pane (and records it), false after: a message re-emitted by a
-// store found again must not be typed into the same pane twice. The record is bounded.
+// store found again is not typed into the same pane twice. The record keeps the last `cap` ids per pane, so this
+// holds inside that window; the watcher's cursors are what keep a row from being emitted twice in the first place.
 export function firstSight(seen: Map<string, Set<string>>, paneId: string, msgId: string, cap = 500): boolean {
   let ids = seen.get(paneId);
   if (!ids) seen.set(paneId, (ids = new Set()));
@@ -1168,11 +1170,16 @@ export default function App() {
   // The most recent history page for `t`, replacing whatever's currently
   // shown — used both on team switch and after purging a team's messages
   // (the same reset a stale page would otherwise leave behind).
+  // Only the latest load may apply (a slower earlier one, another team's or a stale reload, is dropped), and the
+  // history flag with it.
+  const roomLoadRef = useRef(createLatestOnly());
   const loadRoomMessages = useCallback((t: string) => {
+    const current = roomLoadRef.current.start();
     setMessages([]);
     setHasMoreHistory(true);
     return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
       .then((msgs) => {
+        if (!current()) return;
         setMessages((live) => mergeById(msgs, live));
         setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
       })

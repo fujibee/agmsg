@@ -587,14 +587,32 @@ fn start_reading(conn: &rusqlite::Connection, new_store: bool) -> Cursors {
     }
 }
 
-/// Whether a store file the watcher is opening is new since the app started: it was not among the files present at
-/// the first look, and (where the system says) it was not created before the app started either.
-fn is_new_store(path: &std::path::Path, present_at_start: &std::collections::HashSet<PathBuf>, started: std::time::SystemTime) -> bool {
+/// Whether a store file the watcher is opening is new since the app started, and why that was decided. A file
+/// present at the first look is not new. Otherwise its creation time decides, for the first look as well as later
+/// ones: created at or after the app started (with 2 s of slack: a file made up to 2 s before the start counts as new) is new, so a team's store
+/// made while the first look is still running keeps its first row. Where the system gives no creation time the
+/// answer is "new" for a later look (the file was not in the first look) and "not new" for the first look (the
+/// file was there when the app began), and the reason says so; the log carries it.
+fn is_new_store(
+    path: &std::path::Path,
+    present_at_start: &std::collections::HashSet<PathBuf>,
+    started: std::time::SystemTime,
+    first_scan: bool,
+) -> (bool, &'static str) {
     if present_at_start.contains(path) {
-        return false;
+        return (false, "present at the first look");
     }
-    let born = std::fs::metadata(path).and_then(|m| m.created()).ok();
-    born.map_or(true, |t| t + Duration::from_secs(2) >= started)
+    match std::fs::metadata(path).and_then(|m| m.created()) {
+        Ok(t) => {
+            if t + Duration::from_secs(2) >= started {
+                (true, "created since the app started")
+            } else {
+                (false, "created before the app started")
+            }
+        }
+        Err(_) if first_scan => (false, "no creation time; treated as there at startup"),
+        Err(_) => (true, "no creation time; not in the first look, treated as new"),
+    }
 }
 
 /// Where each of the two id spaces has been read up to.
@@ -1400,10 +1418,12 @@ pub fn start_watcher(app: AppHandle) {
                         continue;
                     }
                     if let Ok(conn) = open_ro(&path) {
-                        let new_store = !first_scan && is_new_store(&path, &present_at_start, started);
+                        let (new_store, why) = is_new_store(&path, &present_at_start, started, first_scan);
                         let cursors = start_reading(&conn, new_store);
                         if new_store {
-                            eprintln!("[agmsg-app] watcher opened a store created after startup and reads it from its start");
+                            eprintln!("[agmsg-app] watcher opened a new store and reads it from its start ({why})");
+                        } else if why.starts_with("no creation time") {
+                            eprintln!("[agmsg-app] watcher opened a store at its end ({why})");
                         }
                         if first_scan {
                             present_at_start.insert(path.clone());
@@ -2296,20 +2316,47 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
     }
 
     #[test]
-    fn a_file_is_new_only_if_it_was_not_there_at_the_first_look() {
+    fn a_file_made_while_the_first_look_runs_is_new_but_one_present_at_the_first_look_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("messages.db");
-        std::fs::write(&f, b"").unwrap();
+        let started = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+        std::fs::write(&f, b"").unwrap(); // created after `started`
         let mut present = std::collections::HashSet::new();
-        let started = std::time::SystemTime::now();
-        // Not in the first look and made after start: new.
-        assert!(super::is_new_store(&f, &present, started));
-        // Present at the first look: never new, however the clock reads.
+        // First look, file born after the app started: new, so its first row is kept.
+        assert_eq!(super::is_new_store(&f, &present, started, true).0, true);
+        // A later look: new as well.
+        assert_eq!(super::is_new_store(&f, &present, started, false).0, true);
+        // Present at the first look: never new.
         present.insert(f.clone());
-        assert!(!super::is_new_store(&f, &present, started));
-        // Not in the first look, but created long before the app started: not new.
+        assert_eq!(super::is_new_store(&f, &present, started, false).0, false);
+        // Born long before the app started: not new, at either look.
         present.clear();
-        assert!(!super::is_new_store(&f, &present, started + std::time::Duration::from_secs(3600)));
+        let later_start = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(super::is_new_store(&f, &present, later_start, true).0, false);
+        assert_eq!(super::is_new_store(&f, &present, later_start, false).0, false);
+    }
+
+    #[test]
+    fn a_store_created_during_the_first_look_with_its_first_row_already_in_it_keeps_that_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        store_with(dir.path(), &[("019faa2a-0000-7000-8000-000000000001", "2026-07-28T10:00:06Z")], &[]);
+        let path = dir.path().join("db/messages.db");
+        let (new_store, _) = super::is_new_store(&path, &Default::default(), started, true);
+        let conn = super::open_ro(&path).expect("open");
+        let mut cursors = super::start_reading(&conn, new_store);
+        assert_eq!(super::read_new_messages(&conn, &mut cursors).expect("read").len(), 1);
+    }
+
+    #[test]
+    fn a_missing_creation_time_is_decided_by_the_look_and_says_so() {
+        // The reason strings are what the log shows; a path that does not exist has no creation time.
+        let nowhere = std::path::Path::new("/nonexistent/agmsg/messages.db");
+        let present = Default::default();
+        let now = std::time::SystemTime::now();
+        assert_eq!(super::is_new_store(nowhere, &present, now, true), (false, "no creation time; treated as there at startup"));
+        assert_eq!(super::is_new_store(nowhere, &present, now, false), (true, "no creation time; not in the first look, treated as new"));
     }
 
     #[test]
