@@ -233,6 +233,46 @@ export interface AgentTypes {
   types: SpawnableType[];
 }
 
+/** agents.models: the model choices for one CLI type, as the CLI's own /model offers them. */
+export interface ModelsRequest {
+  /** One of the `type`s agents.types lists. */
+  type: string;
+}
+
+export interface EffortOption {
+  /** The value to pass as the effort. */
+  id: string;
+  description: string;
+}
+
+export interface ModelChoice {
+  /** The value to pass as `model` in agents.spawn. */
+  id: string;
+  name: string;
+  description: string;
+  /** The CLI's own default model. */
+  isDefault: boolean;
+  /** The effort used when none is chosen; null when the list does not say. */
+  defaultEffort: string | null;
+  /** The efforts this model takes (they differ per model). */
+  efforts: EffortOption[];
+}
+
+/**
+ * agents.models answer. `source` says where the list came from:
+ *  - app-server: Codex itself answered (read once per app run; a failed read is not repeated for a minute)
+ *  - fixed:      a list the app keeps (Claude Code has no way to be asked)
+ *  - fallback:   Codex could not be asked; a stand-in list is returned and `reason` says why (plain text)
+ *  - none:       the type has no model list; `models` is empty
+ * Needs the same grant as agents.spawn (agents:spawn); there is no separate permission.
+ */
+export interface ModelList {
+  type: string;
+  source: "app-server" | "fixed" | "fallback" | "none";
+  reason?: string;
+  models: ModelChoice[];
+}
+
 /** agents.spawn */
 export interface SpawnRequest {
   type: string;

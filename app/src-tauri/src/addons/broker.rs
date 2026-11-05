@@ -41,7 +41,7 @@ pub fn power_need(op: &str) -> Option<Need> {
     match op {
         "team.join" => Some(Need::Join),
         "messages.send" => Some(Need::Send),
-        "agents.types" | "agents.spawn" | "agents.list" => Some(Need::Spawn),
+        "agents.types" | "agents.models" | "agents.spawn" | "agents.list" => Some(Need::Spawn),
         _ => None,
     }
 }
