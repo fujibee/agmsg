@@ -890,6 +890,8 @@ mod tests {
         renamed: Mutex<HashMap<String, String>>,
         /// how long `join` takes (join.sh is slow on some machines)
         join_delay: Mutex<std::time::Duration>,
+        in_join: std::sync::atomic::AtomicUsize,
+        max_in_join: std::sync::atomic::AtomicUsize,
         root: PathBuf,
         home: PathBuf,
     }
@@ -909,7 +911,10 @@ mod tests {
         fn join(&self, _team: &str, name: &str, t: &str, project: &str) -> Result<(), String> {
             self.joins.fetch_add(1, Ordering::SeqCst);
             let delay = *self.join_delay.lock().unwrap();
+            let now = self.in_join.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_join.fetch_max(now, Ordering::SeqCst);
             std::thread::sleep(delay);
+            self.in_join.fetch_sub(1, Ordering::SeqCst);
             if let Some(f) = self.outside.lock().unwrap().take() {
                 f(self);
             }
@@ -982,7 +987,9 @@ mod tests {
         world.members.lock().unwrap().push(MemberInfo { name: "lead".into(), types: vec!["claude-code".into()], project: "/x".into() });
         let journal = base.join("journal.json");
         let mut m = Manager::new(world.clone(), journal.clone());
-        m.open_wait = std::time::Duration::from_millis(600);
+        // long enough that a loaded machine never turns a normal open into "unknown"; the tests that want the
+        // timeout set a short one themselves
+        m.open_wait = std::time::Duration::from_secs(5);
         let mgr = Arc::new(m);
         // the window answers a moment after it is asked: a process id for the pane
         let for_window = mgr.clone();
@@ -1632,7 +1639,6 @@ mod tests {
     fn two_spawns_into_one_team_run_join_sh_at_the_same_time() {
         let f = Arc::new(fx(all_powers()));
         *f.world.join_delay.lock().unwrap() = std::time::Duration::from_millis(500);
-        let t0 = std::time::Instant::now();
         let hs: Vec<_> = ["white", "black", "white"]
             .iter()
             .map(|n| {
@@ -1642,7 +1648,8 @@ mod tests {
             })
             .collect();
         let rs: Vec<Value> = hs.into_iter().map(|h| h.join().unwrap()).collect();
-        assert!(t0.elapsed() < std::time::Duration::from_millis(950), "the two 500 ms joins overlapped: {:?}", t0.elapsed());
+        // counted, not timed: the two joins were inside join.sh at the same moment
+        assert_eq!(f.world.max_in_join.load(Ordering::SeqCst), 2, "the two joins overlapped");
         // the repeated "white" is the same request asked twice: one entry, one join
         let mut names: Vec<&str> = rs.iter().map(|r| r["name"].as_str().unwrap()).collect();
         names.sort();
