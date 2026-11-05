@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   actasSpawnArgs,
   kickoffText,
+  routeMessage,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -37,6 +38,45 @@ describe("actasSpawnArgs", () => {
 
   it("copilot: no cmd_prefix (defaults to '/') with prompt_arg '--interactive'", () => {
     expect(actasSpawnArgs("agmsg", "X", null, "--interactive")).toEqual(["--interactive", "/agmsg actas X"]);
+  });
+});
+
+describe("routeMessage", () => {
+  const leaf = (id: string) => ({ kind: "leaf", paneId: id }) as never;
+  const windows = [
+    { team: "A", root: leaf("a-white") },
+    { team: "B", root: leaf("b-white") },
+    { team: "B", root: leaf("b-black") },
+  ];
+  const panes = [
+    { id: "a-white", label: "white", native: false },
+    { id: "b-white", label: "white", native: false },
+    { id: "b-black", label: "black", native: true },
+  ];
+
+  it("selected A, message for B: feeds B's pane only, and the room feed of A is unchanged", () => {
+    const r = routeMessage("A", { team: "B", to: "white" }, windows, panes);
+    expect(r.feed).toBe(false);
+    expect(r.pane?.id).toBe("b-white");
+  });
+
+  it("never reaches a same-named pane of another team", () => {
+    expect(routeMessage("A", { team: "B", to: "white" }, windows, panes).pane?.id).not.toBe("a-white");
+    expect(routeMessage("B", { team: "A", to: "white" }, windows, panes).pane?.id).toBe("a-white");
+  });
+
+  it("a native pane is not fed", () => {
+    expect(routeMessage("B", { team: "B", to: "black" }, windows, panes).pane).toBeUndefined();
+  });
+
+  it("the selected team's message updates the room feed and feeds its pane", () => {
+    const r = routeMessage("B", { team: "B", to: "white" }, windows, panes);
+    expect(r.feed).toBe(true);
+    expect(r.pane?.id).toBe("b-white");
+  });
+
+  it("a message for nobody with a pane feeds nothing", () => {
+    expect(routeMessage("B", { team: "B", to: "ghost" }, windows, panes).pane).toBeUndefined();
   });
 });
 

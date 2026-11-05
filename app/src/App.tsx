@@ -388,6 +388,22 @@ export function actasSpawnArgs(
   return promptArg ? [promptArg, prompt] : [prompt];
 }
 
+// Where a message the app sees goes. The room feed is the selected team's. A pane is reached by the team it
+// belongs to (the team of the window that holds it), not by the team that happens to be selected: an agent an
+// add-on starts for another team (a game in its own team) has no other way to hear, so a message for it must not be
+// dropped because the user is looking at a different team, and a same-named pane of the selected team must not get
+// it. Only a pane that is not native is fed: a native (actas-booted) agent runs its own agmsg monitor and would
+// receive the message twice.
+export function routeMessage(
+  selectedTeam: string | null,
+  msg: { team: string; to: string },
+  windows: ReadonlyArray<Pick<Window, "team" | "root">>,
+  panes: ReadonlyArray<Pick<Pane, "id" | "label" | "native">>,
+): { feed: boolean; pane: Pick<Pane, "id" | "label" | "native"> | undefined } {
+  const inTeam = new Set(windows.filter((w) => w.team === msg.team).flatMap((w) => leaves(w.root)));
+  return { feed: msg.team === selectedTeam, pane: panes.find((pn) => pn.label === msg.to && !pn.native && inTeam.has(pn.id)) };
+}
+
 // The one-line notice typed into an agent whose pane the app feeds (no delivery of its own). It says how to read
 // the inbox and how to answer, with this install's name, the team, the agent's own name and the sender spelled
 // out: an agent that is not told where a reply goes writes it in its own chat, where nobody reads it. The
@@ -1120,14 +1136,8 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
-      // The room feed is the selected team's. A pane is reached by the team it belongs to, not by the team that
-      // happens to be selected: an agent an add-on starts for another team (a game in its own team) has no other
-      // way to hear, so a message for it must not be dropped because the user is looking at a different team.
-      if (e.payload.team === team) setMessages((prev) => [...prev, e.payload]);
-      const teamPaneIds = new Set(windowsRef.current.filter((w) => w.team === e.payload.team).flatMap((w) => leaves(w.root)));
-      // Only inject into NON-native panes; a native (actas-booted) agent runs
-      // its own agmsg monitor and would otherwise receive the message twice.
-      const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native && teamPaneIds.has(pn.id));
+      const { feed, pane } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
+      if (feed) setMessages((prev) => [...prev, e.payload]);
       if (pane) {
         // Inject a kickoff notice, not the raw message body verbatim. The
         // real agmsg Monitor (watch.sh) never types a message's contents
