@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use super::agent_models::{self, ModelOption};
 use super::denylist::Denylist;
 use super::panes::{Authorized, BrokerError};
 
@@ -146,6 +147,8 @@ pub trait World: Send + Sync {
     fn join(&self, team: &str, name: &str, agent_type: &str, project: &str) -> Result<(), String>;
     fn send(&self, team: &str, from: &str, to: &str, body: &str) -> Result<(), String>;
     fn spawnable(&self) -> Result<Vec<SpawnType>, String>;
+    /// The models Codex itself lists (a short-lived `codex app-server`); the caller caches the answer.
+    fn codex_models(&self) -> Result<Vec<ModelOption>, String>;
     /// `Some(token)` while the process lives; the token tells it from another process with a reused id.
     fn process_start(&self, pid: u32) -> Option<String>;
     /// Ask the window to open the terminal pane for this entry. The window rebuilds the command from the
@@ -196,6 +199,12 @@ impl World for RealWorld {
     }
     fn spawnable(&self) -> Result<Vec<SpawnType>, String> {
         Ok(crate::agmsg::agmsg_spawnable_types()?.into_iter().map(|t| SpawnType { name: t.name, model_arg: t.model_arg }).collect())
+    }
+    fn codex_models(&self) -> Result<Vec<ModelOption>, String> {
+        let path = crate::imported_path().map(str::to_string).or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
+        let real = std::env::var("AGMSG_REAL_CODEX").ok();
+        let bin = agent_models::find_real_codex(&path, real.as_deref()).ok_or("the codex command was not found")?;
+        agent_models::fetch_codex_models(&bin, Some(&path), agent_models::FETCH_TIMEOUT)
     }
     fn process_start(&self, pid: u32) -> Option<String> {
         process_start_token(pid)
@@ -337,6 +346,14 @@ pub struct Manager {
     journal_path: PathBuf,
     journal: Mutex<Journal>,
     team_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// What `agents.models` last learned per type: a good list is kept while the app runs, a failure for a minute.
+    models: Mutex<HashMap<String, ModelsCache>>,
+}
+
+struct ModelsCache {
+    at: std::time::Instant,
+    list: Option<Vec<ModelOption>>,
+    reason: Option<String>,
 }
 
 static GLOBAL: OnceLock<Manager> = OnceLock::new();
@@ -389,7 +406,7 @@ fn state_name(s: State) -> &'static str {
 impl Manager {
     pub fn new(world: Arc<dyn World>, journal_path: PathBuf) -> Manager {
         let journal = load(&journal_path);
-        Manager { open_wait: OPEN_WAIT, world, journal_path, journal: Mutex::new(journal), team_locks: Mutex::new(HashMap::new()) }
+        Manager { open_wait: OPEN_WAIT, world, journal_path, journal: Mutex::new(journal), team_locks: Mutex::new(HashMap::new()), models: Mutex::new(HashMap::new()) }
     }
 
     fn team_lock(&self, team: &str) -> Arc<Mutex<()>> {
@@ -459,6 +476,7 @@ impl Manager {
             "team.join" => self.team_join(a, &team, &tid),
             "messages.send" => self.messages_send(a, &team, &tid, args),
             "agents.types" => self.agents_types(),
+            "agents.models" => self.agents_models(args),
             "agents.spawn" => self.agents_spawn(a, deny, &team, &tid, args),
             "agents.list" => Ok(json!({ "agents": self.entries_for(&a.addon, &tid).iter().filter(|e| e.kind == Kind::Agent).map(summary).collect::<Vec<_>>() })),
             _ => Err(BrokerError::new("bad_args", "unknown op")),
@@ -563,6 +581,48 @@ impl Manager {
     fn agents_types(&self) -> Res {
         let ts = self.world.spawnable().map_err(|e| BrokerError::new("not_available", e))?;
         Ok(json!({ "types": ts.iter().map(|t| json!({ "type": t.name, "models": t.model_arg.is_some() })).collect::<Vec<_>>() }))
+    }
+
+    /// The model choices for one type, each with the efforts it takes. `source` says where the list came from:
+    /// `app-server` (Codex answered), `fixed` (a list the app keeps), or `fallback` (Codex could not be asked, so a
+    /// stand-in list is returned together with the `reason`).
+    fn agents_models(&self, args: &Value) -> Res {
+        let agent_type = str_arg(args, "type")?;
+        let types = phase("models: types", || self.world.spawnable()).map_err(|e| BrokerError::new("not_available", e))?;
+        if !types.iter().any(|t| t.name == agent_type) {
+            return Err(BrokerError::new("bad_args", format!("`{agent_type}` is not a type the app can start")));
+        }
+        let (source, models, reason): (&str, Vec<ModelOption>, Option<String>) = match agent_type.as_str() {
+            "claude-code" => ("fixed", agent_models::claude_models(), None),
+            "codex" => {
+                // held across the read: two panes asking at once start one process, not two
+                let mut cache = self.models.lock().unwrap();
+                let fresh = match cache.get(&agent_type) {
+                    Some(c) if c.list.is_some() => true,
+                    Some(c) => c.at.elapsed() < agent_models::FAILURE_BACKOFF,
+                    None => false,
+                };
+                if !fresh {
+                    let got = phase("models: codex app-server", || self.world.codex_models());
+                    let (list, reason) = match got {
+                        Ok(l) => (Some(l), None),
+                        Err(e) => (None, Some(e)),
+                    };
+                    cache.insert(agent_type.clone(), ModelsCache { at: std::time::Instant::now(), list, reason });
+                }
+                let c = cache.get(&agent_type).expect("just filled");
+                match &c.list {
+                    Some(l) => ("app-server", l.clone(), None),
+                    None => ("fallback", agent_models::codex_fallback_models(), c.reason.clone()),
+                }
+            }
+            _ => ("none", Vec::new(), None),
+        };
+        let mut out = json!({ "type": agent_type, "source": source, "models": models.iter().map(ModelOption::to_json).collect::<Vec<_>>() });
+        if let Some(r) = reason {
+            out["reason"] = json!(r);
+        }
+        Ok(out)
     }
 
     fn agents_spawn(&self, a: &Authorized, deny: &Denylist, team: &str, tid: &str, args: &Value) -> Res {
@@ -881,6 +941,9 @@ mod tests {
         sent: Mutex<Vec<(String, String, String, String)>>,
         opened: Mutex<Vec<OpenPane>>,
         joins: AtomicUsize,
+        /// what `codex app-server` answers (None: a one-model list), and how many times it was asked
+        codex_answer: Mutex<Option<Result<Vec<ModelOption>, String>>>,
+        codex_calls: AtomicUsize,
         fail_open: Mutex<bool>,
         /// a hook run inside `join`, standing for a `join.sh` somebody else runs at the same moment
         outside: Mutex<Option<Box<dyn Fn(&Fake) + Send>>>,
@@ -938,7 +1001,11 @@ mod tests {
             Ok(())
         }
         fn spawnable(&self) -> Result<Vec<SpawnType>, String> {
-            Ok(vec![SpawnType { name: "claude-code".into(), model_arg: Some("--model".into()) }, SpawnType { name: "gemini".into(), model_arg: None }])
+            Ok(vec![SpawnType { name: "claude-code".into(), model_arg: Some("--model".into()) }, SpawnType { name: "gemini".into(), model_arg: None }, SpawnType { name: "codex".into(), model_arg: Some("-m".into()) }])
+        }
+        fn codex_models(&self) -> Result<Vec<ModelOption>, String> {
+            self.codex_calls.fetch_add(1, Ordering::SeqCst);
+            self.codex_answer.lock().unwrap().clone().unwrap_or_else(|| Ok(vec![ModelOption { id: "gpt-x".into(), name: "GPT-X".into(), description: "d".into(), is_default: true, default_effort: Some("low".into()), efforts: vec![agent_models::Effort { id: "low".into(), description: String::new() }] }]))
         }
         fn process_start(&self, pid: u32) -> Option<String> {
             self.alive.lock().unwrap().get(&pid).cloned()
@@ -1170,6 +1237,60 @@ mod tests {
         assert_eq!(std::fs::read_dir(&f.world.home).unwrap().count(), before, "no folder was made");
         assert!(f.mgr.all_entries().is_empty());
         assert!(f.world.opened.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn models_follow_the_spawn_permission_like_the_other_agent_ops() {
+        let f = fx(Declared { team_join: true, ..Default::default() });
+        assert_eq!(code(call(&f, "agents.models", json!({"type": "claude-code"}))), "not_declared");
+        let g = fx(all_powers());
+        g.reg.lock().unwrap().set_power(g.id, Power::Spawn, false).unwrap();
+        assert_eq!(code(call(&g, "agents.models", json!({"type": "claude-code"}))), "not_granted");
+        assert_eq!(g.world.codex_calls.load(Ordering::SeqCst), 0, "nothing was started for a refused call");
+    }
+
+    #[test]
+    fn claude_models_are_the_fixed_aliases_and_start_no_process() {
+        let f = fx(all_powers());
+        let r = call(&f, "agents.models", json!({"type": "claude-code"})).unwrap();
+        assert_eq!(r["source"], "fixed");
+        assert_eq!(r["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect::<Vec<_>>(), ["default", "opus", "fable", "sonnet", "haiku"]);
+        assert_eq!(r["models"][1]["efforts"].as_array().unwrap().len(), 5);
+        assert!(r.get("reason").is_none());
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn codex_models_come_from_the_app_server_and_are_asked_once_while_the_app_runs() {
+        let f = fx(all_powers());
+        let a = call(&f, "agents.models", json!({"type": "codex"})).unwrap();
+        assert_eq!(a["source"], "app-server");
+        assert_eq!((a["models"][0]["id"].as_str().unwrap(), a["models"][0]["isDefault"].as_bool().unwrap(), a["models"][0]["defaultEffort"].as_str().unwrap()), ("gpt-x", true, "low"));
+        assert_eq!(a["models"][0]["efforts"][0]["id"], "low");
+        let b = call(&f, "agents.models", json!({"type": "codex"})).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 1, "the second request is served from the cache");
+    }
+
+    #[test]
+    fn when_codex_cannot_be_asked_the_fixed_list_comes_back_with_the_reason_and_is_not_retried_at_once() {
+        let f = fx(all_powers());
+        *f.world.codex_answer.lock().unwrap() = Some(Err("codex app-server refused the request (-32600): restart Codex".into()));
+        let r = call(&f, "agents.models", json!({"type": "codex"})).unwrap();
+        assert_eq!(r["source"], "fallback");
+        assert!(r["reason"].as_str().unwrap().contains("-32600"));
+        assert!(r["models"].as_array().unwrap().len() > 1, "a usable stand-in list");
+        call(&f, "agents.models", json!({"type": "codex"})).unwrap();
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 1, "a failure is not retried every request");
+    }
+
+    #[test]
+    fn models_for_an_unknown_type_or_without_a_type_are_bad_args_and_a_type_without_a_list_is_empty() {
+        let f = fx(all_powers());
+        assert_eq!(code(call(&f, "agents.models", json!({"type": "nope"}))), "bad_args");
+        assert_eq!(code(call(&f, "agents.models", json!({}))), "bad_args");
+        let g = call(&f, "agents.models", json!({"type": "gemini"})).unwrap();
+        assert_eq!((g["source"].as_str().unwrap(), g["models"].as_array().unwrap().len()), ("none", 0));
     }
 
     #[test]
@@ -1480,6 +1601,9 @@ mod tests {
         }
         fn spawnable(&self) -> Result<Vec<SpawnType>, String> {
             self.inner.spawnable()
+        }
+        fn codex_models(&self) -> Result<Vec<ModelOption>, String> {
+            self.inner.codex_models()
         }
         fn process_start(&self, pid: u32) -> Option<String> {
             self.inner.process_start(pid)
