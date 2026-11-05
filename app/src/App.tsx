@@ -420,6 +420,29 @@ export function routeMessage(
 // the inbox and how to answer, with this install's name, the team, the agent's own name and the sender spelled
 // out: an agent that is not told where a reply goes writes it in its own chat, where nobody reads it. The
 // scripts are the install's own (`--cmd` renames the skill folder), run through bash.
+// Add a live message to the room feed unless the feed already has it (the history load and the watcher can both
+// deliver the same message, in either order, and a store found again re-reads its rows).
+export function appendIfNew<T extends { id: string }>(feed: ReadonlyArray<T>, msg: T): T[] {
+  return feed.some((m) => m.id === msg.id) ? [...feed] : [...feed, msg];
+}
+
+// The history page followed by whatever live messages arrived while it loaded and are not in it.
+export function mergeById<T extends { id: string }>(history: ReadonlyArray<T>, live: ReadonlyArray<T>): T[] {
+  const have = new Set(history.map((m) => m.id));
+  return [...history, ...live.filter((m) => !have.has(m.id))];
+}
+
+// True the first time a message id is seen for a pane (and records it), false after: a message re-emitted by a
+// store found again must not be typed into the same pane twice. The record is bounded.
+export function firstSight(seen: Map<string, Set<string>>, paneId: string, msgId: string, cap = 500): boolean {
+  let ids = seen.get(paneId);
+  if (!ids) seen.set(paneId, (ids = new Set()));
+  if (ids.has(msgId)) return false;
+  ids.add(msgId);
+  if (ids.size > cap) ids.delete(ids.values().next().value as string);
+  return true;
+}
+
 // One line to the app's own log (stderr), for the notice path: what was typed, held, or dropped and why.
 function appLog(line: string) {
   void invoke("app_log", { line }).catch(() => {});
@@ -850,6 +873,7 @@ export default function App() {
   // Notices wait for a pane to be ready for input (see noticeQueue.ts). The ref is what the flush reads; the state
   // twin only drives the held count shown next to the agent.
   const [heldNotices, setHeldNotices] = useState<Queues>({});
+  const noticedRef = useRef<Map<string, Set<string>>>(new Map());
   const noticeFlusherRef = useRef<ReturnType<typeof createNoticeFlusher> | null>(null);
   if (noticeFlusherRef.current === null) {
     noticeFlusherRef.current = createNoticeFlusher({
@@ -1149,7 +1173,7 @@ export default function App() {
     setHasMoreHistory(true);
     return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
       .then((msgs) => {
-        setMessages(msgs);
+        setMessages((live) => mergeById(msgs, live));
         setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
       })
       .catch(console.error);
@@ -1178,8 +1202,10 @@ export default function App() {
     const p = listen<Message>("agmsg-message", (e) => {
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
       if (!pane) appLog(`notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}`);
-      if (feed) setMessages((prev) => [...prev, e.payload]);
-      if (pane) {
+      if (feed) setMessages((prev) => appendIfNew(prev, e.payload));
+      if (pane && !firstSight(noticedRef.current, pane.id, e.payload.id)) {
+        appLog(`notice not typed: message ${e.payload.id} was already typed into ${pane.id}`);
+      } else if (pane) {
         // Inject a kickoff notice, not the raw message body verbatim. The
         // real agmsg Monitor (watch.sh) never types a message's contents
         // into an agent — it hands over a structured "<from> → <to> | <body>"

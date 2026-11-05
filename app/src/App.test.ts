@@ -4,6 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   actasSpawnArgs,
   kickoffText,
+  appendIfNew,
+  firstSight,
+  mergeById,
   routeMessage,
   actionFailedToast,
   deleteTeamForceToast,
@@ -38,6 +41,43 @@ describe("actasSpawnArgs", () => {
 
   it("copilot: no cmd_prefix (defaults to '/') with prompt_arg '--interactive'", () => {
     expect(actasSpawnArgs("agmsg", "X", null, "--interactive")).toEqual(["--interactive", "/agmsg actas X"]);
+  });
+});
+
+describe("appendIfNew", () => {
+  const m = (id: string) => ({ id, body: id });
+  it("history before watch: the same message from the watcher is not added twice", () => {
+    expect(appendIfNew([m("late-first")], m("late-first")).map((x) => x.id)).toEqual(["late-first"]);
+  });
+  it("watch before history: a second delivery of a message already in the feed adds nothing", () => {
+    const afterWatch = appendIfNew([], m("a"));
+    expect(appendIfNew(afterWatch, m("a"))).toHaveLength(1);
+  });
+  it("a store found again re-emits its rows: still once each", () => {
+    let feed = appendIfNew(appendIfNew([], m("a")), m("b"));
+    feed = appendIfNew(appendIfNew(feed, m("a")), m("b"));
+    expect(feed.map((x) => x.id)).toEqual(["a", "b"]);
+  });
+  it("a new id is appended in order", () => {
+    expect(appendIfNew([m("a")], m("b")).map((x) => x.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("mergeById and firstSight", () => {
+  const m = (id: string) => ({ id });
+  it("history then live that arrived during the load: each id once, live extras kept after", () => {
+    expect(mergeById([m("a"), m("b")], [m("b"), m("c")]).map((x) => x.id)).toEqual(["a", "b", "c"]);
+  });
+  it("a message re-emitted by a rediscovered store is typed into a pane once", () => {
+    const seen = new Map<string, Set<string>>();
+    expect(firstSight(seen, "p1", "m1")).toBe(true);
+    expect(firstSight(seen, "p1", "m1")).toBe(false);
+    expect(firstSight(seen, "p2", "m1")).toBe(true);
+  });
+  it("the per-pane record is bounded", () => {
+    const seen = new Map<string, Set<string>>();
+    for (let i = 0; i < 20; i++) firstSight(seen, "p1", `m${i}`, 10);
+    expect(seen.get("p1")!.size).toBe(10);
   });
 });
 

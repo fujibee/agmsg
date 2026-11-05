@@ -571,36 +571,30 @@ pub fn request_rescan() {
     RESCAN_NOW.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time, the shape agmsg stores its timestamps in.
-fn iso_utc(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    // days since 1970-01-01 to a civil date (Howard Hinnant's algorithm)
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
-}
-
-/// Where to begin reading a store the watcher has just opened, and the oldest row time to emit from it. At startup
-/// that is the store's current end (the room loads its history itself). Later it is the start, minus rows older
-/// than this run, so a store whose first rows were written before it was found loses none of them.
-fn start_reading(conn: &rusqlite::Connection, first_scan: bool, started_at: &str) -> (Cursors, Option<String>) {
-    if first_scan {
-        let end = Cursors {
+/// Where to begin reading a store the watcher has just opened. A store that was there when the app started begins
+/// at its current end (the room loads its history itself, and replaying it would also type old messages into
+/// panes). A store that did not exist then is new: it is read from its start, so rows written before it was found
+/// are not lost. This is decided by what existed, never by a row's own time, which an imported message keeps from
+/// its origin.
+fn start_reading(conn: &rusqlite::Connection, new_store: bool) -> Cursors {
+    if new_store {
+        Cursors::default()
+    } else {
+        Cursors {
             seq: conn.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0)).unwrap_or(0),
             legacy_id: conn.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0)).unwrap_or(0),
-        };
-        (end, None)
-    } else {
-        (Cursors::default(), Some(started_at.to_string()))
+        }
     }
+}
+
+/// Whether a store file the watcher is opening is new since the app started: it was not among the files present at
+/// the first look, and (where the system says) it was not created before the app started either.
+fn is_new_store(path: &std::path::Path, present_at_start: &std::collections::HashSet<PathBuf>, started: std::time::SystemTime) -> bool {
+    if present_at_start.contains(path) {
+        return false;
+    }
+    let born = std::fs::metadata(path).and_then(|m| m.created()).ok();
+    born.map_or(true, |t| t + Duration::from_secs(2) >= started)
 }
 
 /// Where each of the two id spaces has been read up to.
@@ -631,7 +625,6 @@ struct Cursors {
 fn read_new_messages(
     conn: &rusqlite::Connection,
     cursors: &mut Cursors,
-    not_before: Option<&str>,
 ) -> Result<Vec<Message>, rusqlite::Error> {
     let run = |sql: &str| -> Result<Vec<(Message, i64, i64, bool)>, rusqlite::Error> {
         let mut stmt = conn.prepare(sql)?;
@@ -668,9 +661,7 @@ fn read_new_messages(
         } else {
             cursors.legacy_id = cursors.legacy_id.max(ord);
         }
-        // A store first seen after startup is read from its start, but rows from before the app started are not
-        // emitted: the room loads that history itself.
-        if !linked && not_before.map_or(true, |t| msg.created_at.as_str() >= t) {
+        if !linked {
             out.push(msg);
         }
     }
@@ -1369,8 +1360,10 @@ pub fn start_watcher(app: AppHandle) {
         // started. Retry instead of giving up once, so that session isn't
         // permanently missing live updates and stdin-inject delivery.
         // One open connection and cursor pair per store, keyed by path.
-        let mut open: Vec<(PathBuf, rusqlite::Connection, Cursors, Option<String>)> = Vec::new();
-        let started_at = iso_utc(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+        let mut open: Vec<(PathBuf, rusqlite::Connection, Cursors)> = Vec::new();
+        let started = std::time::SystemTime::now();
+        // Store files that existed at the first look.
+        let mut present_at_start: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         // Re-enumerating costs a subprocess per team, so it happens on a much
         // slower beat than the poll. `join` creating a team is an ordinary
         // action, though, so it cannot be startup-only: "I joined and the app
@@ -1403,19 +1396,19 @@ pub fn start_watcher(app: AppHandle) {
                     }
                 }
                 for path in direct {
-                    if open.iter().any(|(p, _, _, _)| p == &path) {
+                    if open.iter().any(|(p, _, _)| p == &path) {
                         continue;
                     }
                     if let Ok(conn) = open_ro(&path) {
-                        // At startup, begin at the current end of both id spaces: the room loads its own
-                        // history separately, so replaying it here would double every message already on
-                        // screen. A store first seen later is read from its start (a team's store can appear
-                        // with its first message), minus rows older than this app run.
-                        let (cursors, not_before) = start_reading(&conn, first_scan, &started_at);
-                        if !first_scan {
-                            eprintln!("[agmsg-app] watcher opened a store after startup and reads it from its start, skipping rows older than this run");
+                        let new_store = !first_scan && is_new_store(&path, &present_at_start, started);
+                        let cursors = start_reading(&conn, new_store);
+                        if new_store {
+                            eprintln!("[agmsg-app] watcher opened a store created after startup and reads it from its start");
                         }
-                        open.push((path, conn, cursors, not_before));
+                        if first_scan {
+                            present_at_start.insert(path.clone());
+                        }
+                        open.push((path, conn, cursors));
                     }
                 }
             }
@@ -1426,8 +1419,8 @@ pub fn start_watcher(app: AppHandle) {
             // being recreated), not a reason to end the thread — the previous
             // version returned on a prepare error and the session went
             // silently dead for the rest of its life.
-            for (_, conn, cursors, not_before) in open.iter_mut() {
-                if let Ok(new_rows) = read_new_messages(conn, cursors, not_before.as_deref()) {
+            for (_, conn, cursors) in open.iter_mut() {
+                if let Ok(new_rows) = read_new_messages(conn, cursors) {
                     for m in new_rows {
                         let _ = app.emit("agmsg-message", m);
                     }
@@ -2265,46 +2258,58 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
     ///
     /// It exercises the watcher's own reader, not a copy of its SQL.
     #[test]
-    fn iso_utc_has_the_shape_agmsg_stores() {
-        assert_eq!(super::iso_utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(super::iso_utc(1_785_233_999), "2026-07-28T10:19:59Z");
-        assert_eq!(super::iso_utc(951_782_400), "2000-02-29T00:00:00Z");
-    }
-
-    #[test]
     #[serial]
-    fn a_store_found_after_startup_emits_what_was_written_before_it_was_found_but_not_older_rows() {
+    fn a_new_store_is_read_from_its_start_whatever_the_rows_own_time_says() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
-        // Rows: one from before the app started, then two written after it started but before the store was found.
+        // An imported row keeps its origin's time, so it can look old (or skewed) to this machine.
         store_with(
             dir.path(),
             &[
-                ("019faa2a-0000-7000-8000-000000000001", "2026-07-28T09:00:00Z"),
-                ("019faa2a-0000-7000-8000-000000000002", "2026-07-28T10:00:05Z"),
-                ("019faa2a-0000-7000-8000-000000000003", "2026-07-28T10:00:06Z"),
+                ("019faa2a-0000-7000-8000-000000000001", "2001-01-01T00:00:00Z"),
+                ("019faa2a-0000-7000-8000-000000000002", "2026-07-28T10:00:06Z"),
             ],
             &[],
         );
         let conn = super::open_ro(&dir.path().join("db/messages.db")).expect("open");
-        let (mut cursors, not_before) = super::start_reading(&conn, false, "2026-07-28T10:00:00Z");
-        let got = super::read_new_messages(&conn, &mut cursors, not_before.as_deref()).expect("read");
-        assert_eq!(got.len(), 2, "both rows written since the app started are emitted, the older one is not");
-        // Read again: once each, no duplicates.
-        let again = super::read_new_messages(&conn, &mut cursors, not_before.as_deref()).expect("read");
-        assert!(again.is_empty());
+        let mut cursors = super::start_reading(&conn, true);
+        let got = super::read_new_messages(&conn, &mut cursors).expect("read");
+        assert_eq!(got.len(), 2, "found late: every row is emitted, old origin time or not");
+        assert!(super::read_new_messages(&conn, &mut cursors).expect("read").is_empty(), "and each once");
+        // A row that arrives afterwards with an old origin time is still emitted.
+        add_linked(dir.path(), "019faa2a-0000-7000-8000-00000000000c", "2001-01-01T00:00:01Z", None);
+        let later = super::read_new_messages(&conn, &mut cursors).expect("read");
+        assert_eq!(later.len(), 1);
     }
 
     #[test]
     #[serial]
-    fn a_store_that_exists_at_startup_still_begins_at_its_end() {
+    fn a_store_that_existed_at_startup_begins_at_its_end() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
         store_with(dir.path(), &[("019faa2a-0000-7000-8000-000000000001", "2026-07-28T10:00:05Z")], &[]);
         let conn = super::open_ro(&dir.path().join("db/messages.db")).expect("open");
-        let (mut cursors, not_before) = super::start_reading(&conn, true, "2026-07-28T10:00:00Z");
-        assert!(not_before.is_none());
-        assert!(super::read_new_messages(&conn, &mut cursors, not_before.as_deref()).expect("read").is_empty());
+        let mut cursors = super::start_reading(&conn, false);
+        assert!(super::read_new_messages(&conn, &mut cursors).expect("read").is_empty());
+        add_linked(dir.path(), "019faa2a-0000-7000-8000-00000000000d", "2001-01-01T00:00:01Z", None);
+        assert_eq!(super::read_new_messages(&conn, &mut cursors).expect("read").len(), 1, "a later row with an old origin time is emitted");
+    }
+
+    #[test]
+    fn a_file_is_new_only_if_it_was_not_there_at_the_first_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("messages.db");
+        std::fs::write(&f, b"").unwrap();
+        let mut present = std::collections::HashSet::new();
+        let started = std::time::SystemTime::now();
+        // Not in the first look and made after start: new.
+        assert!(super::is_new_store(&f, &present, started));
+        // Present at the first look: never new, however the clock reads.
+        present.insert(f.clone());
+        assert!(!super::is_new_store(&f, &present, started));
+        // Not in the first look, but created long before the app started: not new.
+        present.clear();
+        assert!(!super::is_new_store(&f, &present, started + std::time::Duration::from_secs(3600)));
     }
 
     #[test]
@@ -2325,7 +2330,7 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         let conn = super::open_ro(&dir.path().join("db/messages.db"))
             .expect("the store must open");
         let mut cursors = super::Cursors::default();
-        let got = super::read_new_messages(&conn, &mut cursors, None).expect("read");
+        let got = super::read_new_messages(&conn, &mut cursors).expect("read");
 
         let ids: Vec<&str> = got.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
@@ -2349,7 +2354,7 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         // legacy cursor moved past row 3 although that row was not emitted --
         // were it left behind, every later poll would fetch it again.
         assert_eq!((cursors.seq, cursors.legacy_id), (2, 3));
-        let again = super::read_new_messages(&conn, &mut cursors, None).expect("read");
+        let again = super::read_new_messages(&conn, &mut cursors).expect("read");
         assert!(again.is_empty(), "already-seen rows must not be re-emitted");
     }
 
@@ -2378,7 +2383,7 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
 
         let conn = super::open_ro(&dir.path().join("db/messages.db")).unwrap();
         let mut cursors = super::Cursors::default();
-        let got = super::read_new_messages(&conn, &mut cursors, None).expect("read");
+        let got = super::read_new_messages(&conn, &mut cursors).expect("read");
 
         assert_eq!(got.len(), 1, "a pre-event-log store must not read as empty");
         assert_eq!(got[0].body, "older than the event log");
