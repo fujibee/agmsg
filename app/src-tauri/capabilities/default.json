@@ -17,6 +17,7 @@
     "allow-addon-gate-status",
     "allow-addon-recheck",
     "allow-pty-spawn",
+    "allow-app-log",
     "allow-pty-write",
     "allow-pty-resize",
     "allow-pty-kill",
