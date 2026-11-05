@@ -692,6 +692,13 @@ impl Manager {
                 _ => return Err(BrokerError::new("bad_args", "`order` must be a whole number from 0 to 99")),
             },
         };
+        let folder_arg = match args.get("folder") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(f)) => Some(f.clone()),
+            Some(_) => return Err(BrokerError::new("bad_args", "`folder` must be a string")),
+        };
+        // Last of the argument checks: validating an effort may need the model list, which can start the one
+        // short-lived `codex app-server` when it has not been read yet, so the cheap type checks come first.
         let effort = match args.get("effort") {
             None | Some(Value::Null) => None,
             Some(Value::String(e)) => {
@@ -699,11 +706,6 @@ impl Manager {
                 Some(e.clone())
             }
             Some(_) => return Err(BrokerError::new("bad_args", "`effort` must be a string")),
-        };
-        let folder_arg = match args.get("folder") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(f)) => Some(f.clone()),
-            Some(_) => return Err(BrokerError::new("bad_args", "`folder` must be a string")),
         };
         // 2. a retry: the entry for this requested name decides
         if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
@@ -1459,6 +1461,22 @@ mod tests {
         assert!(e.message.contains("low"), "the allowed values are named: {}", e.message);
         assert_eq!(f.world.joins.load(Ordering::SeqCst), 0, "nothing joined");
         assert!(f.world.opened.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cheap_argument_errors_come_before_the_model_list_is_looked_up() {
+        let f = fx(all_powers());
+        for args in [
+            json!({"type": "codex", "name": "w", "effort": "low", "folder": 5}),
+            json!({"type": "codex", "name": "w", "effort": "low", "model": 7}),
+            json!({"type": "codex", "name": "..", "effort": "low"}),
+        ] {
+            assert_eq!(call(&f, "agents.spawn", args.clone()).unwrap_err().code, "bad_args", "{args}");
+        }
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 0, "no codex app-server was asked for a call that was malformed anyway");
+        // a well-formed one does look it up, once
+        call(&f, "agents.spawn", json!({"type": "codex", "name": "w", "effort": "low"})).unwrap();
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
