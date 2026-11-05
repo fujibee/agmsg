@@ -127,6 +127,7 @@ export function connect(options = {}) {
     },
     agents: {
       types: () => request("agents.types"),
+      models: (type) => request("agents.models", { type }),
       spawn: (type, name, opts = {}) => request("agents.spawn", { type, name, ...opts }),
       list: () => request("agents.list"),
     },
@@ -215,6 +216,8 @@ function sampleRequest(op, args) {
       return { to: args.to };
     case "agents.types":
       return { types: [{ type: "claude-code", models: true }] };
+    case "agents.models":
+      return { type: args.type, source: "fixed", models: [{ id: "sample", name: "Sample", description: "A sample model", isDefault: true, defaultEffort: null, efforts: [{ id: "low", description: "Low" }] }] };
     case "agents.spawn":
       return { name: args.name, type: args.type, state: "running", pid: 1 };
     case "agents.list":

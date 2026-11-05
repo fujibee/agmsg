@@ -21,6 +21,7 @@ describe("kit agent ops", () => {
       [app.team.join(), "team.join", {}],
       [app.messages.send("white", "hi"), "messages.send", { to: "white", body: "hi" }],
       [app.agents.types(), "agents.types", {}],
+      [app.agents.models("codex"), "agents.models", { type: "codex" }],
       [app.agents.spawn("claude-code", "white", { model: "m" }), "agents.spawn", { type: "claude-code", name: "white", model: "m" }],
       [app.agents.list(), "agents.list", {}],
     ];
