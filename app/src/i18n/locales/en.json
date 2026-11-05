@@ -49,8 +49,8 @@
       "none": "none"
     },
     "member": {
-      "held": "{{count}} waiting",
-      "heldTitle": "Notices are held until the agent is ready for input",
+      "held": "starting, {{count}} waiting",
+      "heldTitle": "Notices are held until the agent has finished starting up",
       "checkboxTitle": "show in team room",
       "titleRunning": "already running — click to focus",
       "titleSpawn": "spawn in a PTY pane",

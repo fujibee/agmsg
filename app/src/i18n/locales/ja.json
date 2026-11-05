@@ -39,8 +39,8 @@
       "none": "なし"
     },
     "member": {
-      "held": "{{count}} 件待機中",
-      "heldTitle": "エージェントが入力可能になるまで通知を保留しています",
+      "held": "起動中、{{count}} 件待機",
+      "heldTitle": "エージェントの起動が終わるまで通知を保留しています",
       "checkboxTitle": "チームルームに表示",
       "titleRunning": "実行中 — クリックしてフォーカス",
       "titleSpawn": "PTYペインで起動",

@@ -14,13 +14,22 @@ describe("noticeQueue", () => {
   it("a pane with no state yet waits for its first idle", () => {
     const q = hold({}, "p1", "n1", 0);
     expect(takeReady(q, "p1", false, undefined, 5000).send).toEqual([]);
+    expect(UNKNOWN_WAIT_MS).toBe(180_000);
   });
-  it("the wait is bounded: after the limit the notice is typed with the without-ready-signal flag", () => {
+  it("a working or blocked fresh pane is never cut short, however long it takes", () => {
     const q = hold({}, "p1", "n1", 0);
-    expect(takeReady(q, "p1", false, "blocked", UNKNOWN_WAIT_MS - 1).send).toEqual([]);
-    const r = takeReady(q, "p1", false, "blocked", UNKNOWN_WAIT_MS);
-    expect(r.send.map((s) => [s.text, s.late])).toEqual([["n1", true]]);
-    expect(heldCount(r.rest, "p1")).toBe(0);
+    for (const st of ["working", "blocked"] as const) {
+      expect(takeReady(q, "p1", false, st, UNKNOWN_WAIT_MS * 100).send).toEqual([]);
+    }
+  });
+  it("an unknown or silent fresh pane gets the notice after the cap, flagged as without a ready signal", () => {
+    const q = hold({}, "p1", "n1", 0);
+    for (const st of ["unknown", undefined] as const) {
+      expect(takeReady(q, "p1", false, st, UNKNOWN_WAIT_MS - 1).send).toEqual([]);
+      const r = takeReady(q, "p1", false, st, UNKNOWN_WAIT_MS);
+      expect(r.send.map((x) => [x.text, x.late])).toEqual([["n1", true]]);
+      expect(heldCount(r.rest, "p1")).toBe(0);
+    }
   });
   it("once released, notices go out at once whatever the state", () => {
     const q = hold({}, "p1", "n1", 0);
