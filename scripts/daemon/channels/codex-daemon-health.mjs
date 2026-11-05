@@ -22,7 +22,8 @@ export function healthRecordPath(installRoot) {
 }
 
 // run/codex-daemon-health lines:
-//   daemon\t<profile>\t<pid>\t<start time>\t<consecutive over>\t<noticed 0|1>
+//   daemon\t<profile>\t<pid>\t<start time>\t<consecutive memory-over>\t<noticed 0|1>\t<consecutive cpu-over>
+//     (the last field is absent in a record written before the CPU condition: 0)
 //   notice\t<text>            (the latest notice)
 export function readHealthRecord(installRoot) {
   const daemons = new Map();
@@ -35,8 +36,8 @@ export function readHealthRecord(installRoot) {
   }
   for (const line of text.split("\n")) {
     const f = line.split("\t");
-    if (f[0] === "daemon" && f.length === 6) {
-      daemons.set(`${f[1]}\t${f[2]}\t${f[3]}`, { over: Number(f[4]) || 0, noticed: f[5] === "1" });
+    if (f[0] === "daemon" && (f.length === 6 || f.length === 7)) {
+      daemons.set(`${f[1]}\t${f[2]}\t${f[3]}`, { over: Number(f[4]) || 0, noticed: f[5] === "1", cpuOver: Number(f[6]) || 0 });
     } else if (f[0] === "notice") notice = f.slice(1).join("\t");
   }
   return { daemons, notice };
@@ -44,7 +45,7 @@ export function readHealthRecord(installRoot) {
 
 function writeHealthRecord(installRoot, { daemons, notice }) {
   const lines = [];
-  for (const [key, v] of daemons) lines.push(`daemon\t${key}\t${v.over}\t${v.noticed ? 1 : 0}`);
+  for (const [key, v] of daemons) lines.push(`daemon\t${key}\t${v.over}\t${v.noticed ? 1 : 0}\t${v.cpuOver ?? 0}`);
   if (notice) lines.push(`notice\t${notice}`);
   const path = healthRecordPath(installRoot);
   const tmp = `${path}.${process.pid}`;
@@ -78,30 +79,36 @@ export function foldReadings(previous, rows) {
     const row = byProfile.get(key.split("\t")[0]);
     // Not read this time (a read cut short): no information, so nothing changes.
     // Read but unchecked: the series is broken, the noticed flag is not.
-    if (!row) daemons.set(key, { over: before.over, noticed: before.noticed });
-    else if (row.state === "unchecked") daemons.set(key, { over: 0, noticed: before.noticed });
+    if (!row) daemons.set(key, { over: before.over, noticed: before.noticed, cpuOver: before.cpuOver ?? 0 });
+    else if (row.state === "unchecked") daemons.set(key, { over: 0, noticed: before.noticed, cpuOver: 0 });
   }
   for (const row of rows) {
     if (row.state !== "running") continue;
     const key = `${row.profile}\t${row.pid}\t${row.start}`;
-    const before = previous.daemons.get(key) ?? { over: 0, noticed: false };
-    const over = row.over ? before.over + 1 : 0;
+    const before = previous.daemons.get(key) ?? { over: 0, noticed: false, cpuOver: 0 };
+    // Each condition counts its own consecutive readings: memory over once and
+    // then CPU over once is not two in a row of either. A reading from before the
+    // CPU condition carries no cause and counts as memory.
+    const memNow = row.over && (row.cause === "" || row.cause.includes("memory"));
+    const cpuNow = row.over && row.cause.includes("cpu");
+    const over = memNow ? before.over + 1 : 0;
+    const cpuOver = cpuNow ? (before.cpuOver ?? 0) + 1 : 0;
     let noticed = before.noticed;
-    if (over >= 2 && !noticed) {
+    if ((over >= 2 || cpuOver >= 2) && !noticed) {
       noticed = true;
-      notices.push(row);
+      notices.push({ row, cause: `${over >= 2 ? "memory" : ""}${over >= 2 && cpuOver >= 2 ? "+" : ""}${cpuOver >= 2 ? "cpu" : ""}` });
     }
-    daemons.set(key, { over, noticed });
+    daemons.set(key, { over, noticed, cpuOver });
   }
   return { daemons, notices };
 }
 
-function noticeText(row) {
+function noticeText(row, cause) {
   const hours = Math.floor(row.ageSeconds / 3600);
   const clients = row.clients === "" ? "" : ` with ${row.clients} client(s)`;
   const parts = [];
-  if (row.cause === "" || row.cause.includes("memory")) parts.push(`holds ${(row.footprintMb / 1024).toFixed(1)} GB, over the 6 GB limit`);
-  if (row.cause.includes("cpu")) parts.push(`uses ${row.cpuPercent}% CPU, over the 200% limit`);
+  if (cause.includes("memory")) parts.push(`holds ${(row.footprintMb / 1024).toFixed(1)} GB, over the 6 GB limit`);
+  if (cause.includes("cpu")) parts.push(`uses ${row.cpuPercent}% CPU, over the 200% limit`);
   return `Codex app-server daemon pid ${row.pid} for ${row.profile} has run ${hours}h${clients} and ${parts.join(" and ")} (age over 12h) on two checks in a row. It keeps running. To restart it: CODEX_HOME=${row.profile} codex app-server daemon restart`;
 }
 
@@ -137,9 +144,9 @@ export function createCodexDaemonHealthChannel({ installRoot, intervalMs = CHECK
       const previous = readHealthRecord(installRoot);
       const { daemons, notices } = foldReadings(previous, rows);
       let notice = previous.notice;
-      for (const row of notices) {
-        notice = `${new Date(now()).toISOString()} ${noticeText(row)}`;
-        logLine(installRoot, `codex daemon health: ${noticeText(row)}`);
+      for (const { row, cause } of notices) {
+        notice = `${new Date(now()).toISOString()} ${noticeText(row, cause)}`;
+        logLine(installRoot, `codex daemon health: ${noticeText(row, cause)}`);
       }
       writeHealthRecord(installRoot, { daemons, notice });
     } catch (error) {

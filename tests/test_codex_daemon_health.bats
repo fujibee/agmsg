@@ -275,12 +275,12 @@ _wait_child_pid() {
 
 # --- CPU condition: %cpu >= 200 and at least 12 h old ---------------------------
 
-@test "health: 200% CPU at 12 h is over with cause cpu even though the footprint is small" {
+@test "health: exactly 200.0% CPU at 12 h is over with cause cpu even though the footprint is small" {
   _stub_footprint 1228
-  _stub_ps "12:00:00" "$START" "240.3"
+  _stub_ps "12:00:00" "$START" "200.0"
   _health
   [ "$(_field 7)" = 1 ]
-  [ "$(_field 11)" = 240 ]
+  [ "$(_field 11)" = 200 ]
   [ "$(_field 12)" = cpu ]
 }
 

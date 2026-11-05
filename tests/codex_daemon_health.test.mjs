@@ -206,3 +206,29 @@ test("memory and CPU together name both", async () => {
   await ch.pollOnce(); await ch.settled();
   assert.match(logText(h.root), /holds 6\.8 GB, over the 6 GB limit and uses 300% CPU, over the 200% limit/);
 });
+
+test("memory over once and then CPU over once is two different readings: no notice (each condition counts its own)", async () => {
+  const mem = `${PROFILE}\trunning\t100\tTue Nov 3 12:50:37 2026\t99000\t7000\t1\t\t\t8000\t10\tmemory\n`;
+  const cpu = `${PROFILE}\trunning\t100\tTue Nov 3 12:50:37 2026\t99000\t1000\t1\t\t\t2048\t240\tcpu\n`;
+  const h = harness([mem, cpu, mem, cpu]);
+  const ch = h.make();
+  for (let i = 0; i < 4; i++) {
+    await ch.pollOnce(); await ch.settled();
+    h.advance(10 * 60 * 1000);
+  }
+  assert.equal(noticeCount(h.root), 0, "alternating causes never reach two in a row");
+});
+
+test("CPU over twice in a row notices even after a memory reading; the record keeps the CPU count and reads an older record", async () => {
+  const mem = `${PROFILE}\trunning\t100\tTue Nov 3 12:50:37 2026\t99000\t7000\t1\t\t\t8000\t10\tmemory\n`;
+  const cpu = `${PROFILE}\trunning\t100\tTue Nov 3 12:50:37 2026\t99000\t1000\t1\t\t\t2048\t240\tcpu\n`;
+  const h = harness([mem, cpu, cpu]);
+  const ch = h.make();
+  for (let i = 0; i < 3; i++) { await ch.pollOnce(); await ch.settled(); h.advance(10 * 60 * 1000); }
+  assert.equal(noticeCount(h.root), 1);
+  assert.match(logText(h.root), /uses 240% CPU/);
+  assert.doesNotMatch(logText(h.root), /holds/);
+  // A record written before the CPU condition has six fields.
+  writeFileSync(join(h.root, "run", "codex-daemon-health"), `daemon\t${PROFILE}\t100\tTue Nov 3 12:50:37 2026\t1\t0\n`);
+  assert.equal(readHealthRecord(h.root).daemons.get(`${PROFILE}\t100\tTue Nov 3 12:50:37 2026`).cpuOver, 0);
+});
