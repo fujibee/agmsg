@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   actasSpawnArgs,
+  kickoffText,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -36,6 +37,16 @@ describe("actasSpawnArgs", () => {
 
   it("copilot: no cmd_prefix (defaults to '/') with prompt_arg '--interactive'", () => {
     expect(actasSpawnArgs("agmsg", "X", null, "--interactive")).toEqual(["--interactive", "/agmsg actas X"]);
+  });
+});
+
+describe("kickoffText", () => {
+  it("names this install's scripts, the team, the agent and the sender; one line", () => {
+    const k = kickoffText("chesstest", "chess-try", "black", "chess", "Reply with one move");
+    expect(k).toContain("bash ~/.agents/skills/chesstest/scripts/inbox.sh chess-try black");
+    expect(k).toContain('bash ~/.agents/skills/chesstest/scripts/send.sh chess-try black chess "<your reply>"');
+    expect(k).toContain("not delivered");
+    expect(k).not.toContain("\n");
   });
 });
 

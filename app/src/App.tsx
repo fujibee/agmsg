@@ -388,6 +388,19 @@ export function actasSpawnArgs(
   return promptArg ? [promptArg, prompt] : [prompt];
 }
 
+// The one-line notice typed into an agent whose pane the app feeds (no delivery of its own). It says how to read
+// the inbox and how to answer, with this install's name, the team, the agent's own name and the sender spelled
+// out: an agent that is not told where a reply goes writes it in its own chat, where nobody reads it. The
+// scripts are the install's own (`--cmd` renames the skill folder), run through bash.
+export function kickoffText(cmdName: string, team: string, to: string, from: string, preview: string): string {
+  const scripts = `~/.agents/skills/${cmdName}/scripts`;
+  return (
+    `[agmsg] ${from}: "${preview}" — read your inbox with: bash ${scripts}/inbox.sh ${team} ${to} ; ` +
+    `answer with: bash ${scripts}/send.sh ${team} ${to} ${from} "<your reply>" ` +
+    `(a reply written in this chat is not delivered; /${cmdName} does the same).`
+  );
+}
+
 // Whether the outdated-CLI banner should render. A pure function (rather
 // than an inline JSX condition) purely so it's unit-testable — pinning down
 // that "Update now" already in flight (updatingCore) and a session-only ×
@@ -1133,7 +1146,7 @@ export default function App() {
         // territory since it can no longer contain newlines or run long.
         const flat = e.payload.body.replace(/\s+/g, " ").trim();
         const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
-        const kickoff = `[agmsg] ${e.payload.from}: "${preview}" — run /${cmdName} to check it.`;
+        const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
         void invoke("pty_inject", { id: pane.id, text: kickoff });
       }
     });
