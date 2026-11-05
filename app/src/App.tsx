@@ -1107,11 +1107,14 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
-      if (e.payload.team !== team) return;
-      setMessages((prev) => [...prev, e.payload]);
+      // The room feed is the selected team's. A pane is reached by the team it belongs to, not by the team that
+      // happens to be selected: an agent an add-on starts for another team (a game in its own team) has no other
+      // way to hear, so a message for it must not be dropped because the user is looking at a different team.
+      if (e.payload.team === team) setMessages((prev) => [...prev, e.payload]);
+      const teamPaneIds = new Set(windowsRef.current.filter((w) => w.team === e.payload.team).flatMap((w) => leaves(w.root)));
       // Only inject into NON-native panes; a native (actas-booted) agent runs
       // its own agmsg monitor and would otherwise receive the message twice.
-      const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native);
+      const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native && teamPaneIds.has(pn.id));
       if (pane) {
         // Inject a kickoff notice, not the raw message body verbatim. The
         // real agmsg Monitor (watch.sh) never types a message's contents

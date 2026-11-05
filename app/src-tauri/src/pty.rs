@@ -210,6 +210,12 @@ fn pty_spawn_inner(
         builder.cwd(dir);
     }
     builder.env("TERM", "xterm-256color");
+    // The terminal in the app is not the terminal the app was started from. Variables that name that outer
+    // terminal (a herdr or tmux pane, an Orca handle) would make agmsg in the child act on the outer pane: name it,
+    // rename it, and treat the agent as living there.
+    for name in outer_terminal_vars(std::env::vars_os().filter_map(|(k, _)| k.into_string().ok())) {
+        builder.env_remove(name);
+    }
     // Explicitly set PATH from what import_login_shell_path() resolved at
     // startup (lib.rs) rather than relying on this child implicitly
     // inheriting the process's own (mutated) environment — a real
@@ -332,6 +338,11 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
     Ok(())
 }
 
+/// The names, among `names`, that identify the terminal the app itself runs in.
+fn outer_terminal_vars(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    names.into_iter().filter(|n| n.starts_with("HERDR_") || matches!(n.as_str(), "TMUX" | "TMUX_PANE" | "ORCA_TERMINAL_HANDLE")).collect()
+}
+
 /// Inject `text` (then Enter) into the agent's stdin — the universal,
 /// agent-agnostic agmsg delivery. No idle wait before writing the text; see
 /// the module doc comment for why waiting for quiescence was worse than not
@@ -365,6 +376,13 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn variables_of_the_outer_terminal_are_not_passed_to_the_child() {
+        let names = ["PATH", "HOME", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV", "TMUX", "TMUX_PANE", "ORCA_TERMINAL_HANDLE", "TMUXINATOR", "TERM"];
+        let got = super::outer_terminal_vars(names.iter().map(|s| s.to_string()));
+        assert_eq!(got, vec!["HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV", "TMUX", "TMUX_PANE", "ORCA_TERMINAL_HANDLE"]);
+    }
+
     use super::windows_shell_argv;
 
     #[test]
