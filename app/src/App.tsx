@@ -397,10 +397,12 @@ export function actasSpawnArgs(
 // then finds nothing new). The scripts are the install's own, as in kickoffText.
 export function startupInboxText(cmdName: string, team: string, name: string): string {
   const scripts = `~/.agents/skills/${cmdName}/scripts`;
+  // One line with none of the characters cmd.exe treats specially (quotes, < > & | ^ %, parentheses): on Windows
+  // every launch goes through cmd /d /c.
   return (
-    `\n\nThen read your inbox with: bash ${scripts}/inbox.sh ${team} ${name} and act on what is waiting. ` +
-    `Reply with: bash ${scripts}/send.sh ${team} ${name} <sender> "<your reply>" ` +
-    `(a reply written in this chat is not delivered).`
+    ` and then read your inbox with: bash ${scripts}/inbox.sh ${team} ${name} and act on what is waiting, ` +
+    `reply with: bash ${scripts}/send.sh ${team} ${name} SENDER followed by your reply, ` +
+    `a reply written in this chat is not delivered`
   );
 }
 

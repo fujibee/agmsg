@@ -48,9 +48,9 @@ describe("actasSpawnArgs", () => {
 describe("actasSpawnArgs with the startup inbox read", () => {
   it("claude-code: the actas line, then an inbox read and reply instruction with this install's scripts", () => {
     const [prompt] = actasSpawnArgs("agmsg", "white", null, null, "chess");
-    expect(prompt.startsWith("/agmsg actas white\n\n")).toBe(true);
+    expect(prompt.startsWith("/agmsg actas white and then read your inbox")).toBe(true);
     expect(prompt).toContain("bash ~/.agents/skills/agmsg/scripts/inbox.sh chess white");
-    expect(prompt).toContain('bash ~/.agents/skills/agmsg/scripts/send.sh chess white <sender> "<your reply>"');
+    expect(prompt).toContain('bash ~/.agents/skills/agmsg/scripts/send.sh chess white SENDER followed by your reply');
     expect(prompt).toContain("act on what is waiting");
   });
   it("uses the renamed skill folder and the type's prompt shape", () => {
@@ -59,6 +59,10 @@ describe("actasSpawnArgs with the startup inbox read", () => {
       `$agmsg-try actas OC${startupInboxText("agmsg-try", "t", "OC")}`,
     ]);
     expect(startupInboxText("agmsg-try", "t", "OC")).toContain("~/.agents/skills/agmsg-try/scripts/inbox.sh t OC");
+  });
+  it("is one line without a character cmd.exe treats specially", () => {
+    const all = actasSpawnArgs("agmsg", "white", null, null, "chess")[0];
+    expect(all).not.toMatch(/[\r\n"<>&|^%()]/);
   });
   it("holds no home directory path", () => {
     expect(startupInboxText("agmsg", "t", "n")).not.toMatch(/\/Users\/|\/home\//);
