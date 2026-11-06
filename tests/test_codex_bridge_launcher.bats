@@ -293,6 +293,8 @@ run_launcher() {
   grep -q 'no longer being started' "$notice"
   grep -q 'not serving these pairs' "$notice"
   grep -q 'delivery.sh status codex' "$notice"
+  # The recovery field is the restart, never a command that only looks.
+  grep -q '"recovery":"restart this seat'"'"'s Codex session"' "$notice"
   grep -q 'restart this seat' "$notice"
   [ "$(grep -c 'not starting it again' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
   # The role's launcher ended on its own and nothing starts a bridge afterwards.

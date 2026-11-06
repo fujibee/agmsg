@@ -775,7 +775,7 @@ bridge_notice_flush() {
   [ "$SECONDS" -ge "$bridge_notice_next_try" ] || return 0
   if [ -n "$bridge_notice_reason" ]; then
     if err="$(down_notice_set "$bridge_down_key" down "$bridge_notice_reason" \
-        "$SKILL_DIR/scripts/delivery.sh status codex $PROJECT" 2>&1)"; then
+        "restart this seat's Codex session" 2>&1)"; then
       bridge_notice_reason=""; bridge_notice_err_logged=0; return 0
     fi
   else
