@@ -725,14 +725,28 @@ fi
 # running; one `wc` per start.
 BRIDGE_LOG_MAX_BYTES="${AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES:-1048576}"
 rotate_bridge_log() {
-  local size
+  local size err
   [ -f "$log" ] || return 0
-  size="$(wc -c < "$log" 2>/dev/null || true)"
+  if ! size="$(wc -c < "$log" 2>&1)"; then
+    _bridge_log_note "could not measure its size ($size)"
+    return 0
+  fi
   size="${size//[[:space:]]/}"
-  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  case "$size" in
+    ''|*[!0-9]*) _bridge_log_note "its size could not be read (got '$size')"; return 0 ;;
+  esac
   [ "$size" -gt "$BRIDGE_LOG_MAX_BYTES" ] || return 0
-  mv -f "$log" "$log.1" 2>/dev/null || true
+  if ! err="$(mv -f "$log" "$log.1" 2>&1)"; then
+    _bridge_log_note "could not be moved aside (${err:-no message})"
+  fi
   return 0
+}
+# A rotation that cannot happen is said once per start, in the log itself (or on
+# stderr when the log cannot be written); the bridge is started either way.
+_bridge_log_note() {
+  local line
+  line="$(printf '[%s] codex-bridge-launcher: the bridge log for %s %s; it keeps growing until this is fixed' "$$" "$bridge_key" "$1")"
+  printf '%s\n' "$line" >>"$log" 2>/dev/null || printf '%s\n' "$line" >&2 || true
 }
 
 # Retire this role's bridge only when its lease proves the pid is the bridge
