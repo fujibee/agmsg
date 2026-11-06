@@ -38,8 +38,21 @@ _agmsg_daemon_seats_fetch() {
   out="$("$node_path" --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/daemon/seat-query.mjs" "$SKILL_DIR" 2>&1)" || rc=$?
   case "$out" in
     state=*)
+      local rest=""
       AGMSG_SEATS_STATE="${out%%$'\n'*}"; AGMSG_SEATS_STATE="${AGMSG_SEATS_STATE#state=}"
-      case "$out" in *$'\n'*) AGMSG_SEATS_ROWS="${out#*$'\n'}" ;; esac
+      case "$out" in *$'\n'*) rest="${out#*$'\n'}" ;; esac
+      case "$AGMSG_SEATS_STATE" in
+        ok|not_polled_yet|daemon_not_running|liveness_unconfirmed|no_answer) AGMSG_SEATS_ROWS="$rest" ;;
+        unreadable)
+          # What follows the state line is the helper's real error.
+          AGMSG_SEATS_DETAIL="$(printf '%s' "${rest#detail=}" | head -c 300 | tr '\n' ' ')"
+          [ -n "$AGMSG_SEATS_DETAIL" ] || AGMSG_SEATS_DETAIL="the helper gave no reason"
+          ;;
+        *)
+          AGMSG_SEATS_DETAIL="unexpected seat state '$AGMSG_SEATS_STATE' from the helper"
+          AGMSG_SEATS_STATE=unreadable
+          ;;
+      esac
       ;;
     *)
       AGMSG_SEATS_STATE=unreadable

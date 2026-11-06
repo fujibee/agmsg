@@ -216,6 +216,25 @@ test('a seat-state helper that cannot run is reported with its real error, never
   assert.doesNotMatch(text, /agmsgd is not running/);
 });
 
+test("the helper's own failure (state=unreadable then its error) is shown with that error", async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f);
+  writeFileSync(join(f.root, 'scripts/daemon/seat-query.mjs'),
+    "process.stdout.write('state=unreadable\\n'); process.stderr.write('seat-query: review-db-read-error\\n'); process.exit(0);\n");
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex seats: the seat state of agmsgd could not be read: .*review-db-read-error/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test('a helper answer with an unknown state is an error with that state named, never "not running"', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f);
+  writeFileSync(join(f.root, 'scripts/daemon/seat-query.mjs'), "process.stdout.write('state=garbled\\n');\n");
+  const text = await runAsync(f.root);
+  assert.match(text, /could not be read: unexpected seat state 'garbled'/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
 test('a running agmsgd whose process cannot be confirmed alive and that does not answer is reported as unconfirmed, not stopped', async t => {
   const f = fixture(t);
   await fakeDaemon(t, f, { mode: 'silent' });
