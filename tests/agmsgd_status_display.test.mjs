@@ -197,6 +197,35 @@ test('multiple project registrations produce one seat line', t => {
   assert.equal(status().split('\n').filter(line => line.startsWith('Codex test/alice:')).length, 1);
 });
 
+test('a recorded Node that is gone does not turn a running agmsgd into "not running": the seat state is still fetched', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { codex: [{ seat: JSON.stringify(['test', 'alice']), thread, codex_home: '/profile', state: 'blocked', reason: 'codex_executable_unavailable:run_agmsg_daemon_enable', since: new Date().toISOString() }] });
+  f.db.prepare('UPDATE meta SET node_path=?').run(join(f.root, 'no-such-node'));
+  rmSync(join(f.root, 'run/codex-bridge.test.alice.pid'));
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex executable unavailable/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test('a seat-state helper that cannot run is reported with its real error, never as "not running"', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f);
+  rmSync(join(f.root, 'scripts/daemon/seat-query.mjs'));
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex seats: the seat state of agmsgd could not be read: .*seat-query/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test('a running agmsgd whose process cannot be confirmed alive and that does not answer is reported as unconfirmed, not stopped', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { mode: 'silent' });
+  // An old-format boot record: a live pid cannot be told from another boot.
+  f.db.prepare("UPDATE daemon_owner SET executor_boot_id='12345'").run();
+  const text = await runAsync(f.root);
+  assert.match(text, /could not be confirmed to be running/);
+  assert.doesNotMatch(text, /agmsgd is not running; there is no seat state/);
+});
+
 test('bridge display uses every registered project and does not repeat a contradictory cached verdict', async t => {
   const f = fixture(t);
   await fakeDaemon(t, f, { codex: [{ seat: JSON.stringify(['test', 'alice']), thread, codex_home: '/profile', state: 'blocked', reason: 'bridge_state_unknown', since: new Date().toISOString() }] });

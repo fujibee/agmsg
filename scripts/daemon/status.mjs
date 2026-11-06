@@ -197,10 +197,13 @@ const probeSocket = async (socketPath, timeoutMs = 2000) => (await queryDaemon(s
 // nothing to show, and that is said instead of an empty list.
 //   state: "ok" | "daemon_not_running" | "no_answer"
 export async function readSeatsFromDaemon(owner, alive, timeoutMs = 2000) {
-  if (owner?.state !== "ready" || !owner.socket || alive !== true) return { state: "daemon_not_running" };
+  if (owner?.state !== "ready" || !owner.socket || alive === false) return { state: "daemon_not_running" };
   const response = await queryDaemon(owner.socket, "seats", timeoutMs);
-  if (response === null) return { state: "no_answer" };
-  return { state: "ok", codex: response.codex, claude_code: response.claude_code };
+  if (response !== null) return { state: "ok", codex: response.codex, claude_code: response.claude_code };
+  // No answer from a process that is known to be alive is "did not answer"; if
+  // even its liveness cannot be confirmed (an old record without a boot id),
+  // that is what is reported, not "stopped".
+  return { state: alive === null ? "liveness_unconfirmed" : "no_answer" };
 }
 
 const inventoryOf = (seats, key) => seats.state === "ok"
@@ -210,6 +213,7 @@ const inventoryOf = (seats, key) => seats.state === "ok"
 function formatSeatsNotice(seats) {
   if (seats.state === "daemon_not_running") return "Seats: agmsgd is not running; there is no seat state to show.\n";
   if (seats.state === "no_answer") return "Seats: agmsgd is running but did not answer in time; there is no seat state to show.\n";
+  if (seats.state === "liveness_unconfirmed") return "Seats: agmsgd's process could not be confirmed to be running, so its seat state was not fetched.\n";
   const unpolled = ["codex", "claude_code"].filter((key) => seats[key]?.polled === false);
   if (unpolled.length === 2) return "Seats: agmsgd has not finished its first poll yet; seat state appears after it.\n";
   return "";
@@ -237,7 +241,7 @@ async function main() {
   const result = classify({ owner, intent, alive, reachable, lastAttempt });
   const seatState = reachable
     ? await readSeatsFromDaemon(owner, alive)
-    : { state: owner.state === "ready" && alive === true ? "no_answer" : "daemon_not_running" };
+    : { state: owner.state !== "ready" || alive === false ? "daemon_not_running" : alive === null ? "liveness_unconfirmed" : "no_answer" };
   const codexSeats = inventoryOf(seatState, "codex");
   const claudeCodeSeats = inventoryOf(seatState, "claude_code");
 
