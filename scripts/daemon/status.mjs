@@ -130,26 +130,6 @@ export function readOwnerAndIntentReadOnly(installRoot) {
     const owner = db.prepare("SELECT * FROM daemon_owner").get();
     const intent = db.prepare("SELECT * FROM daemon_intent").get();
     const lastAttempt = db.prepare("SELECT at, reason FROM daemon_start_attempts WHERE at > ? ORDER BY at DESC, rowid DESC LIMIT 1").get(owner.last_end_at ?? "");
-    let codexSeats;
-    try {
-      codexSeats = {
-        state: "ok",
-        seats: db.prepare("SELECT seat, thread, codex_home, state, reason, checked_at FROM beta_codex_seat ORDER BY seat").all(),
-      };
-    } catch (error) {
-      if (!String(error?.message ?? "").includes("no such table")) throw error;
-      codexSeats = { state: "unavailable", reason: "channel_not_initialized", seats: [] };
-    }
-    let claudeCodeSeats;
-    try {
-      claudeCodeSeats = {
-        state: "ok",
-        seats: db.prepare("SELECT seat, messaging_socket, state, reason, checked_at FROM beta_claude_seat ORDER BY seat").all(),
-      };
-    } catch (error) {
-      if (!String(error?.message ?? "").includes("no such table")) throw error;
-      claudeCodeSeats = { state: "unavailable", reason: "channel_not_initialized", seats: [] };
-    }
     let codexPending = [];
     try {
       codexPending = db.prepare("SELECT seat, created_at, children FROM beta_codex_queue WHERE state='pending' ORDER BY created_at, id").all();
@@ -168,15 +148,16 @@ export function readOwnerAndIntentReadOnly(installRoot) {
       owner.state === "none" || owner.executor_pid == null
         ? null
         : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at });
-    return { owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt };
+    return { owner, intent, alive, codexPending, codexExpired, lastAttempt };
   } finally {
     db.close();
   }
 }
 
-// Attempts one hello+status round trip against the recorded socket, with a
-// short deadline -- a prober must never hang the CLI command it backs.
-function probeSocket(socketPath, timeoutMs = 2000) {
+// One hello + one request round trip against the recorded socket, with a short
+// deadline -- a prober must never hang the CLI command it backs. Resolves to
+// the response object, or null when there was none in time.
+export function queryDaemon(socketPath, type, timeoutMs = 2000) {
   return new Promise((resolve) => {
     const socket = createConnection(socketPath);
     let buf = "";
@@ -184,23 +165,54 @@ function probeSocket(socketPath, timeoutMs = 2000) {
       socket.destroy();
       resolve(result);
     };
-    const timer = setTimeout(() => done(false), timeoutMs);
+    const timer = setTimeout(() => done(null), timeoutMs);
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, role: "control" })}\n`);
-      socket.write(`${JSON.stringify({ type: "status" })}\n`);
+      socket.write(`${JSON.stringify({ type })}\n`);
     });
     socket.on("data", (chunk) => {
       buf += chunk.toString("utf8");
-      if (buf.includes('"type":"status"')) {
-        clearTimeout(timer);
-        done(true);
+      for (const line of buf.split("\n")) {
+        if (!line.startsWith("{")) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg?.type === type) {
+          clearTimeout(timer);
+          done(msg);
+          return;
+        }
       }
     });
     socket.on("error", () => {
       clearTimeout(timer);
-      done(false);
+      done(null);
     });
   });
+}
+
+const probeSocket = async (socketPath, timeoutMs = 2000) => (await queryDaemon(socketPath, "status", timeoutMs)) !== null;
+
+// What the running agmsgd last observed about its seats. It keeps that in
+// memory only, so it is asked each time; with no running agmsgd there is
+// nothing to show, and that is said instead of an empty list.
+//   state: "ok" | "daemon_not_running" | "no_answer"
+export async function readSeatsFromDaemon(owner, alive, timeoutMs = 2000) {
+  if (owner?.state !== "ready" || !owner.socket || alive !== true) return { state: "daemon_not_running" };
+  const response = await queryDaemon(owner.socket, "seats", timeoutMs);
+  if (response === null) return { state: "no_answer" };
+  return { state: "ok", codex: response.codex, claude_code: response.claude_code };
+}
+
+const inventoryOf = (seats, key) => seats.state === "ok"
+  ? { state: seats[key]?.polled === false ? "not_polled_yet" : "ok", seats: seats[key]?.seats ?? [], polled: seats[key]?.polled ?? false }
+  : { state: seats.state, seats: [] };
+
+function formatSeatsNotice(seats) {
+  if (seats.state === "daemon_not_running") return "Seats: agmsgd is not running; there is no seat state to show.\n";
+  if (seats.state === "no_answer") return "Seats: agmsgd is running but did not answer in time; there is no seat state to show.\n";
+  const unpolled = ["codex", "claude_code"].filter((key) => seats[key]?.polled === false);
+  if (unpolled.length === 2) return "Seats: agmsgd has not finished its first poll yet; seat state appears after it.\n";
+  return "";
 }
 
 async function main() {
@@ -211,9 +223,9 @@ async function main() {
     process.stderr.write("usage: status.mjs <installRoot>\n");
     process.exit(2);
   }
-  let owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt;
+  let owner, intent, alive, codexPending, codexExpired, lastAttempt;
   try {
-    ({ owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt } = readOwnerAndIntentReadOnly(installRoot));
+    ({ owner, intent, alive, codexPending, codexExpired, lastAttempt } = readOwnerAndIntentReadOnly(installRoot));
   } catch (error) {
     // An input that can be detected as an error is reported at
     // that entry point, with a nonzero exit -- not a raw stack trace, and
@@ -223,6 +235,11 @@ async function main() {
   }
   const reachable = owner.state === "ready" && owner.socket ? await probeSocket(owner.socket) : false;
   const result = classify({ owner, intent, alive, reachable, lastAttempt });
+  const seatState = reachable
+    ? await readSeatsFromDaemon(owner, alive)
+    : { state: owner.state === "ready" && alive === true ? "no_answer" : "daemon_not_running" };
+  const codexSeats = inventoryOf(seatState, "codex");
+  const claudeCodeSeats = inventoryOf(seatState, "claude_code");
 
   // The CLI suppresses Node's ExperimentalWarning category for managed SQLite
   // usage. Ordinary warnings and errors are still surfaced.
@@ -242,7 +259,7 @@ async function main() {
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSeatsNotice(seatState)}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
 }

@@ -8,6 +8,37 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 # shellcheck disable=SC1091
 source "$SKILL_DIR/scripts/lib/role-session.sh"
 
+# What the running agmsgd last observed about the Codex seats. It keeps that in
+# memory only, so it is asked (one node process per report) rather than read
+# from install.db. Sets AGMSG_SEATS_STATE to ok, not_polled_yet,
+# daemon_not_running, no_answer or unreadable, and AGMSG_SEATS_ROWS to one
+# "<seat key>\t<thread>\t<reason>" line per seat.
+_agmsg_daemon_seats_fetch() {
+  local node_path out
+  AGMSG_SEATS_STATE=daemon_not_running
+  AGMSG_SEATS_ROWS=""
+  node_path="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null)" || node_path=""
+  [ -n "$node_path" ] && [ -x "$node_path" ] || return 0
+  out="$("$node_path" --disable-warning=ExperimentalWarning "$SKILL_DIR/scripts/daemon/seat-query.mjs" "$SKILL_DIR" 2>/dev/null)" || out=""
+  case "$out" in
+    state=*) AGMSG_SEATS_STATE="${out%%$'\n'*}"; AGMSG_SEATS_STATE="${AGMSG_SEATS_STATE#state=}" ;;
+    *) AGMSG_SEATS_STATE=unreadable; return 0 ;;
+  esac
+  case "$out" in *$'\n'*) AGMSG_SEATS_ROWS="${out#*$'\n'}" ;; esac
+}
+
+# The reason the daemon last recorded for <seat key> on <thread>, or nothing.
+_agmsg_daemon_seat_reason() {
+  local key="$1" thread="$2" row_seat row_thread row_reason
+  while IFS=$'\t' read -r row_seat row_thread row_reason; do
+    if [ "$row_seat" = "$key" ] && [ "$row_thread" = "$thread" ]; then
+      printf '%s' "$row_reason"
+      return 0
+    fi
+  done <<< "$AGMSG_SEATS_ROWS"
+  return 0
+}
+
 agmsg_daemon_seat_report() {
   local action="${1:-status}" cfg cfg_sql roster team agent project pid meta_type meta_project meta_pid
   local bridge record_status cached key driver record_type record_home label latest
@@ -17,6 +48,16 @@ agmsg_daemon_seat_report() {
   source "$SKILL_DIR/scripts/lib/boot-command.sh"
   recovery="$(agmsg_actas_prompt codex '<name>')"
   driver="$(agmsg_storage_driver)" || driver=unknown
+  _agmsg_daemon_seats_fetch
+  if [ "$action" = status ]; then
+    case "$AGMSG_SEATS_STATE" in
+      ok) : ;;
+      not_polled_yet) echo 'Codex seats: agmsgd has not finished its first poll yet; seat state appears after it' ;;
+      no_answer) echo 'Codex seats: agmsgd is running but did not answer in time; there is no seat state to show' ;;
+      unreadable) echo 'Codex seats: the seat state of agmsgd could not be read' ;;
+      *) echo 'Codex seats: agmsgd is not running; there is no seat state to show' ;;
+    esac
+  fi
   for cfg in "$SKILL_DIR/teams/"*/config.json; do
     [ -f "$cfg" ] || continue
     cfg_sql="$(agmsg_sql_readfile_path "$cfg")"
@@ -68,7 +109,7 @@ agmsg_daemon_seat_report() {
       agent_sql="$(printf '%s' "$agent" | sed "s/'/''/g")"
       local thread_sql
       thread_sql="$(printf '%s' "${AGMSG_ROLE_SESSION_UUID:-}" | sed "s/'/''/g")"
-      cached="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT reason FROM beta_codex_seat WHERE seat=json_array('$key','$agent_sql') AND thread='$thread_sql';" 2>/dev/null)" || cached=""
+      cached="$(_agmsg_daemon_seat_reason "[\"$team\",\"$agent\"]" "${AGMSG_ROLE_SESSION_UUID:-}")"
       pending="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT count(*) FROM beta_codex_queue WHERE seat=json_array('$key','$agent_sql') AND state='pending';" 2>/dev/null)" || pending=0
       # Ask for a refresh only on evidence about the current destination: the
       # newest notice attempt for this seat and thread expired unconfirmed. An
