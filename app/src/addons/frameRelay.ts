@@ -10,6 +10,7 @@ export type Listen = (event: string, handler: (e: { payload: PushEvent }) => voi
 export function startFrameRelay(deps: {
   paneInstance: number;
   wantsFeed: boolean;
+  getLocale?: () => string;
   invoke: Invoke;
   listen: Listen;
   frameWindow: () => FrameWindowLike | null;
@@ -23,6 +24,7 @@ export function startFrameRelay(deps: {
     invoke: deps.invoke,
     frameWindow: deps.frameWindow,
     wantsFeed: deps.wantsFeed,
+    getLocale: deps.getLocale,
     newChannel: deps.newChannel,
     onRefused: (op, code) => deps.onRefused()?.(op, code),
     onFeedFailed: (code, message) => deps.onFeedFailed?.()?.(code, message),

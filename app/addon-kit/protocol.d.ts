@@ -21,6 +21,24 @@ export interface InitEvent {
   messages: Message[]; // at most 500, newest kept
 }
 
+/**
+ * The app's language, pushed over the pane's port to every add-on (no permission needed): once right after the
+ * port is handed over, and again each time the user changes the app's language. Only the tag; nothing else
+ * about the user or the machine. `locale` is one of the app's languages: en, ja, zh-CN, zh-TW, ko, es, fr, de,
+ * pt-BR. The SDK exposes it as `app.locale`, `app.localeReady` and `app.onLocaleChange(cb)`.
+ */
+export interface LocaleEvent {
+  agmsg: 1;
+  type: "locale";
+  locale: string;
+}
+
+/**
+ * The best of `supported` for `tag`: an exact match, then the language alone (pt-BR -> pt) when listed, else
+ * `fallback` (default "en"). Exported by the SDK as `pickLocale`.
+ */
+export type PickLocale = (tag: string | undefined, supported: readonly string[] | undefined, fallback?: string) => string;
+
 export interface OpenArgs {
   path?: string;
   url?: string;
