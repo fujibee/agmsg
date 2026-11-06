@@ -353,7 +353,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   printf 'sid-olga.%s\n' "$_gone" > "$(actas_lock_path team olga)"
   _under_tmux /tmp/s 4242 %10
   run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code pia sid-pia
-  ! grep -q 'already recorded as' <<<"$output"
+  [ "${output#*already recorded as}" = "$output" ]
   [ -z "$(_placement team olga)" ]
   [ "$(_placement team pia)" = 'tmux:/tmp/s:%10' ]
 
