@@ -1426,6 +1426,9 @@ struct Watcher {
     // Teams the app cannot read directly: how far each has been read, and whether a look has worked yet. Polled on
     // the rescan beat, not the fast one: this path costs a subprocess per team per poll.
     via_api: Vec<(String, Option<String>, bool)>,
+    // Ids the last look through api.sh gave, in this step, for a team that has just become directly readable, so
+    // the direct reader (which starts at the store's end) does not emit them a second time in the same step.
+    handed_over: std::collections::HashSet<String>,
 }
 
 impl Watcher {
@@ -1437,6 +1440,7 @@ impl Watcher {
             ticks_until_rescan: 0,
             first_scan: true,
             via_api: Vec::new(),
+            handed_over: std::collections::HashSet::new(),
         }
     }
 
@@ -1448,7 +1452,16 @@ impl Watcher {
         if self.ticks_until_rescan == 0 {
             self.ticks_until_rescan = 12; // ~10s at the poll interval
             let (direct, fallback) = watchable_stores_timed();
-            // a team whose store can now be read directly is no longer read through api.sh (both would emit it)
+            // A team whose store can now be read directly leaves the api.sh list. Its direct reader starts at the
+            // store's end, so the rows after the api.sh watermark come from one last api.sh look, made after the
+            // store is open (below): nothing between the two is lost, and `handed_over` keeps what both see from
+            // being emitted twice.
+            let leaving: Vec<(String, Option<String>)> = self
+                .via_api
+                .iter()
+                .filter(|(t, _, looked)| *looked && !fallback.contains(t))
+                .map(|(t, seen, _)| (t.clone(), seen.clone()))
+                .collect();
             self.via_api.retain(|(t, _, _)| fallback.contains(t));
             for team in fallback {
                 if !self.via_api.iter().any(|(t, _, _)| t == &team) {
@@ -1479,6 +1492,13 @@ impl Watcher {
                     self.open.push((path, conn, cursors));
                 }
             }
+            for (team, seen) in leaving {
+                let (fresh, _, _) = fallback_new_messages(&team, seen.as_deref(), true);
+                for m in fresh {
+                    self.handed_over.insert(m.id.clone());
+                    out.push(m);
+                }
+            }
         }
         self.ticks_until_rescan -= 1;
         self.first_scan = false;
@@ -1490,6 +1510,12 @@ impl Watcher {
             if let Ok(new_rows) = read_new_messages(conn, cursors) {
                 out.extend(new_rows);
             }
+        }
+        if !self.handed_over.is_empty() {
+            // a row both readers saw is emitted once: the handed-over copy is already in `out` from the look
+            let mut seen_here = std::collections::HashSet::new();
+            out.retain(|m| !self.handed_over.contains(&m.id) || seen_here.insert(m.id.clone()));
+            self.handed_over.clear();
         }
         out
     }
@@ -2724,5 +2750,53 @@ exit 0
         assert!(watchable_stores_timed().0.is_empty(), "within the minute the old look is reused");
         super::request_rescan();
         assert_eq!(watchable_stores_timed().0, vec![store]);
+    }
+
+    /// A store that existed before the app started, read only through api.sh and then readable directly: a row
+    /// written between the last api.sh look and the direct reader opening is emitted exactly once.
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_row_between_the_last_api_look_and_the_direct_reader_is_emitted_once() {
+        let base = fake_base(&[(
+            "api.sh",
+            r#"B="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$*" = "get teams" ]; then echo '{"name":"a"}'; exit 0; fi
+if [ "$4" = "store" ]; then
+  if [ -f "$B/direct" ]; then echo "{\"team\":\"a\",\"driver\":\"sqlite\",\"partition\":\"shared\",\"path\":\"$B/db/messages.db\",\"exists\":true}"
+  else echo '{"team":"a","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'; fi
+  exit 0
+fi
+echo '{"type":"message_sent","id":"1","team":"a","from":"x","to":"y","body":"one","at":"t1"}'
+[ -f "$B/row2" ] && echo '{"type":"message_sent","id":"2","team":"a","from":"x","to":"y","body":"two","at":"t2"}'
+exit 0
+"#,
+        )]);
+        let root = super::agmsg_base();
+        let db = root.join("db/messages.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL,
+               from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, body TEXT NOT NULL,
+               created_at TEXT NOT NULL, read_at TEXT);
+             INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES ('a','x','y','one','2026-06-01T00:00:00Z');",
+        )
+        .unwrap();
+        let mut w = super::Watcher::new();
+        // the store was there before the app started
+        w.started = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(w.step().is_empty(), "the first look is the baseline");
+        conn.execute("INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES ('a','x','y','two','2026-06-01T00:00:01Z')", []).unwrap();
+        std::fs::write(root.join("row2"), "").unwrap();
+        std::fs::write(root.join("direct"), "").unwrap();
+        super::request_rescan();
+        let mut got = w.step();
+        for _ in 0..13 {
+            got.extend(w.step());
+        }
+        assert_eq!(got.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), vec!["two"], "once, not lost and not twice");
+        drop(base);
     }
 }
