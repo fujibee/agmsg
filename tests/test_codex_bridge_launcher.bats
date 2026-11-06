@@ -323,6 +323,45 @@ run_launcher() {
   wait "$launcher" 2>/dev/null || true
 }
 
+@test "launcher: giving up looks past the bridge's closing line to the failure before it" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  # Production-shaped: the refusal arrives as a watch-once failure, then the
+  # bridge's closing line. An older different failure sits before them.
+  printf '[1] 2026-11-06T00:00:00.000Z codex-bridge: connect ECONNREFUSED 127.0.0.1:9999\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sed -i.bak 's|^exit 0$|printf "[2] 2026-11-06T00:01:00.000Z codex-bridge: watch-once failed (exit 1): agmsg watch: not serving these pairs (held by another session, or unverified): team\\talice\\n[2] 2026-11-06T00:01:01.000Z codex-bridge: stopping after 3 consecutive watch-once failure(s)\\n" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'not serving these pairs' "$notice"
+  grep -q 'close the session that holds this role' "$notice"
+  refute grep -q 'ECONNREFUSED' "$notice"
+  refute grep -q 'last bridge message: .*stopping after' "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: giving up on a non-refusal failure names it, not the closing line" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  printf '[1] 2026-11-06T00:00:00.000Z codex-bridge: watch-once failed (exit 1): agmsg watch: not serving these pairs (held by another session, or unverified): team\talice\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sed -i.bak 's|^exit 0$|printf "[2] 2026-11-06T00:01:00.000Z codex-bridge: watch-once failed (exit 1): connect ECONNREFUSED 127.0.0.1:9999\\n[2] 2026-11-06T00:01:01.000Z codex-bridge: stopping after 3 consecutive watch-once failure(s)\\n" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'connect ECONNREFUSED 127.0.0.1:9999' "$notice"
+  refute grep -q 'close the session' "$notice"
+  grep -q "restart this seat's Codex session" "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
 @test "launcher: a bridge that stays up is never given up on, and the quick-death count starts over" {
   put_record team alice rec-thread-1 "$PROJ" codex
   # The second start stays up past the stable time; the first ends at once.
