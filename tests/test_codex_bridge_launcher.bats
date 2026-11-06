@@ -274,6 +274,17 @@ run_launcher() {
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
+@test "launcher: a bridge log over the size limit is moved aside before the next bridge starts" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES=1000
+  head -c 5000 /dev/zero | tr '\0' 'x' > "$RUN_DIR/codex-bridge.team.alice.log"
+  run_launcher
+  [ -f "$CAPTURE" ]
+  [ -f "$RUN_DIR/codex-bridge.team.alice.log.1" ]
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log.1")" -ge 5000 ]
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log" 2>/dev/null || echo 0)" -lt 1000 ]
+}
+
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3
