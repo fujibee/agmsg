@@ -2935,6 +2935,54 @@ EOF
   grep -q -- "ws://127.0.0.1:50505" "$request_file"
 }
 
+# The Codex managed daemon runs `app-server --listen unix://` with no path (its
+# default control socket). A hook running under it must not publish that bare
+# address: the bridge cannot connect to it and exits at once.
+_bare_unix_agent() {   # starts a process whose command line ends in --listen unix://
+  # A script, not `bash -c`: bash would exec the lone command and drop the
+  # arguments from the process's command line.
+  printf '#!/usr/bin/env bash\nsleep 60 &\ntrap "kill \\$!" TERM\nwait\n' > "$BATS_TEST_TMPDIR/codex"
+  chmod +x "$BATS_TEST_TMPDIR/codex"
+  "$BATS_TEST_TMPDIR/codex" app-server --listen unix:// >/dev/null 2>&1 3>&- &
+  BARE_AGENT_PID=$!
+}
+
+_bare_unix_request() {   # prints the request file's address field
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-bare-unix "$TEST_PROJECT" codex
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  local seat_key; seat_key="$(_agmsg_codex_seat_key_new)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  _bare_unix_agent
+  ( unset AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_AGENT_PID="$BARE_AGENT_PID" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    AGMSG_CODEX_SEAT_KEY="$seat_key" \
+    CODEX_HOME="$BATS_TEST_TMPDIR/codex-home" \
+    CODEX_THREAD_ID="thread-bare-unix" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null 2>&1 3>&- )
+  kill "$BARE_AGENT_PID" 2>/dev/null || true
+  local request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$seat_key"
+  [ -f "$request_file" ] && cut -f3 "$request_file" | head -1
+}
+
+@test "session-start.sh for codex turns a bare unix:// on the agent's command line into the default control socket" {
+  command -v python3 >/dev/null || skip "python3 not installed"
+  local sock="$BATS_TEST_TMPDIR/codex-home/app-server-control/app-server-control.sock"
+  mkdir -p "$(dirname "$sock")"
+  # bound by a relative name: a unix socket path is limited to ~104 bytes
+  python3 -c 'import os,socket,sys; os.chdir(os.path.dirname(sys.argv[1])); s=socket.socket(socket.AF_UNIX); s.bind(os.path.basename(sys.argv[1]))' "$sock"
+  [ -S "$sock" ]
+  run _bare_unix_request
+  [ "$output" = "unix://$sock" ]
+}
+
+@test "session-start.sh for codex never publishes a bare unix://, even when the default socket is absent" {
+  run _bare_unix_request
+  [ "$output" != "unix://" ]
+  refute grep -q "^unix://$" <<<"$output"
+}
+
 @test "session-start.sh for codex retires a stale pair when its server is unavailable" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   _seed_role_record team alice thread-tombstone "$TEST_PROJECT" codex
