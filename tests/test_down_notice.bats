@@ -365,6 +365,49 @@ print('MATCH' if d['reason'] == 'colored\x1b[31m error\bx\x01y' else repr(d['rea
   done
 }
 
+@test "every non-NUL ASCII control code (1-31, 127) round-trips through down_notice_set/list: valid JSON, exact decoded byte, no raw control byte in list output" {
+  # NUL (0x00) is excluded: bash cannot hold it in a variable at all, so there
+  # is nothing this helper's own text path could do differently for it -- a
+  # representational limit of the shell, not something to pretend to test.
+  local code
+  for code in $(seq 1 31) 127; do
+    local ch
+    # $() strips trailing newlines, which would silently drop code 10 (and
+    # only code 10) entirely -- append a sentinel byte and strip it back off,
+    # rather than lose the one byte this whole test exists to check.
+    ch="$(python3 -I -c "import sys; sys.stdout.buffer.write(bytes([$code]) + b'X')")"
+    ch="${ch%X}"
+    down_notice_set "cc$code" down "a${ch}b" "r"
+    local f="$DIR/cc$code.json"
+    run python3 -I -c "
+import json
+with open('$f', 'rb') as fh:
+    raw = fh.read()
+json.loads(raw)  # raises if invalid
+d = json.loads(raw)
+print('MATCH' if d['reason'] == 'a' + chr($code) + 'b' else repr(d['reason']))
+"
+    [ "$output" = MATCH ] || { echo "code=$code output=$output" >&2; false; }
+    run down_notice_list
+    # The TSV row must contain the ESCAPE TEXT (at least a literal backslash
+    # where the control char would be), never the raw control byte itself --
+    # list/print are one-record-per-line and a raw byte in 1-31/127 would
+    # either break that framing (newline/tab) or just not display.
+    printf '%s' "$output" > "$BATS_TEST_TMPDIR/cc-list-$code.raw"
+    run python3 -I -c "
+with open('$BATS_TEST_TMPDIR/cc-list-$code.raw', 'rb') as f:
+    raw = f.read()
+# The format's own field (tab) and record (newline) separators are not what
+# this checks for -- only a raw control byte WITHIN a field's content, which
+# a decoded escape sequence must never produce.
+fields = raw.split(b'\n')[0].split(b'\t')
+bad = [b for f in fields for b in f if b in range(1, 32) or b == 127]
+print('CLEAN' if not bad else repr(bad))
+"
+    [ "$output" = CLEAN ] || { echo "code=$code list=$output" >&2; false; }
+  done
+}
+
 @test "down_notice_key gives the same key on every bash: known FNV-1a vectors, ASCII and non-ASCII" {
   local sh
   for sh in /bin/bash bash; do

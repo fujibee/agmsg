@@ -24,6 +24,17 @@ function shellList(root) {
     .trim().split('\t');
 }
 
+// shellList assumes exactly one record; when a root can hold several (the
+// control-code sweep below writes one per code into the same root), filter
+// to the one row this call actually means to check.
+function shellListKey(root, key) {
+  const rows = execFileSync('bash', ['-c', 'AGMSG_DOWN_NOTICE_ROOT="$1"; . "$2"; down_notice_list', 'x', root, LIB], { encoding: 'utf8' })
+    .split('\n').filter(Boolean).map((l) => l.split('\t'));
+  const row = rows.find((r) => r[0] === key);
+  if (!row) throw new Error(`no down_notice_list row for key ${key}`);
+  return row;
+}
+
 function shellSet(root, key, state, reason, recovery) {
   execFileSync('bash', ['-c', 'AGMSG_DOWN_NOTICE_ROOT="$1"; . "$2"; down_notice_set "$3" "$4" "$5" "$6"', 'x', root, LIB, key, state, reason, recovery]);
 }
@@ -47,7 +58,7 @@ test('downNoticeSet -> shell down_notice_list round-trips space, apostrophe, dou
   assert.throws(() => readFileSync(path.join(root, 'run', 'down', `${key}.json`)));
 });
 
-test('downNoticeSet persists an apostrophe-containing shell-quoted recovery command that the shell reads back executable', (t) => {
+test('downNoticeSet persists an apostrophe-containing shell-quoted recovery command that the shell actually runs correctly, against an owned mock wrapper', (t) => {
   const root = tmpRoot(t);
   const side = path.join(root, "side's install");
   const shq = `'${side.replace(/'/g, "'\\''")}'/scripts/agmsg`;
@@ -55,6 +66,11 @@ test('downNoticeSet persists an apostrophe-containing shell-quoted recovery comm
   assert.equal(downNoticeSet(root, 'agmsgd', 'down', 'stopped', recovery, () => Date.UTC(2026, 10, 4, 12)), true);
   const [, , , , decoded] = shellList(root);
   assert.equal(decoded, recovery);
+  execFileSync('mkdir', ['-p', path.join(side, 'scripts')]);
+  const wrapper = `#!/usr/bin/env bash\nprintf '%s\\n' "$#:$*" >> ${JSON.stringify(path.join(side, 'argv-log'))}\n`;
+  execFileSync('bash', ['-c', 'printf "%s" "$1" > "$2"; chmod +x "$2"', 'x', wrapper, path.join(side, 'scripts', 'agmsg')]);
+  execFileSync('bash', ['-c', 'eval "$1"', 'x', decoded]);
+  assert.equal(readFileSync(path.join(side, 'argv-log'), 'utf8').trim(), '2:daemon start');
 });
 
 test('a Node-written record with a control character is valid JSON and shell down_notice_list shows the literal escape text, not a raw control byte (not a supported executable-recovery case)', (t) => {
@@ -65,6 +81,27 @@ test('a Node-written record with a control character is valid JSON and shell dow
   assert.equal(JSON.parse(raw).reason, 'tab\tand\nnewline');
   const [, , , reason] = shellList(root);
   assert.equal(reason, 'tab\\tand\\nnewline');
+});
+
+test('every non-NUL ASCII control code (1-31, 127) written by Node is valid JSON, decodes to the exact byte, and shows no raw control byte in shell down_notice_list', (t) => {
+  const root = tmpRoot(t);
+  // NUL (0) is excluded: the shell side of this record cannot hold it in a
+  // variable at all, so it is a representational limit, not something to
+  // pretend to test here either.
+  for (let code = 1; code <= 127; code++) {
+    if (code > 31 && code < 127) continue;
+    const key = `cc${code}`;
+    const ch = String.fromCharCode(code);
+    assert.equal(downNoticeSet(root, key, 'down', `a${ch}b`, 'r', () => Date.UTC(2026, 10, 4, 12)), true, `code ${code}`);
+    const raw = readFileSync(path.join(root, 'run', 'down', `${key}.json`), 'utf8');
+    assert.doesNotThrow(() => JSON.parse(raw), `code ${code} invalid JSON`);
+    assert.equal(JSON.parse(raw).reason, `a${ch}b`, `code ${code} decoded byte`);
+    const [, , , reason] = shellListKey(root, key);
+    for (let i = 0; i < reason.length; i++) {
+      const b = reason.codePointAt(i);
+      assert.ok(!(b >= 1 && b <= 31) && b !== 127, `code ${code}: list output has a raw control byte (${b}) at index ${i}: ${JSON.stringify(reason)}`);
+    }
+  }
 });
 
 test('a shell-written record with the same characters reads back identically through Node JSON.parse', (t) => {
