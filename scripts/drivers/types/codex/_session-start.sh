@@ -291,17 +291,20 @@ EOF
   agmsg_daemon_apply_project_choice codex "$PROJECT"
   if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
     # The bridge stays off whether or not agmsgd is up (no implicit fallback),
-    # so the line must say which it is: only a ready agmsgd delivers. The way
-    # back names THIS install's own command, not a bare `agmsg` (which on a
-    # --cmd install would operate the default one).
-    back="To use the bridge instead, run: \"$SKILL_DIR/scripts/agmsg\" daemon disable (or choose another delivery for this project)."
+    # so the line says which state it is: only a ready agmsgd delivers, only a
+    # stopped one is "not running", and one whose state cannot be established
+    # (unchecked / unverifiable) is reported as unchecked. Every command names
+    # THIS install's own scripts/agmsg, never a bare `agmsg`, which on a --cmd
+    # install would operate the default one.
+    gate_cmd="\"$SKILL_DIR/scripts/agmsg\""
+    gate_back="To use the bridge instead, run: $gate_cmd daemon disable (or choose another delivery for this project)."
     case "${AGMSGD_HEALTH:-}" in
       ready)
-        echo "AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. $back" ;;
-      unchecked|unverifiable)
-        printf 'AGMSG delivery: agmsgd is on for this project and no Codex bridge is started, but whether agmsgd is running could not be checked. %s %s\n' "$(agmsg_daemon_recovery_text)" "$back" ;;
+        echo "AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. $gate_back" ;;
+      stopped)
+        echo "AGMSG delivery: agmsgd is on for this project but is not running (${AGMSGD_REASON:-no reason recorded}), so notices are NOT delivered to this session and no Codex bridge is started. Start it with: $gate_cmd daemon start. $gate_back" ;;
       *)
-        printf 'AGMSG delivery: agmsgd is on for this project but is not running, so notices are NOT delivered to this session and no Codex bridge is started. %s %s\n' "$(agmsg_daemon_recovery_text)" "$back" ;;
+        echo "AGMSG delivery: agmsgd is on for this project and no Codex bridge is started, but agmsgd's state could not be checked (${AGMSGD_REASON:-no reason recorded}), so delivery to this session is not confirmed. Check it with: $gate_cmd daemon status. $gate_back" ;;
     esac
     exit 0
   fi
