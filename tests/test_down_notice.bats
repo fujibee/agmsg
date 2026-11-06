@@ -59,6 +59,42 @@ teardown() { teardown_test_env; }
   [ "$output" = 1 ]
   run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c2.json') AS TEXT), '\$.component');"
   [ "$output" = c2 ]
+  # The quote and the lone backslash are JSON-escaped, not rewritten into
+  # other characters -- sqlite's own JSON decoder recovers the exact
+  # original text (control characters still flattened to a space).
+  run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c2.json') AS TEXT), '\$.reason');"
+  [ "$output" = 'two lines and "quotes" and \ slash' ]
+}
+
+@test "set -> list/print round trip preserves space, apostrophe, backslash, double quote and newline exactly (down-notice.sh escaping fix)" {
+  local reason=$'a line with a space, an apostrophe (it'"'"'s), a "quote", a \\backslash and a' newline=$'\nnext line'
+  down_notice_set c3 down "${reason}${newline}" "recover"
+  run sqlite_mem "SELECT json_valid(CAST(readfile('$DIR/c3.json') AS TEXT));"
+  [ "$output" = 1 ]
+  run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c3.json') AS TEXT), '\$.reason');"
+  # The newline became a space (records stay one line); everything else,
+  # including the apostrophe, the quote and the backslash, is intact.
+  [ "$output" = $'a line with a space, an apostrophe (it'"'"'s), a "quote", a \\backslash and a next line' ]
+  run down_notice_list
+  local field
+  field="$(printf '%s\n' "$output" | awk -F'\t' '{print $4}')"
+  [ "$field" = $'a line with a space, an apostrophe (it'"'"'s), a "quote", a \\backslash and a next line' ]
+}
+
+@test "set -> list persists a single-quote-escaped recovery command for an apostrophe-containing path, executable as-is (down-notice.sh escaping fix)" {
+  local side="$BATS_TEST_TMPDIR/dn-test-side's install" path="$side/scripts/agmsg" shq recovery
+  shq="'$(printf '%s' "$path" | sed "s/'/'\\\\''/g")'"
+  recovery="$shq daemon start"
+  down_notice_set c4 down "stopped" "$recovery"
+  run down_notice_list
+  local decoded
+  decoded="$(printf '%s\n' "$output" | awk -F'\t' '{print $5}')"
+  [ "$decoded" = "$recovery" ]
+  mkdir -p "$side/scripts"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> %q\n' "$side/argv-log" > "$path"
+  chmod +x "$path"
+  eval "$decoded"
+  [ "$(cat "$side/argv-log")" = "2:daemon start" ]
 }
 
 @test "an invalid component or state is refused with status 2 and writes nothing" {
@@ -272,11 +308,19 @@ teardown() { teardown_test_env; }
 
 # Run on the system bash too: bash 3.2 differs from bash 5 in replacement
 # quoting and in how it reads a byte above 0x7f.
-@test "free text keeps a quoted recovery command intact (system bash and this bash)" {
+@test "free text JSON-escapes a quoted recovery command rather than rewriting it (system bash and this bash)" {
   local sh
   for sh in /bin/bash bash; do
     run "$sh" -c '. "$1"; _down_notice_clean "bash \"/tmp/a b/tool.sh\" restart"' _ "$SCRIPTS/lib/down-notice.sh"
-    [ "$output" = "bash '/tmp/a b/tool.sh' restart" ]
+    [ "$output" = 'bash \"/tmp/a b/tool.sh\" restart' ]
+  done
+}
+
+@test "_down_notice_clean doubles an embedded backslash exactly (not silently halved by the replacement side of a parameter expansion)" {
+  local sh
+  for sh in /bin/bash bash; do
+    run "$sh" -c '. "$1"; _down_notice_clean "a\\b"' _ "$SCRIPTS/lib/down-notice.sh"
+    [ "$output" = 'a\\b' ]
   done
 }
 

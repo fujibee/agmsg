@@ -32,10 +32,18 @@
 #   key             none (the hash is shell arithmetic)
 # No locking: one writer per key by construction.
 #
-# The record is JSON, written without any escaping logic: `"` and `\` in free
-# text become `'` and `/`, and every control character (newline, tab, ESC, ...)
-# becomes a space, so every field is a plain string that is valid JSON and is read
-# back with parameter expansion.
+# The record is JSON. `"` and `\` in free text are JSON-escaped (`\"`, `\\`),
+# not rewritten into other characters, so a shell-quoted recovery command (which
+# needs a literal `\` to embed a literal `'` in single-quoted text) round-trips
+# exactly. Every control character (newline, tab, ESC, ...) still becomes a
+# space -- these records are meant to stay one line -- and a literal `'` was
+# never special in JSON and always passed through untouched. A reader decodes
+# `\\` and `\"` back with a character scan, not just parameter expansion, since
+# an escaped quote inside a value must not be mistaken for the value's end.
+#
+# A record written by a version before this escaping existed contains no `\`
+# or `\"` sequences at all (its own writer could never produce one), so the
+# decoder above passes those old records through unchanged -- no migration.
 
 [ -n "${_AGMSG_DOWN_NOTICE_SH:-}" ] && return 0
 _AGMSG_DOWN_NOTICE_SH=1
@@ -66,23 +74,49 @@ _down_notice_key_ok() {
   [ "${#1}" -le 100 ]
 }
 
-# The replacements go through variables: on bash 3.2 a quoted or backslashed
-# literal on the replacement side keeps its backslash, which turned a recovery
-# command's quoted path into a different path.
-_down_notice_clean() {   # free text -> one line of printable text, no quote, no backslash
-  # shellcheck disable=SC1003  # a lone backslash is the point
-  local LC_ALL=C v="${1-}" dq='"' sq="'" bs='\' sl='/' sp=' '
-  v="${v//$dq/$sq}"
-  v="${v//"$bs"/$sl}"
-  v="${v//[[:cntrl:]]/$sp}"
-  printf '%s' "$v"
+_down_notice_clean() {   # free text -> one line of JSON-escaped string body (no surrounding quotes)
+  # A character scan, not ${v//pattern/replacement}: that construct's
+  # replacement side is itself subject to one round of backslash removal on
+  # bash 5 (silently halving a doubled backslash) when UNQUOTED, but quoting
+  # it instead corrupts the result on bash 3.2 (stray literal quote
+  # characters appear) -- the two bash versions disagree in opposite
+  # directions, so no quoting choice there is portable. A loop sidesteps
+  # the replacement-side parsing difference entirely.
+  local LC_ALL=C v="${1-}" i ch out=""
+  for ((i = 0; i < ${#v}; i++)); do
+    ch="${v:i:1}"
+    case "$ch" in
+      "\\") out="$out\\\\" ;;
+      "\"") out="$out\\\"" ;;
+      *) out="$out$ch" ;;
+    esac
+  done
+  out="${out//[[:cntrl:]]/ }"
+  printf '%s' "$out"
 }
 
-# <json text> <field> -> the field's string value
+# <json text> <field> -> the field's decoded string value. A character scan,
+# not parameter expansion alone: an escaped quote (`\"`) inside the value must
+# not be mistaken for the value's closing quote, and `\\` must decode to one
+# backslash, not stop the scan.
 _down_notice_field() {
-  local rest="${1#*\""$2"\":\"}"
-  [ "$rest" != "$1" ] || return 1
-  printf '%s' "${rest%%\"*}"
+  local json="$1" dq='"' bs='\' rest i ch out="" escaped=0
+  rest="${json#*\""$2"\":\"}"
+  [ "$rest" != "$json" ] || return 1
+  for ((i = 0; i < ${#rest}; i++)); do
+    ch="${rest:i:1}"
+    if [ "$escaped" = 1 ]; then
+      out="$out$ch"
+      escaped=0
+      continue
+    fi
+    case "$ch" in
+      "$bs") escaped=1 ;;
+      "$dq") break ;;
+      *) out="$out$ch" ;;
+    esac
+  done
+  printf '%s' "$out"
 }
 
 # A key from free text: folded to lowercase with unusable characters as `-`, then
