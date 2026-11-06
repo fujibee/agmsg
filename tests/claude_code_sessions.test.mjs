@@ -77,3 +77,13 @@ test('the down record key and file are the ones scripts/lib/down-notice.sh uses'
   assert.equal(downNoticeClear(root, key), true);
   assert.throws(() => readFileSync(path.join(root, 'run', 'down', `${key}.json`)));
 });
+
+test('the temp file of a record sits beside the record, also with Windows separators', () => {
+  const src = readFileSync(new URL('../scripts/daemon/down-notice.mjs', import.meta.url), 'utf8');
+  assert.match(src, /join\(dirname\(file\)/);
+  const win = path.win32;
+  const file = 'C:\\Users\\x\\run\\down\\k.json';
+  const tmp = win.join(win.dirname(file), '.k.json.42');
+  assert.equal(tmp, 'C:\\Users\\x\\run\\down\\.k.json.42');
+  assert.equal(win.isAbsolute(tmp), true);
+});

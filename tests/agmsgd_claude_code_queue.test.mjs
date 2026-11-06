@@ -660,3 +660,38 @@ test('a found socket that stops answering is down after 10 minutes without waiti
   assert.equal(f.calls.sets.length, 1);
   assert.equal(f.calls.sets[0].st, 'down');
 });
+
+test('a new session on the same seat starts from a fresh lookup, even inside the throttle minute', async (t) => {
+  const f = missingSocketFixture(t, (state) => (state.session === 'sess-1'
+    ? { state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }
+    : { state: 'found', socket: '/tmp/cc-socks/10.sock', pid: 10 }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.at(-1).socketPath, '/tmp/cc-socks/9.sock');
+  f.state.session = 'sess-2';
+  f.state.sequence += 1;
+  f.state.minutes = 0.2; await f.channel.pollOnce();
+  assert.equal(f.calls.lookups, 2);
+  assert.equal(f.calls.args.sessionId, 'sess-2');
+  assert.equal(f.calls.sends.at(-1).socketPath, '/tmp/cc-socks/10.sock');
+});
+
+test('a clear that failed is tried again on the next healthy poll', async (t) => {
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  let results = [false, true];
+  const clears = [];
+  const channel = createClaudeCodeQueueChannel({
+    ...f.state.options,
+    now: () => Date.UTC(2026, 9, 14),
+    socketAlive: () => ({ state: 'ok' }),
+    send: async () => ({ state: 'sent' }),
+    downSet: () => true,
+    downClear: (key) => { clears.push(key); return results.shift() ?? true; },
+  });
+  await channel.pollOnce();
+  f.state.sequence += 1;
+  await channel.pollOnce();
+  f.state.sequence += 1;
+  await channel.pollOnce();
+  assert.equal(clears.length, 2, 'false then true: two calls, then no more');
+  await channel.stop();
+});

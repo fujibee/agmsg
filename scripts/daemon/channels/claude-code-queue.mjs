@@ -150,9 +150,12 @@ export function createClaudeCodeQueueChannel({
     unreachable.delete(seat);
     // Once per daemon life even when this process wrote none: a record left by
     // an earlier agmsgd must go once the seat answers.
-    if (downKept.delete(seat) || !clearedOnce.has(seat)) {
-      downClear(downKeyOf(team, agent));
-      clearedOnce.add(seat);
+    // A clear that failed keeps its retry state for the next healthy poll.
+    if (downKept.has(seat) || !clearedOnce.has(seat)) {
+      if (downClear(downKeyOf(team, agent)) !== false) {
+        downKept.delete(seat);
+        clearedOnce.add(seat);
+      }
     }
   }
 
@@ -269,6 +272,11 @@ export function createClaudeCodeQueueChannel({
     let lookupState = "";
     let lookupReason = "";
     if (socketCheck.reason === "messaging_socket_missing") {
+      // Both caches belong to the destination the record names now: a new
+      // session or config dir starts from a fresh lookup.
+      const identity = `${record.claude_config_dir ?? ""}\u0000${record.session ?? ""}`;
+      if (found.get(seat)?.identity !== identity) found.delete(seat);
+      if (lastLookup.get(seat)?.identity !== identity) lastLookup.delete(seat);
       const cached = found.get(seat);
       if (cached && alive(cached.pid) && socketAlive(cached.socket).state === "ok") {
         socketPath = cached.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
@@ -284,13 +292,13 @@ export function createClaudeCodeQueueChannel({
           }
           lookupState = result.state;
           lookupReason = result.reason ?? "";
-          lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason });
+          lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
           if (result.state === "found" && socketAlive(result.socket).state === "ok") {
-            found.set(seat, { socket: result.socket, pid: result.pid });
+            found.set(seat, { socket: result.socket, pid: result.pid, identity });
             socketPath = result.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
           } else if (result.state === "found") {
             lookupState = "unreachable"; lookupReason = "sessions_file_socket_missing";
-            lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason });
+            lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
           }
         } else {
           // A socket found earlier that no longer answers: reachable by nobody.

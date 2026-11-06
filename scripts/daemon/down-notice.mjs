@@ -10,7 +10,7 @@
 // No process is started.
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
@@ -55,7 +55,7 @@ export function downNoticeSet(installRoot, key, state, reason, recovery, now = D
     const stamp = new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z");
     if (!since) since = stamp;
     const line = `{"component":"${key}","state":"${state}","reason":"${clean(reason)}","recovery":"${clean(recovery)}","since":"${since}","updated":"${stamp}"}\n`;
-    const tmp = `${file.replace(/[^/]+$/, `.${key}.json`)}.${process.pid}`;
+    const tmp = join(dirname(file), `.${key}.json.${process.pid}`);
     writeFileSync(tmp, line);
     renameSync(tmp, file);
     return readFileSync(file, "utf8") === line;
