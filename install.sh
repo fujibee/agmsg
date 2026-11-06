@@ -262,16 +262,24 @@ agmsg_install_restart_daemon() {   # <skill_dir>
 #   $1 skill dir   $2 newline-separated teams with a running sync engine
 # The same question agmsg_install_stop_daemon asks of the recorded owner:
 # 0 = agmsgd is (still) starting, ready or stopping; 1 = confirmed not running
-# (no record, or no daemon table in an install older than agmsgd); 2 = unknown
-# (the record cannot be read).
+# (no record, no daemon table in an install older than agmsgd, or exactly one row
+# that says none); 2 = unknown (unreadable, no row, several rows, another value).
 agmsg_install_daemon_active() {   # <skill_dir>
-  local db="$1/run/install.db" has state
+  local db="$1/run/install.db" has row n state
   [ -f "$db" ] || return 1
   has="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT count(*) FROM sqlite_master WHERE name='daemon_owner';" 2>/dev/null)" || return 2
   case "${has%$'\r'}" in 0) return 1 ;; 1) ;; *) return 2 ;; esac
-  state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null)" || return 2
-  case "${state%$'\r'}" in ready|starting|stopping) return 0 ;; esac
-  return 1
+  # The table always holds exactly one row; anything else is not a record to trust.
+  row="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT count(*) || '|' || coalesce(min(state), '') FROM daemon_owner;" 2>/dev/null)" || return 2
+  row="${row%$'\r'}"
+  n="${row%%|*}"
+  state="${row#*|}"
+  [ "$n" = 1 ] || return 2
+  case "$state" in
+    none) return 1 ;;
+    ready|starting|stopping) return 0 ;;
+  esac
+  return 2
 }
 
 agmsg_install_move_state() {
@@ -338,17 +346,15 @@ $team"
       return 0
     fi
   fi
-  # While run/ is renamed and linked, a contender for the install lock must wait
-  # (agmsg_install_op_lock honors this marker) instead of making a lock database
-  # at the old path.
-  local movemark="$skill/.state-moving" link_ok=false
-  if mkdir "$movemark" 2>/dev/null; then
-    printf '%s\n' "$$" > "$movemark/pid"
+  # While run/ is renamed and linked, the gate is held: a contender that finds
+  # run/ absent waits for it instead of making a second run/ (see
+  # agmsg_state_gate_acquire in install-op-lock.sh).
+  local link_ok=false
+  if agmsg_state_gate_acquire "$skill" 10000; then
     agmsg_state_link "$skill" "$root" && link_ok=true
-    rm -f "$movemark/pid"
-    rmdir "$movemark" 2>/dev/null || true
+    agmsg_state_gate_release "$skill"
   else
-    echo "  ! $movemark exists: another move of this state is in progress" >&2
+    echo "  ! $AGMSG_STATE_GATE_REASON" >&2
   fi
   if [ "$link_ok" != true ]; then
     echo "  ! the state of '$name' was only partly moved; fix the lines above, then run the update again" >&2

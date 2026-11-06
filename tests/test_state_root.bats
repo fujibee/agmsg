@@ -318,14 +318,16 @@ demote() {
   [ "$(<"$FAKE_HOME/.agmsg/agmsg-copy/.owner")" = "$FAKE_HOME/.agents/skills/agmsg-copy" ]
 }
 
-@test "a contender arriving while run/ is absent mid-move waits and never makes a second lock database" {
+# The mover's gate: <install>/.state-moving holding "pid|start time" of the mover.
+gate_stamp() { bash -c '. "$1/scripts/lib/install-op-lock.sh"; _agmsg_gate_stamp "$2"' _ "$SK" "$1"; }
+
+@test "a contender that finds run/ absent mid-move waits on the gate and never makes a second run/ or lock database" {
   inst
   sleep 30 &
   local mover=$!
   mkdir "$SK/.state-moving"
-  printf '%s\n' "$mover" > "$SK/.state-moving/pid"
+  gate_stamp "$mover" > "$SK/.state-moving/holder"
   command mv "$SK/run" "$FAKE_HOME/run.parked"
-  command rm "$FAKE_HOME/run.parked/.gone" 2>/dev/null || true
   (
     . "$REPO_ROOT/scripts/lib/install-op-lock.sh"
     agmsg_install_op_lock "$SK/run/install-op.lock.db" 20000 && echo acquired > "$BATS_TEST_TMPDIR/contender.out"
@@ -339,23 +341,57 @@ demote() {
   command rmdir "$ST/run" 2>/dev/null || true
   command mv "$ST/run.back" "$ST/run"
   ln -s "$ST/run" "$SK/run"
-  command rm "$SK/.state-moving/pid"
+  command rm "$SK/.state-moving/holder"
   command rmdir "$SK/.state-moving"
   wait "$contender"
   [ "$(<"$BATS_TEST_TMPDIR/contender.out")" = acquired ]
+  [ -L "$SK/run" ]
   kill "$mover" 2>/dev/null || true
 }
 
-@test "agmsgd state: unreadable is unknown, no table or no file is confirmed not running" {
+@test "a gate whose holder is proven gone is retired; a fresh install then gets its run/ and the lock" {
+  mkdir -p "$SK"
+  mkdir "$SK/.state-moving"
+  printf '999999|Thu Jan  1 00:00:00 1970\n' > "$SK/.state-moving/holder"
+  run bash -ec '. "$1/scripts/lib/install-op-lock.sh"; agmsg_install_op_lock "$2/run/install-op.lock.db" 10000 && echo acquired' _ "$REPO_ROOT" "$SK"
+  [ "$status" -eq 0 ]
+  grep -qF -- acquired <<<"$output"
+  [ ! -e "$SK/.state-moving" ]
+  [ -d "$SK/run" ]
+}
+
+@test "a gate whose holder cannot be told apart from alive is kept, and the contender fails saying so" {
+  mkdir -p "$SK"
+  mkdir "$SK/.state-moving"
+  printf '4242|whatever\n' > "$SK/.state-moving/holder"
+  mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+  printf '#!/bin/sh\necho "ps: not permitted" >&2\nexit 3\n' > "$BATS_TEST_TMPDIR/fakebin/ps"
+  chmod +x "$BATS_TEST_TMPDIR/fakebin/ps"
+  run env PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" bash -ec '. "$1/scripts/lib/install-op-lock.sh"; agmsg_install_op_lock "$2/run/install-op.lock.db" 1000 || echo "failed: $AGMSG_INSTALL_OP_LOCK_FAILURE_REASON"' _ "$REPO_ROOT" "$SK"
+  grep -qF -- "cannot tell whether the process that holds" <<<"$output"
+  [ -d "$SK/.state-moving" ]
+  [ ! -e "$SK/run" ]
+}
+
+@test "agmsgd state: only one 'none' row is stopped; unreadable, no row, several rows and other values are unknown" {
   eval "$(sed -n '/^agmsg_install_daemon_active() {/,/^}/p' "$REPO_ROOT/install.sh")"
-  mkdir -p "$BATS_TEST_TMPDIR/s/run"
-  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s" && return 1 || [ "$?" -eq 1 ]
-  sqlite3 "$BATS_TEST_TMPDIR/s/run/install.db" "CREATE TABLE other(x);"
-  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s" && return 1 || [ "$?" -eq 1 ]
-  sqlite3 "$BATS_TEST_TMPDIR/s/run/install.db" "CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('ready');"
-  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s"
-  printf 'this is not a database\n' > "$BATS_TEST_TMPDIR/s/run/install.db"
-  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s" && return 1 || [ "$?" -eq 2 ]
+  local s="$BATS_TEST_TMPDIR/s" rc
+  mkdir -p "$s/run"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 1 ]
+  sqlite3 "$s/run/install.db" "CREATE TABLE other(x);"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 1 ]
+  sqlite3 "$s/run/install.db" "CREATE TABLE daemon_owner(state TEXT);"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 2 ]
+  sqlite3 "$s/run/install.db" "INSERT INTO daemon_owner VALUES('none');"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 1 ]
+  sqlite3 "$s/run/install.db" "INSERT INTO daemon_owner VALUES('none');"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 2 ]
+  sqlite3 "$s/run/install.db" "DELETE FROM daemon_owner; INSERT INTO daemon_owner VALUES('weird');"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 2 ]
+  sqlite3 "$s/run/install.db" "DELETE FROM daemon_owner; INSERT INTO daemon_owner VALUES('ready');"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 0 ]
+  printf 'this is not a database\n' > "$s/run/install.db"
+  rc=0; agmsg_install_daemon_active "$s" || rc=$?; [ "$rc" -eq 2 ]
 }
 
 @test "an unfinished install operation on record: the update refuses and nothing was moved" {

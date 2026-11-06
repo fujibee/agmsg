@@ -66,14 +66,14 @@ trap '' PIPE
 # "the write didn't fail"), 1 on any failure (busy past timeout_ms, the
 # sqlite3 coprocess could not be started, or its output didn't confirm).
 # Leaves no fd/process/tmpdir behind on failure.
-_agmsg_install_op_lock_once() {   # <lock_db_path> [timeout_ms, default 30000]
+_agmsg_install_op_lock_once() {   # <lock_db_path> [timeout_ms, default 30000] [no-mkdir]
   local db="$1" timeout_ms="${2:-30000}"
   local dir="" in_fifo="" out_fifo="" line read_timeout read_fd write_fd coproc_prefix read_rc
   AGMSG_INSTALL_OP_LOCK_FAILURE_REASON=""
   coproc_prefix=AGMSG_INSTALL_OP_SQLITE
   _AGMSG_INSTALL_OP_USE_COPROC=false
   _AGMSG_LOCK_CHANNELS_READY=false
-  if ! mkdir -p "$(dirname "$db")" 2>/dev/null; then
+  if [ -z "${3:-}" ] && ! mkdir -p "$(dirname "$db")" 2>/dev/null; then
     _agmsg_install_op_lock_set_failure "preparing lock database directory"
     return 1
   fi
@@ -160,41 +160,106 @@ _agmsg_install_op_lock_once() {   # <lock_db_path> [timeout_ms, default 30000]
   return 0
 }
 
+# --- the state-move gate -------------------------------------------------
 # While an install moves its state out of the skills directory, run/ (and the lock
-# database in it) is briefly absent at its old path. The mover creates
-# <install>/.state-moving (with its pid) for exactly that time; a contender waits
-# for it to go before it opens the lock, and looks again after it has the lock, so
-# it never ends up holding a second lock database made at the old path. A marker
-# whose process is gone is removed.
+# database in it) is absent at its old path between the rename and the link. The
+# mover holds <install>/.state-moving for exactly that time. A contender that
+# finds run/ absent (a fresh install, or a move in progress) takes the same gate
+# before it makes run/, so it can never make a second run/ and a second lock
+# database next to a move. A holder is retired only when it is PROVEN gone: its
+# pid is not listed, or the pid is listed with another start time (the pid was
+# reused). A holder that cannot be told either way is kept and reported.
+_agmsg_gate_stamp() {   # <pid> -> "pid|start time"
+  printf '%s|%s' "$1" "$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)"
+}
+
+# 0 = the holder is gone, 1 = alive, 2 = cannot tell
+_agmsg_gate_holder_state() {   # <gate dir>
+  local rec pid started now rc restore_e=0
+  [ -f "$1/holder" ] || return 1   # created a moment ago: the holder is writing its record
+  rec="$(<"$1/holder")" 2>/dev/null || return 2
+  pid="${rec%%|*}"
+  started="${rec#*|}"
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  # errexit lifted around the substitution so its status can be read (a failing
+  # ps must not end the caller, and bash 3.2 ignores `|| rc=$?` here).
+  case $- in *e*) restore_e=1 ;; esac
+  set +e
+  now="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"
+  rc=$?
+  [ "$restore_e" = 1 ] && set -e
+  if [ "$rc" -eq 1 ] && [ -z "$now" ]; then return 0; fi
+  if [ "$rc" -eq 0 ] && [ -n "$now" ] && [ -n "$started" ]; then
+    if [ "$now" = "$started" ]; then return 1; fi
+    return 0
+  fi
+  return 2
+}
+
+AGMSG_STATE_GATE_REASON=""
+agmsg_state_gate_acquire() {   # <skill dir> <timeout_ms>
+  local gate="${1%/}/.state-moving" waited=0 st
+  AGMSG_STATE_GATE_REASON=""
+  while :; do
+    if mkdir "$gate" 2>/dev/null; then
+      _agmsg_gate_stamp "$$" > "$gate/holder"
+      return 0
+    fi
+    st=0
+    _agmsg_gate_holder_state "$gate" || st=$?
+    if [ "$st" -eq 0 ]; then
+      command rm -f "$gate/holder"
+      if rmdir "$gate" 2>/dev/null; then continue; fi
+    fi
+    if [ "$waited" -ge "$2" ]; then
+      if [ "$st" -eq 2 ]; then
+        AGMSG_STATE_GATE_REASON="cannot tell whether the process that holds $gate is still running"
+      else
+        AGMSG_STATE_GATE_REASON="the state of this install is being moved ($gate exists)"
+      fi
+      return 1
+    fi
+    sleep 0.2
+    waited=$((waited + 200))
+  done
+}
+
+agmsg_state_gate_release() {   # <skill dir>
+  command rm -f "${1%/}/.state-moving/holder"
+  rmdir "${1%/}/.state-moving" 2>/dev/null || true
+}
+
+# Takes the install operation lock. Never makes run/ unless it holds the gate and
+# run/ is still absent; if run/ vanishes under it (a move) it waits and looks
+# again, so there is one lock database per install at any time.
 agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
-  local db="$1" timeout_ms="${2:-30000}" skill="" moving pid waited=0 left
+  local db="$1" timeout_ms="${2:-30000}" skill="" run waited=0 left rc
   case "$db" in */run/install-op.lock.db) skill="${db%/run/install-op.lock.db}" ;; esac
   if [ -z "$skill" ]; then
     _agmsg_install_op_lock_once "$db" "$timeout_ms"
     return
   fi
-  moving="$skill/.state-moving"
+  run="$skill/run"
   while :; do
-    while [ -d "$moving" ]; do
-      pid=""
-      [ ! -f "$moving/pid" ] || pid="$(<"$moving/pid")" 2>/dev/null || pid=""
-      if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-        rm -f "$moving/pid"
-        rmdir "$moving" 2>/dev/null
-        continue
-      fi
-      if [ "$waited" -ge "$timeout_ms" ]; then
-        _agmsg_install_op_lock_set_failure "the state of this install is being moved ($moving exists)"
+    if [ ! -e "$run" ] && [ ! -L "$run" ]; then
+      if ! agmsg_state_gate_acquire "$skill" "$((timeout_ms - waited))"; then
+        _agmsg_install_op_lock_set_failure "$AGMSG_STATE_GATE_REASON"
         return 1
       fi
-      sleep 0.2
-      waited=$((waited + 200))
-    done
+      if [ ! -e "$run" ] && [ ! -L "$run" ]; then mkdir -p "$run" 2>/dev/null; fi
+      agmsg_state_gate_release "$skill"
+    fi
     left=$((timeout_ms - waited))
     [ "$left" -ge 1000 ] || left=1000
-    _agmsg_install_op_lock_once "$db" "$left" || return 1
-    [ -d "$moving" ] || return 0
-    agmsg_install_op_unlock
+    rc=0
+    _agmsg_install_op_lock_once "$db" "$left" no-mkdir || rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    if [ ! -e "$run" ] && [ ! -L "$run" ] && [ "$waited" -lt "$timeout_ms" ]; then
+      sleep 0.2
+      waited=$((waited + 200))
+      continue
+    fi
+    return "$rc"
   done
 }
 
