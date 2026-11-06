@@ -653,10 +653,10 @@ _pid_gone_harness() {   # <kill message>
   # install this run is about (#1400).
   HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$SK/uninstall.sh" --yes
 
-  # $SK itself is no longer fully gone: run/install-op.lock.db
+  # $SK itself is no longer fully gone: .install-op.lock.db
   # is kept on purpose, so a residual $SK/run/ survives. Its substantive
   # content is what must be gone -- covered in full by its own test
-  # ("uninstall keeps run/install-op.lock.db while removing everything else").
+  # ("uninstall keeps .install-op.lock.db while removing everything else").
   [ ! -e "$SK/scripts" ]
   [ ! -e "$SK/SKILL.md" ]
   [ ! -f "$cmd_first" ]
@@ -734,7 +734,7 @@ _pid_gone_harness() {   # <kill message>
   # two installs present and no single one identified.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
 
-  # Neither install is fully gone: run/install-op.lock.db
+  # Neither install is fully gone: .install-op.lock.db
   # is kept on purpose for each. Substantive content is what must be gone.
   [ ! -e "$FAKE_HOME/.agents/skills/agmsg/scripts" ]
   [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second/scripts" ]
@@ -1240,7 +1240,7 @@ SH
 
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_MODE=crlf-canary \
     bash -c 'source "$1"; agmsg_install_op_lock "$2" 1000 || exit 1; agmsg_install_op_confirm || exit 2; printf "lock acquired\\n"; agmsg_install_op_unlock' \
-    _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$FAKE_HOME/run/install-op.lock.db"
+    _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$FAKE_HOME/.install-op.lock.db"
   [ "$status" -eq 0 ]
   grep -Fq -- "lock acquired" <<<"$output"
 }
@@ -2619,7 +2619,7 @@ CYG
   # The operation lock DB must exist, never be empty-deleted by install
   # itself, and never appear in the manifest's own file listing (it lives
   # under run/, not scripts/).
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op.lock.db" ]
 
   local id1 gen1
   id1="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.install_id');")"
@@ -2647,7 +2647,7 @@ CYG
   # The lock DB holds no tables of its own -- it exists only to be BEGIN
   # EXCLUSIVE'd.
   local lock_tables
-  lock_tables="$(sqlite3 "$SK/run/install-op.lock.db" "SELECT count(*) FROM sqlite_master WHERE type='table';")"
+  lock_tables="$(sqlite3 "$SK/.install-op.lock.db" "SELECT count(*) FROM sqlite_master WHERE type='table';")"
   [ "$lock_tables" = "0" ]
 
   # The two daemon bootstrap files were placed (not left out by the bulk
@@ -2789,7 +2789,7 @@ CYG
   done
   if [ -e "$entered" ]; then
     if bash -c 'source "$1"; if agmsg_install_op_lock "$2" 300; then agmsg_install_op_unlock; exit 3; else exit 0; fi' \
-        _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$SK/run/install-op.lock.db"; then
+        _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$SK/.install-op.lock.db"; then
       blocked=1
     fi
   fi
@@ -2820,14 +2820,14 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op.lock.db"' \
     'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
     "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op.lock.db"' \
     'target="$test_home/.agents/skills/agmsg/scripts/"' \
     'dest=""; for arg do dest="$arg"; done' \
     'if [ "$dest" = "$target" ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
@@ -2895,7 +2895,7 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/cancel-writer}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op.lock.db"' \
     'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
     "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
@@ -2922,7 +2922,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
-  _agmsg_watch_pid "$lock_pid" "$SK/run/install-op.lock.db"
+  _agmsg_watch_pid "$lock_pid" "$SK/.install-op.lock.db"
   [ -e "$SK/run/install-op-incomplete.json" ]
 
   kill -TERM "$install_pid"
@@ -2948,7 +2948,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
-  _agmsg_watch_pid "$lock_pid" "$SK/run/install-op.lock.db"
+  _agmsg_watch_pid "$lock_pid" "$SK/.install-op.lock.db"
   op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
   kill -KILL "$install_pid"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
@@ -3027,15 +3027,15 @@ CYG
   [ ! -e "$SK/run/install-op-incomplete.json" ]
 }
 
-@test "uninstall keeps run/install-op.lock.db while removing everything else" {
+@test "uninstall keeps .install-op.lock.db while removing everything else" {
   _restore_install
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op.lock.db" ]
   [ -f "$SK/run/install.db" ]
   [ -f "$SK/scripts/team.sh" ]
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
 
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op.lock.db" ]
   [ ! -e "$SK/run/install.db" ]
   [ ! -e "$SK/run/install-manifest.json" ]
   [ ! -e "$SK/scripts" ]
@@ -3060,14 +3060,14 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op.lock.db"' \
     'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
     "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op.lock.db"' \
     'target="$test_home/.agents/skills/agmsg/scripts"' \
     'final_root="$test_home/.agents/skills/agmsg/uninstall.sh"' \
     'final_retired="$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."' \
@@ -3097,7 +3097,7 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op.lock.db"' \
     'source_path="$1"; dest_path="$2"' \
     'case "$source_path:$dest_path" in "$test_home/.agents/skills/agmsg/uninstall.sh:$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."*)' \
     '  if [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/move-fired" ]; then' \
@@ -3141,7 +3141,7 @@ CYG
   # order. This injection stops immediately after removing scripts, so other
   # entries may legitimately remain if they sort after scripts.
   [ ! -e "$SK/scripts" ]
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op.lock.db" ]
   [ -x "$SK/uninstall.sh" ]
   [ -r "$SK/run/install-op-recovery.sh" ]
 

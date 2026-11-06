@@ -61,7 +61,7 @@ setup_install_db() {
   local fifo="$TEST_SKILL_DIR/run/holder.fifo"
   local ack_fifo="$TEST_SKILL_DIR/run/holder-ack.fifo"
   mkfifo "$fifo" "$ack_fifo"
-  sqlite3 -batch "$TEST_SKILL_DIR/run/install-op.lock.db" < "$fifo" > "$ack_fifo" &
+  sqlite3 -batch "$TEST_SKILL_DIR/.install-op.lock.db" < "$fifo" > "$ack_fifo" &
   local holder_pid=$!
   exec 8> "$fifo"
   exec 9< "$ack_fifo"

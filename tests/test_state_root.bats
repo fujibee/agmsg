@@ -318,61 +318,6 @@ demote() {
   [ "$(<"$FAKE_HOME/.agmsg/agmsg-copy/.owner")" = "$FAKE_HOME/.agents/skills/agmsg-copy" ]
 }
 
-# The mover's gate: <install>/.state-moving holding "pid|start time" of the mover.
-gate_stamp() { bash -c '. "$1/scripts/lib/install-op-lock.sh"; _agmsg_gate_stamp "$2"' _ "$SK" "$1"; }
-
-@test "a contender that finds run/ absent mid-move waits on the gate and never makes a second run/ or lock database" {
-  inst
-  sleep 30 &
-  local mover=$!
-  mkdir "$SK/.state-moving"
-  gate_stamp "$mover" > "$SK/.state-moving/holder"
-  command mv "$SK/run" "$FAKE_HOME/run.parked"
-  (
-    . "$REPO_ROOT/scripts/lib/install-op-lock.sh"
-    agmsg_install_op_lock "$SK/run/install-op.lock.db" 20000 && echo acquired > "$BATS_TEST_TMPDIR/contender.out"
-  ) &
-  local contender=$!
-  sleep 2
-  # run/ is still absent: the contender did not create it or open a lock there
-  [ ! -e "$SK/run" ]
-  [ ! -e "$BATS_TEST_TMPDIR/contender.out" ]
-  command mv "$FAKE_HOME/run.parked" "$ST/run.back"
-  command rmdir "$ST/run" 2>/dev/null || true
-  command mv "$ST/run.back" "$ST/run"
-  ln -s "$ST/run" "$SK/run"
-  command rm "$SK/.state-moving/holder"
-  command rmdir "$SK/.state-moving"
-  wait "$contender"
-  [ "$(<"$BATS_TEST_TMPDIR/contender.out")" = acquired ]
-  [ -L "$SK/run" ]
-  kill "$mover" 2>/dev/null || true
-}
-
-@test "a gate whose holder is proven gone is retired; a fresh install then gets its run/ and the lock" {
-  mkdir -p "$SK"
-  mkdir "$SK/.state-moving"
-  printf '999999|Thu Jan  1 00:00:00 1970\n' > "$SK/.state-moving/holder"
-  run bash -ec '. "$1/scripts/lib/install-op-lock.sh"; agmsg_install_op_lock "$2/run/install-op.lock.db" 10000 && echo acquired' _ "$REPO_ROOT" "$SK"
-  [ "$status" -eq 0 ]
-  grep -qF -- acquired <<<"$output"
-  [ ! -e "$SK/.state-moving" ]
-  [ -d "$SK/run" ]
-}
-
-@test "a gate whose holder cannot be told apart from alive is kept, and the contender fails saying so" {
-  mkdir -p "$SK"
-  mkdir "$SK/.state-moving"
-  printf '4242|whatever\n' > "$SK/.state-moving/holder"
-  mkdir -p "$BATS_TEST_TMPDIR/fakebin"
-  printf '#!/bin/sh\necho "ps: not permitted" >&2\nexit 3\n' > "$BATS_TEST_TMPDIR/fakebin/ps"
-  chmod +x "$BATS_TEST_TMPDIR/fakebin/ps"
-  run env PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" bash -ec '. "$1/scripts/lib/install-op-lock.sh"; agmsg_install_op_lock "$2/run/install-op.lock.db" 1000 || echo "failed: $AGMSG_INSTALL_OP_LOCK_FAILURE_REASON"' _ "$REPO_ROOT" "$SK"
-  grep -qF -- "cannot tell whether the process that holds" <<<"$output"
-  [ -d "$SK/.state-moving" ]
-  [ ! -e "$SK/run" ]
-}
-
 @test "agmsgd state: only one 'none' row is stopped; unreadable, no row, several rows and other values are unknown" {
   eval "$(sed -n '/^agmsg_install_daemon_active() {/,/^}/p' "$REPO_ROOT/install.sh")"
   local s="$BATS_TEST_TMPDIR/s" rc
@@ -427,9 +372,7 @@ EOS
 @test "while another operation holds the install lock the update moves nothing; it moves once the lock is released" {
   inst
   demote
-  mkdir -p "$SK/run"
-  : > "$SK/run/install-op.lock.db"
-  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
+  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/.install-op.lock.db" >/dev/null 2>&1 &
   local holder=$!
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
@@ -444,11 +387,63 @@ EOS
   [ "$(readlink "$SK/db")" = "$ST/db" ]
 }
 
-@test "the move marker is gone after a move and after a refused move" {
+@test "the install lock lives in the install directory, which a move does not touch: it is the same file before and after" {
   inst
+  [ -f "$SK/.install-op.lock.db" ]
+  [ ! -L "$SK/.install-op.lock.db" ]
+  local before after
+  before="$(stat -f %i "$SK/.install-op.lock.db" 2>/dev/null || stat -c %i "$SK/.install-op.lock.db")"
   demote
   run inst --update
   [ "$status" -eq 0 ]
-  [ ! -e "$SK/.state-moving" ]
+  after="$(stat -f %i "$SK/.install-op.lock.db" 2>/dev/null || stat -c %i "$SK/.install-op.lock.db")"
+  [ "$before" = "$after" ]
   [ -L "$SK/run" ]
+}
+
+@test "an installer from an earlier release that holds run/install-op.lock.db keeps the state in place, visibly" {
+  inst
+  demote
+  : > "$SK/run/install-op.lock.db"
+  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 8 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
+  local holder=$!
+  sleep 1
+  run inst --update
+  wait "$holder" || true
+  grep -qF -- "an installer from an earlier release holds" <<<"$output"
+  [ -d "$SK/run" ] && [ ! -L "$SK/run" ]
+  [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = in-place ]
+}
+
+@test "state_link: run/ recreated by an ordinary writer in the gap is folded in, never linked into, and nothing is lost" {
+  inst
+  demote
+  printf 'old\n' > "$SK/run/old-file"
+  (
+    . "$REPO_ROOT/scripts/lib/state-root.sh"
+    fired=""
+    ln() { if [ -z "$fired" ]; then fired=1; mkdir -p "$SK/run"; printf 'new\n' > "$SK/run/new-file"; fi; command ln "$@"; }
+    agmsg_state_link "$SK" "$ST"
+  )
+  [ -L "$SK/run" ]
+  [ "$(readlink "$SK/run")" = "$ST/run" ]
+  [ ! -e "$ST/run/run" ]
+  [ "$(<"$ST/run/old-file")" = old ]
+  [ "$(<"$ST/run/new-file")" = new ]
+}
+
+@test "state_link: a recreated run/ that collides with a moved name is left in place and reported, and no file is lost" {
+  inst
+  demote
+  printf 'old\n' > "$SK/run/same"
+  run bash -c '
+    . "$1/scripts/lib/state-root.sh"
+    fired=""
+    ln() { if [ -z "$fired" ]; then fired=1; mkdir -p "$SK/run"; printf "new\n" > "$SK/run/same"; fi; command ln "$@"; }
+    agmsg_state_link "$SK" "$ST"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+  grep -qF -- "could not link it back" <<<"$output"
+  [ "$(<"$ST/run/same")" = old ]
+  [ "$(<"$SK/run/same")" = new ]
+  [ ! -e "$SK/run/run" ]
 }

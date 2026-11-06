@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DB="$SKILL_DIR/run/install.db"
-LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
+LOCK_DB="$SKILL_DIR/.install-op.lock.db"
 LAUNCHER="$SCRIPT_DIR/daemon/agmsgd-launch.sh"
 # shellcheck source=lib/daemon-state.sh
 source "$SCRIPT_DIR/lib/daemon-state.sh"

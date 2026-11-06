@@ -208,7 +208,7 @@ async function main() {
   }
   const expectedOpGen = Number(opGenStr);
 
-  const lockPath = join(installRoot, "run", "install-op.lock.db");
+  const lockPath = join(installRoot, ".install-op.lock.db");
   const incompleteOperationPath = join(installRoot, "run", "install-op-incomplete.json");
   const manifestPath = join(installRoot, "run", "install-manifest.json");
   const dbPath = join(installRoot, "run", "install.db");

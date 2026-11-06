@@ -129,6 +129,29 @@ agmsg_state_preflight() {   # <skill dir> <state root>
   return 0
 }
 
+# Makes <src> a link to <dest> (already moved there). A running script may make
+# <src> again between the move and the link (mkdir -p run); ln -s would then put
+# the link INSIDE that directory. So: whatever is in a recreated <src> is folded
+# into <dest> first (names that already exist there are not overwritten), a link
+# that landed inside is taken out again, and the result is checked to be the link.
+_agmsg_state_fold() {   # <src> <dest>
+  local f
+  ( shopt -s dotglob nullglob; for f in "$1"/*; do mv -n "$f" "$2/" 2>/dev/null; done )
+  rmdir "$1" 2>/dev/null
+}
+_agmsg_state_publish() {   # <src> <dest>
+  local src="$1" dest="$2" inner
+  if [ -d "$src" ] && [ ! -L "$src" ]; then _agmsg_state_fold "$src" "$dest"; fi
+  if [ ! -e "$src" ] && [ ! -L "$src" ]; then ln -s "$dest" "$src" 2>/dev/null; fi
+  if [ -d "$src" ] && [ ! -L "$src" ]; then
+    inner="$src/${src##*/}"
+    if [ -L "$inner" ] && [ "$(readlink "$inner")" = "$dest" ]; then command rm -f "$inner"; fi
+    _agmsg_state_fold "$src" "$dest"
+    if [ ! -e "$src" ] && [ ! -L "$src" ]; then ln -s "$dest" "$src" 2>/dev/null; fi
+  fi
+  [ "$(readlink "$src" 2>/dev/null)" = "$dest" ]
+}
+
 # Moves each part to the state root and links it back. Safe to re-run at any
 # point of an earlier, interrupted run: every step looks at what is there now.
 agmsg_state_link() {   # <skill dir> <state root>
@@ -159,21 +182,8 @@ agmsg_state_link() {   # <skill dir> <state root>
     else
       mkdir -p "$dest" 2>/dev/null || { echo "agmsg: could not create $dest" >&2; failed=1; continue; }
     fi
-    if [ -d "$src" ] || ! ln -s "$dest" "$src" 2>/dev/null; then
-      # A running script created the old path again between the move and the
-      # link: fold what it made into the moved directory, then link.
-      if [ -d "$src" ] && [ ! -L "$src" ]; then
-        ( shopt -s dotglob nullglob; for f in "$src"/*; do mv -n "$f" "$dest/" 2>/dev/null; done )
-        rmdir "$src" 2>/dev/null
-      fi
-      if [ -d "$src" ] || ! ln -s "$dest" "$src" 2>/dev/null; then
-        echo "agmsg: moved $src to $dest but could not link it back (something else created $src); remove it, then run: ln -s $dest $src" >&2
-        failed=1
-      fi
-    fi
-    # Published means the path now IS the link to the moved directory.
-    if [ "$(readlink "$src" 2>/dev/null)" != "$dest" ]; then
-      [ "$failed" = 1 ] || echo "agmsg: $src does not link to $dest after the move" >&2
+    if ! _agmsg_state_publish "$src" "$dest"; then
+      echo "agmsg: moved $src to $dest but could not link it back (something else made $src and its entries cannot all be moved); fix that, then run: ln -s $dest $src" >&2
       failed=1
     fi
   done

@@ -66,7 +66,7 @@ test("readCompletionState: missing / complete / crashed / updating", () => {
     assert.equal(readCompletionState(root).state, "crashed", "no lock held -> update died mid-way");
 
     // Now hold the install-op lock -- must read as "updating", not "crashed".
-    const lockPath = join(root, "run", "install-op.lock.db");
+    const lockPath = join(root, ".install-op.lock.db");
     const holder = new DatabaseSync(lockPath);
     holder.exec("BEGIN EXCLUSIVE;");
     try {
