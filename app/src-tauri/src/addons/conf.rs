@@ -12,7 +12,7 @@ pub const MAX_CONF_BYTES: usize = 64 * 1024;
 pub const MAX_CONF_LINES: usize = 1000;
 
 pub const PERMISSIONS: [&str; 7] = ["messages:read", "files:read", "git:read", "network", "team:join", "messages:send", "agents:spawn"];
-const KEYS: [&str; 8] = ["title", "entry", "min_app", "protocol", "permissions", "network", "opens", "member"];
+const KEYS: [&str; 10] = ["title", "entry", "min_app", "protocol", "permissions", "network", "opens", "member", "locales", "default"];
 const OPENS: [&str; 2] = ["path", "url"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,10 @@ pub struct AddonConf {
     pub opens: Vec<String>,
     /// The name the add-on asks for as a team member (`member`), when declared.
     pub member: Option<String>,
+    /// The language tags the add-on ships strings for (`locales`); advisory, empty when not declared.
+    pub locales: Vec<String>,
+    /// The tag it falls back to (`default`), `en` when not declared.
+    pub default_locale: String,
     /// `why.<permission>` lines, shown next to each permission.
     pub why: BTreeMap<String, String>,
 }
@@ -59,6 +63,15 @@ pub fn read_bounded(path: &std::path::Path) -> ConfRead {
     } else {
         ConfRead::Ok(buf)
     }
+}
+
+/// A BCP 47 shape: a 2-3 letter language, then subtags of 2-8 letters or digits (en, ja, zh-CN, pt-BR).
+fn is_lang_tag(t: &str) -> bool {
+    let mut parts = t.split('-');
+    let Some(lang) = parts.next() else { return false };
+    (2..=3).contains(&lang.len())
+        && lang.bytes().all(|b| b.is_ascii_alphabetic())
+        && parts.all(|p| (2..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 fn list(v: &str) -> Vec<String> {
@@ -181,6 +194,22 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
             }
         }
     }
+    let locales = val("locales").map(list).unwrap_or_default();
+    for (i, t) in locales.iter().enumerate() {
+        if !is_lang_tag(t) {
+            errors.push(format!("{}: \"{t}\" is not a language tag like en or pt-BR.", at("locales")));
+        } else if locales[..i].iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            errors.push(format!("{}: \"{t}\" is listed twice.", at("locales")));
+        }
+    }
+    let default_locale = val("default").filter(|d| !d.is_empty()).unwrap_or("en").to_string();
+    if values.contains_key("default") {
+        if !is_lang_tag(&default_locale) {
+            errors.push(format!("{}: \"{default_locale}\" is not a language tag like en or pt-BR.", at("default")));
+        } else if !locales.is_empty() && !locales.iter().any(|l| l.eq_ignore_ascii_case(&default_locale)) {
+            warnings.push(format!("{}: \"{default_locale}\" is not in \"locales\".", at("default")));
+        }
+    }
     if let Some(e) = val("entry") {
         if !e.is_empty() && !super::server::valid_relative(e) {
             errors.push(format!("{}: entry must be a plain path under web/.", at("entry")));
@@ -205,6 +234,8 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
             network: val("network").map(str::to_string),
             opens,
             member: val("member").map(str::to_string),
+            locales,
+            default_locale,
             why,
         })
     } else {
@@ -317,6 +348,21 @@ mod tests {
         assert!(errs("title=T\nprotocol=1\n=x\n").iter().any(|e| e.contains("expected key = value")));
         assert!(errs("title=T\nprotocol=1\nopens=file\n").iter().any(|e| e.contains("unknown \"file\" (path or url)")));
         assert!(errs("title=T\nprotocol=1\nmin_app=0.6\n").iter().any(|e| e.contains("min_app must look like 0.6.0")));
+    }
+
+    #[test]
+    fn locales_and_default_are_advisory_but_checked_for_shape() {
+        let c = ok("title=T\nprotocol=1\nlocales=en, ja, zh-CN\ndefault=ja\n");
+        assert_eq!(c.locales, vec!["en", "ja", "zh-CN"]);
+        assert_eq!(c.default_locale, "ja");
+        let none = ok("title=T\nprotocol=1\n");
+        assert!(none.locales.is_empty() && none.default_locale == "en");
+        assert!(errs("title=T\nprotocol=1\nlocales=en, japanese!\n").iter().any(|e| e.contains("\"japanese!\" is not a language tag")));
+        assert!(errs("title=T\nprotocol=1\nlocales=en, EN\n").iter().any(|e| e.contains("\"EN\" is listed twice")));
+        assert!(errs("title=T\nprotocol=1\ndefault=x\n").iter().any(|e| e.contains("\"x\" is not a language tag")));
+        let r = parse("title=T\nprotocol=1\nlocales=en\ndefault=ja\n", "c");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.warnings.iter().any(|w| w.contains("\"ja\" is not in \"locales\"")), "{:?}", r.warnings);
     }
 
     #[test]

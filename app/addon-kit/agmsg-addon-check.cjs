@@ -16,7 +16,8 @@ const { execFileSync } = require('child_process');
 
 const LIMITS = { totalBytes: 200 * 1024 * 1024, files: 5000, fileBytes: 50 * 1024 * 1024 };
 const PERMISSIONS = new Set(['messages:read', 'files:read', 'git:read', 'network', 'team:join', 'messages:send', 'agents:spawn']);
-const KEYS = new Set(['title', 'entry', 'min_app', 'protocol', 'permissions', 'network', 'opens', 'member']);
+const KEYS = new Set(['title', 'entry', 'min_app', 'protocol', 'permissions', 'network', 'opens', 'member', 'locales', 'default']);
+const LANG_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
 const OPENS = new Set(['path', 'url']);
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
@@ -125,7 +126,20 @@ function checkConf(confPath, rel) {
       if (!OPENS.has(o)) out.errors.push(at('opens') + ': unknown "' + o + '" (path or url).');
     }
   }
+  const locales = values.locales ? list(values.locales.value) : [];
+  locales.forEach((t, i) => {
+    if (!LANG_TAG.test(t)) out.errors.push(at('locales') + ': "' + t + '" is not a language tag like en or pt-BR.');
+    else if (locales.slice(0, i).some((o) => o.toLowerCase() === t.toLowerCase())) out.errors.push(at('locales') + ': "' + t + '" is listed twice.');
+  });
+  const defaultLocale = (values.default && values.default.value) || 'en';
+  if (values.default) {
+    if (!LANG_TAG.test(defaultLocale)) out.errors.push(at('default') + ': "' + defaultLocale + '" is not a language tag like en or pt-BR.');
+    else if (locales.length && !locales.some((l) => l.toLowerCase() === defaultLocale.toLowerCase())) {
+      out.warnings.push(at('default') + ': "' + defaultLocale + '" is not in "locales".');
+    }
+  }
   out.conf = {
+    locales,
     entry: (values.entry && values.entry.value) || 'index.html',
     permissions: perms,
     network: values.network ? values.network.value : '',
@@ -275,6 +289,10 @@ function collect(root, limits) {
     const untrackedWeb = tree.untracked.filter((f) => f.startsWith(webPrefix));
     if (untrackedWeb.length) {
       warnings.push(untrackedWeb.length + ' file(s) in ' + webPrefix + ' are not committed yet (e.g. ' + untrackedWeb[0] + ').');
+    }
+    for (const l of c.conf.locales) {
+      const f = webPrefix + 'locales/' + l + '.json';
+      if (!fs.existsSync(path.join(root, f))) warnings.push(rel + ': "locales" lists ' + l + ' but ' + f + ' is missing.');
     }
     const s = scanWeb(root, webFiles.length ? webFiles : untrackedWeb, c.conf);
     blocked.push(...s.errors);
