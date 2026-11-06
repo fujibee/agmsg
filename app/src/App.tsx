@@ -944,6 +944,11 @@ export default function App() {
       },
       onWithoutReadySignal: (count) =>
         pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count } }),
+      // An agent an add-on started: tell the host, which tells that add-on (and only it) when the notice was typed.
+      onTyped: (paneId, ids, at) => {
+        const key = panesRef.current.find((p) => p.id === paneId)?.agentKey;
+        if (key) void invoke("addon_notice_typed", { key, ids, at }).catch(() => {});
+      },
     });
   }
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
@@ -1296,7 +1301,7 @@ export default function App() {
         const flat = e.payload.body.replace(/\s+/g, " ").trim();
         const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
         const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
-        noticeFlusherRef.current?.notice(pane.id, kickoff);
+        noticeFlusherRef.current?.notice(pane.id, kickoff, e.payload.id);
       }
     });
     return () => void p.then((u) => u());

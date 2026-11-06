@@ -15,6 +15,8 @@ export type FlusherDeps = {
   // The notice path says what it did with a notice (typed, held past a cap, dropped, failed) in one line.
   log: (line: string) => void;
   onInjectFailed: (paneId: string, attempt: number, reason: string) => void;
+  // Notices were typed into the pane (the Enter was written): the ids of the messages they were about, and when.
+  onTyped?: (paneId: string, ids: string[], at: number) => void;
 };
 
 // Retry delay after consecutive failures: doubles from RETRY_BASE_MS up to RETRY_MAX_MS. It never gives up while
@@ -66,6 +68,8 @@ export function createNoticeFlusher(deps: FlusherDeps) {
           delete failures[id];
           const late = sent.filter((n) => n.late).length;
           if (late > 0) deps.onWithoutReadySignal(late);
+          const typed = sent.map((n) => n.id).filter((x): x is string => x !== undefined);
+          if (typed.length > 0) deps.onTyped?.(id, typed, deps.now());
           deps.setTimer(() => {
             busy.delete(id);
             flush();
@@ -89,9 +93,9 @@ export function createNoticeFlusher(deps: FlusherDeps) {
   return {
     flush,
     // A notice for `paneId` arrived.
-    notice(paneId: string, text: string) {
+    notice(paneId: string, text: string, id?: string) {
       deps.log(`notice for ${paneId} held (released=${released.has(paneId)}, state=${states[paneId] ?? "none"})`);
-      setQueues(hold(queues, paneId, text, deps.now()));
+      setQueues(hold(queues, paneId, text, deps.now(), id));
       if (!released.has(paneId)) {
         deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);
         deps.setTimer(flush, STARTUP_WAIT_MS + 100);

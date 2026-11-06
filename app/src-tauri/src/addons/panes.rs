@@ -268,6 +268,20 @@ impl Registry {
         v
     }
 
+    /// Open panes of `addon` that hold the spawn power for `team` right now, with their generation: the only
+    /// ones told when a notice was typed into an agent the add-on started there.
+    pub fn panes_holding_spawn(&self, addon: &str, team: &str) -> Vec<(PaneId, u64)> {
+        let mut v: Vec<_> = self
+            .panes
+            .values()
+            .filter(|p| p.addon == addon && p.team.as_deref() == Some(team) && p.generation > 0)
+            .filter(|p| self.authorize(p.id, p.generation, Need::Spawn).is_ok())
+            .map(|p| (p.id, p.generation))
+            .collect();
+        v.sort();
+        v
+    }
+
     /// What a pane instance is and holds, for binding a saved consent to it.
     pub fn consent_view(&self, id: PaneId) -> Option<ConsentView> {
         self.panes.get(&id).map(|p| ConsentView { addon: p.addon.clone(), pane: p.name.clone(), commit: p.commit.clone(), team: p.team.clone(), root: p.root.as_ref().map(|r| r.to_string_lossy().into_owned()), powers: p.powers })
@@ -614,6 +628,22 @@ mod tests {
         assert!(r.ids_for_addon("x/y").is_empty());
         r.remove(a);
         assert!(r.ids_for_addon("o/r").is_empty());
+    }
+
+    #[test]
+    fn only_panes_holding_the_spawn_power_for_the_team_are_told() {
+        let (mut r, id) = reg_with(Declared { team_join: true, messages_send: true, agents_spawn: true, ..Default::default() });
+        assert!(r.panes_holding_spawn("o/r", "t").is_empty(), "no frame has loaded");
+        let g = r.begin_generation(id).unwrap();
+        r.grant_team(id, "t").unwrap();
+        assert!(r.panes_holding_spawn("o/r", "t").is_empty(), "the team alone is not the power");
+        r.set_power(id, Power::Join, true).unwrap();
+        r.set_power(id, Power::Spawn, true).unwrap();
+        assert_eq!(r.panes_holding_spawn("o/r", "t"), vec![(id, g)]);
+        assert!(r.panes_holding_spawn("x/y", "t").is_empty(), "another add-on is not told");
+        assert!(r.panes_holding_spawn("o/r", "other").is_empty(), "another team is not told");
+        r.set_power(id, Power::Spawn, false).unwrap();
+        assert!(r.panes_holding_spawn("o/r", "t").is_empty(), "a taken-back power stops it at once");
     }
 
     #[test]
