@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createNoticeFlusher, RETRY_MAX_MS } from "./noticeFlusher";
+import { createNoticeFlusher, MAX_REPORT_IDS, RETRY_MAX_MS } from "./noticeFlusher";
 import { INJECT_SETTLE_MS, STARTUP_WAIT_MS, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
 
 type Call = { id: string; text: string; settle: (ok: boolean) => void };
@@ -210,5 +210,21 @@ describe("noticeFlusher", () => {
     await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS + 1000);
     expect(calls).toHaveLength(0);
     expect(typed).toEqual([]);
+  });
+
+  it("reports a long batch in pieces the host accepts, every id once, all with the same time", async () => {
+    for (const n of [MAX_REPORT_IDS - 1, MAX_REPORT_IDS, MAX_REPORT_IDS + 1, 2 * MAX_REPORT_IDS, 2 * MAX_REPORT_IDS + 1]) {
+      const { f, calls, typed } = setup();
+      f.state("p1", "working");
+      for (let k = 0; k < n; k++) f.notice("p1", `n${k}`, `m${k}`);
+      vi.setSystemTime(9000);
+      f.state("p1", "idle");
+      calls[0].settle(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(typed.every((t) => t.ids.length > 0 && t.ids.length <= MAX_REPORT_IDS), `${n}: every piece within the limit`).toBe(true);
+      expect(typed.map((t) => t.at), `${n}: one time`).toEqual(typed.map(() => 9000));
+      expect(typed.flatMap((t) => t.ids), `${n}: every id once, in order`).toEqual(Array.from({ length: n }, (_, k) => `m${k}`));
+      expect(typed.length).toBe(Math.ceil(n / MAX_REPORT_IDS));
+    }
   });
 });

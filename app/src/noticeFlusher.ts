@@ -22,6 +22,9 @@ export type FlusherDeps = {
 // Retry delay after consecutive failures: doubles from RETRY_BASE_MS up to RETRY_MAX_MS. It never gives up while
 // the pane is open, and closing the pane drops the notices, which ends the retries.
 export const RETRY_BASE_MS = 1000;
+// The host takes at most this many ids in one report and drops a larger one whole, so a long batch is reported in
+// pieces, all with the time the notices were typed.
+export const MAX_REPORT_IDS = 50;
 export const RETRY_MAX_MS = 30_000;
 
 // Feeds app-typed notices into panes: a new pane's first notices wait for its first idle; each pane gets one line
@@ -69,7 +72,8 @@ export function createNoticeFlusher(deps: FlusherDeps) {
           const late = sent.filter((n) => n.late).length;
           if (late > 0) deps.onWithoutReadySignal(late);
           const typed = sent.map((n) => n.id).filter((x): x is string => x !== undefined);
-          if (typed.length > 0) deps.onTyped?.(id, typed, deps.now());
+          const at = deps.now();
+          for (let i = 0; i < typed.length; i += MAX_REPORT_IDS) deps.onTyped?.(id, typed.slice(i, i + MAX_REPORT_IDS), at);
           deps.setTimer(() => {
             busy.delete(id);
             flush();
