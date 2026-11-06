@@ -4603,7 +4603,7 @@ SH
   refute grep -q 'agmsgd delivers notices for this session' <<<"$GATE_OUT"
   grep -q 'NOT delivered to this session' <<<"$GATE_OUT"
   grep -qF "\"$TEST_SKILL_DIR/scripts/agmsg\" daemon start" <<<"$GATE_OUT"
-  refute grep -qE '(with|run|then|use): agmsg daemon' <<<"$GATE_OUT"
+  refute grep -qE '(^|[^/"])agmsg daemon' <<<"$GATE_OUT"
 }
 
 @test "session-start.sh for codex: agmsgd on, health not verifiable -> no bridge, says it could not be checked, not 'delivers' and not 'not running'" {
@@ -4617,6 +4617,7 @@ SH
   grep -q 'not confirmed' <<<"$GATE_OUT"
   grep -qF "\"$TEST_SKILL_DIR/scripts/agmsg\" daemon status" <<<"$GATE_OUT"
   refute grep -q 'NOT delivered' <<<"$GATE_OUT"
+  refute grep -qE '(^|[^/"])agmsg daemon' <<<"$GATE_OUT"
 }
 
 @test "session-start.sh for codex: the way back names this install's own command, so a --cmd install does not point at the default one" {
