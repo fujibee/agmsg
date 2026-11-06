@@ -108,6 +108,8 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/validate.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/stale-outcome-files.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/down-notice.sh"
 
 # --- orphaned run/ records (#1507) -----------------------------------------
 #
@@ -1092,6 +1094,12 @@ _doctor_scan_stale_outcome_files
 if [ -n "$STALE_OUTCOME_FILES" ]; then
   _warn "$(_agmsg_stale_outcome_dir) holds leaked storage sync driver outcome file(s) from before #1572 (see 'leaked storage sync driver outcome files' above); fix them with: doctor.sh --fix"
 fi
+# A component that is down or degraded and could not recover itself
+# (scripts/lib/down-notice.sh): installation-wide, one warning per record.
+while IFS=$'\t' read -r _dn_component _dn_state _dn_since _dn_reason _dn_recovery; do
+  [ -n "$_dn_component" ] || continue
+  _warn "$_dn_component is $_dn_state since $_dn_since: $_dn_reason${_dn_recovery:+ (recover with: $_dn_recovery)}"
+done < <(down_notice_list)
 WARN_COUNT="$(printf '%s\n' "$WARNINGS" | grep -c . || true)"
 
 echo "$TEAM_COUNT team(s), $TOTAL_PAIR_COUNT registration(s), $WARN_COUNT warning(s)"

@@ -340,6 +340,13 @@ if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-au
   fi
 fi
 
+# A component that is down or degraded and could not recover itself: said once.
+if [ -r "$SKILL_DIR/scripts/lib/down-notice.sh" ]; then
+  # shellcheck source=scripts/lib/down-notice.sh
+  . "$SKILL_DIR/scripts/lib/down-notice.sh"
+  down_notice_print_once || true
+fi
+
 # --- Skip directive when a watcher is already alive for this instance. ---
 # /compact re-fires SessionStart within the same CC process and session_id, so
 # INSTANCE_ID is identical to the already-running watcher's.  Without this
