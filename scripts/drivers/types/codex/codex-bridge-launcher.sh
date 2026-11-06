@@ -816,12 +816,25 @@ bridge_note_death() {
 # error logged once); this is the only wait left, and it ends when the record
 # is written or the seat's session is gone.
 bridge_stop_retrying() {
-  local holder fix
-  holder="$(tail -n 60 "$log" 2>/dev/null | grep -E 'not serving these pairs|was claimed by session' | tail -n 1 | cut -c1-300 || true)"
-  fix="close the other session that holds this role, then restart this seat's Codex session (what holds it: delivery.sh status codex $PROJECT)"
-  bridge_notice_reason="the Codex bridge for $bridge_key ended right after starting ${bridge_quick_deaths} times in $((SECONDS - bridge_spell_start))s and is no longer being started, so messages are not reaching this seat${holder:+; last refusal: $holder}; $fix"
-  printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row over %ss; not starting it again, so messages are not reaching this seat%s. To fix: %s\n' \
-    "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$((SECONDS - bridge_spell_start))" "${holder:+ (last refusal: $holder)}" "$fix" >>"$log" 2>/dev/null || true
+  local cause fix lead
+  # The last thing the bridge itself logged is the cause, whatever it is; this
+  # launcher's own lines do not count, and an older refusal is not picked over a
+  # newer different failure.
+  cause="$(tail -n 60 "$log" 2>/dev/null | grep -v 'codex-bridge-launcher:' | grep . | tail -n 1 | cut -c1-300 || true)"
+  case "$cause" in
+    *'not serving these pairs'*|*'was claimed by session'*)
+      lead="another session holds this role (last bridge message: $cause)"
+      fix="close the session that holds this role (delivery.sh status codex $PROJECT shows what holds it; it does not restart anything), then restart this seat's Codex session" ;;
+    '')
+      lead="cause unknown (the bridge log has no bridge message)"
+      fix="restart this seat's Codex session (the bridge log: $log)" ;;
+    *)
+      lead="last bridge message: $cause"
+      fix="fix that, then restart this seat's Codex session (the bridge log: $log)" ;;
+  esac
+  bridge_notice_reason="the Codex bridge for $bridge_key ended right after starting ${bridge_quick_deaths} times in $((SECONDS - bridge_spell_start))s and is no longer being started, so messages are not reaching this seat; ${lead}. To fix: ${fix}"
+  printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row over %ss; not starting it again, so messages are not reaching this seat; %s. To fix: %s\n' \
+    "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$((SECONDS - bridge_spell_start))" "$lead" "$fix" >>"$log" 2>/dev/null || true
   bridge_notice_clear=0
   bridge_notice_next_try=0
   while :; do

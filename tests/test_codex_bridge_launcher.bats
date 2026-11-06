@@ -302,6 +302,27 @@ run_launcher() {
   agmsg_stop_pid "$p"
 }
 
+@test "launcher: giving up names the last bridge message, not an older refusal, and does not blame another session" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  # An old refusal, then a newer different failure written by each bridge start.
+  printf 'agmsg watch: not serving these pairs (held by another session, or unverified): team\talice\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sed -i.bak 's|^exit 0$|echo "Error: connect ECONNREFUSED 127.0.0.1:9999" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'ECONNREFUSED 127.0.0.1:9999' "$notice"
+  refute grep -q 'another session' "$notice"
+  refute grep -q 'close the session' "$notice"
+  grep -q "restart this seat's Codex session" "$notice"
+  grep -q 'ECONNREFUSED' "$RUN_DIR/codex-bridge.team.alice.log"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
 @test "launcher: a bridge that stays up is never given up on, and the quick-death count starts over" {
   put_record team alice rec-thread-1 "$PROJ" codex
   # The second start stays up past the stable time; the first ends at once.
