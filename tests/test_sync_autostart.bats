@@ -608,3 +608,19 @@ SH
     [ ! -d "$path.gaveup" ]
   done < "$temps"
 }
+
+@test "actas-claim on a team that was never bound prints no remote note; a disconnected team keeps its note" {
+  bash "$SCRIPTS/join.sh" localonly bob claude-code /tmp/project-b
+  run bash "$SCRIPTS/actas-claim.sh" /tmp/project-b claude-code bob sid-local
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qx 'status=ok team=localonly'
+  refute grep -qiE 'remote|sync start|not syncing' <<<"$output"
+
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" escaped updated
+  escaped="$(sed "s/'/''/g" "$cfg")"
+  updated="$(sqlite_mem "SELECT json_set('$escaped', '\$.remote_binding.disconnected_at', '2026-08-01T00:00:00Z');")"
+  printf '%s\n' "$updated" > "$cfg"
+  run bash "$SCRIPTS/actas-claim.sh" /tmp/project-a claude-code alice sid-disc
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q 'is disconnected'
+}

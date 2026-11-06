@@ -221,6 +221,16 @@ agmsg_sync_autostart() {
       started="$started$team"$'\n'
       continue
     fi
+    # A TEAM THAT WAS NEVER BOUND IS NOT "CONNECTED, BUT NOT SYNCING".
+    #
+    # `cmd_sync_start` refuses a local-only team with "has no active remote
+    # binding". There is nothing to sync and nothing for a person to start, so
+    # the failure block (and its `sync start` line, which an agent would relay
+    # as an instruction) would be wrong. A team that WAS bound and is now
+    # disconnected gets a different refusal and keeps its note.
+    case "$out" in
+      *"has no active remote binding"*) continue ;;
+    esac
     # The team name AND what the command said. A bare "could not start <team>"
     # sends the reader to a log to find a sentence this already had.
     failed="$failed$team	$(printf '%s' "$out" | tr '\n' ' ')"$'\n'
