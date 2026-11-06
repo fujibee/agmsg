@@ -397,6 +397,34 @@ WRAPPER
   [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
 }
 
+@test "warn_if_stopped persists a recovery command that tokenizes and resolves for an install path containing a space (review round 3)" {
+  # down-notice.sh resolves ITS OWN root from where it is sourced from, not
+  # from _AGMSG_DAEMON_ROOT -- in real use daemon-state.sh and down-notice.sh
+  # always live in the same install's scripts/lib, so a full, separately
+  # rooted install (its own scripts/lib copy, sourced from there) is what
+  # actually exercises this, not an _AGMSG_DAEMON_ROOT override alone.
+  local side="$TEST_SKILL_DIR/side install"
+  mkdir -p "$side/run" "$side/scripts/lib"
+  cp "$SCRIPTS/lib/daemon-state.sh" "$SCRIPTS/lib/down-notice.sh" "$SCRIPTS/lib/shquote.sh" "$SCRIPTS/lib/instance-id.sh" "$side/scripts/lib/"
+  sqlite3 "$side/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$side/run/install.db" "UPDATE daemon_intent SET desired='on'; DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  # An owned mock standing in for the real scripts/agmsg wrapper -- never a
+  # real install -- so the persisted recovery command can actually be run
+  # and its tokenization checked, not just inspected as text.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$side" > "$side/scripts/agmsg"
+  chmod +x "$side/scripts/agmsg"
+  run bash -c 'source "$1/scripts/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always' _ "$side"
+  [ "$status" -eq 0 ]
+  [ -f "$side/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(bash -c 'source "$1/scripts/lib/down-notice.sh"; down_notice_list' _ "$side" | awk -F'\t' '{print $5}')"
+  # Quoted (single quotes), not the bare path -- a bare path with a space
+  # is not a valid command to eval at all (the point of this test).
+  [ "$recovery" = "'$side/scripts/agmsg' daemon start" ]
+  eval "$recovery"
+  [ "$(cat "$side/agmsg-argv-log")" = "2:daemon start" ]
+}
+
 @test "self-heal never re-triggers itself (AGMSG_DAEMON_SELF_HEAL guard, no recursion)" {
   # Point daemon.sh at a shim that would record a call if one ever happened,
   # so the guard's effect is checked by its absence, not just the function's

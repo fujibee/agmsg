@@ -871,6 +871,35 @@ EOF
   [ -f "$fake/run/down/agmsgd.json" ]
 }
 
+@test "agmsg_install_restart_daemon: a recovery command for an install path containing a space tokenizes and resolves correctly (review round 3)" {
+  local fns fake="$FAKE_HOME/side install"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',5); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  # An owned mock standing in for the real scripts/agmsg wrapper -- never a
+  # real install -- so the persisted recovery command can actually be run
+  # and its tokenization checked, not just inspected as text.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$fake" > "$fake/scripts/agmsg"
+  chmod +x "$fake/scripts/agmsg"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(( . "$fake/scripts/lib/down-notice.sh" && down_notice_list ) | awk -F'\t' '{print $5}')"
+  # Quoted (single quotes), not the bare path -- a bare path with a space
+  # is not a valid command to eval at all (the point of this test).
+  [ "$recovery" = "'$fake/scripts/agmsg' daemon start" ]
+  eval "$recovery"
+  [ "$(cat "$fake/agmsg-argv-log")" = "2:daemon start" ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.

@@ -10,6 +10,8 @@ _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/down-notice.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shquote.sh"
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
@@ -248,12 +250,16 @@ agmsg_daemon_warn_if_stopped() {
   # Record it (doctor / status / session-start show this) whenever the
   # state is unambiguously "stopped" -- not for "unchecked"/"unverifiable",
   # which are "cannot tell", not "down" (#1821, #1872's own distinction).
-  # A persisted recovery COMMAND, not text for a person to read: the bare
-  # word "agmsg" would run whichever install owns that name on PATH, not
-  # necessarily this one -- a --cmd side install's own agmsg wrapper is
-  # the one that must actually recover it (same reasoning as #1927).
+  # A recovery command naming THIS install's own agmsg wrapper: the bare
+  # word "agmsg" would name whichever install owns that name on PATH, not
+  # necessarily this one -- a --cmd side install's own copy is the one
+  # that must actually recover it (same reasoning as #1927). Quoted with
+  # agmsg_shq (single quotes), NOT %q: down_notice_set's own text
+  # sanitizer turns every backslash into a slash (review round 3), which
+  # corrupts a %q backslash-escaped space rather than preserving it, and
+  # this recorded command is meant to actually be run, not just read.
   [ "$AGMSGD_HEALTH" != stopped ] || down_notice_set agmsgd down "$AGMSGD_REASON" \
-    "$(printf '%q' "$_AGMSG_DAEMON_ROOT/scripts/agmsg") daemon start" || :
+    "$(agmsg_shq "$_AGMSG_DAEMON_ROOT/scripts/agmsg") daemon start" || :
   if [ "${1:-}" = always ]; then
     agmsg_daemon_recovery_text >&2
     return 0

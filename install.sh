@@ -297,10 +297,19 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     # even once this terminal is gone. The recorded command names THIS
     # install's own agmsg wrapper ($skill), not the bare word "agmsg" --
     # a --cmd side install must recover itself, not whichever install
-    # happens to own that name on PATH (same reasoning as #1927).
+    # happens to own that name on PATH (same reasoning as #1927). Quoted
+    # with single quotes (same scheme as lib/shquote.sh, inlined rather
+    # than sourced since this function runs before this script is known
+    # to be the up-to-date tree), NOT %q: down_notice_set's own text
+    # sanitizer turns every backslash into a slash (review round 3),
+    # which corrupts a %q backslash-escaped space rather than preserving
+    # it, and this recorded command is meant to actually be run, not just
+    # read (review round 3's own case executes it).
+    local shq_agmsg
+    shq_agmsg="'$(printf '%s' "$skill/scripts/agmsg" | sed "s/'/'\\\\''/g")'"
     ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_set agmsgd down \
       "agmsgd did not start after the update" \
-      "$(printf '%q' "$skill/scripts/agmsg") daemon start" ) || true
+      "$shq_agmsg daemon start" ) || true
   fi
   rm -f "$skill/run/agmsgd-updating"
 }
