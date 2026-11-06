@@ -290,7 +290,13 @@ EOF
   agmsg_daemon_read_state
   agmsg_daemon_apply_project_choice codex "$PROJECT"
   if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
-    echo 'AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. To use the bridge instead, run: agmsg daemon disable (or choose another delivery for this project).'
+    # The bridge stays off whether or not agmsgd is up (no implicit fallback),
+    # so the line must say which it is: only a ready agmsgd delivers.
+    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
+      echo 'AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. To use the bridge instead, run: agmsg daemon disable (or choose another delivery for this project).'
+    else
+      printf 'AGMSG delivery: agmsgd is on for this project but is not running, so notices are NOT delivered to this session and no Codex bridge is started. %s To use the bridge instead, run: agmsg daemon disable (or choose another delivery for this project).\n' "$(agmsg_daemon_recovery_text)"
+    fi
     exit 0
   fi
 

@@ -4557,6 +4557,16 @@ _codex_direct_bridge_run() {   # <desired|none> [delivery-choice mode]
     sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
     sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='$1';"
   fi
+  if [ -n "${GATE_READY:-}" ]; then
+    local boot
+    case "$(uname -s)" in
+      Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+      Linux) boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n 's/^btime //p' /proc/stat)" ;;
+      *) skip 'POSIX beta executor evidence' ;;
+    esac
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)';
+      UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  fi
   if [ -n "${2:-}" ]; then
     printf 'codex\t%s\t%s\n' "$(cd "$TEST_PROJECT" && pwd -P)" "$2" > "$TEST_SKILL_DIR/run/delivery-choice"
   fi
@@ -4574,12 +4584,21 @@ SH
   for _ in {1..20}; do [ -f "$GATE_LOG" ] && break; sleep 0.1; done
 }
 
-@test "session-start.sh for codex: agmsgd on -> no bridge, one line saying agmsgd delivers" {
-  _codex_direct_bridge_run on
+@test "session-start.sh for codex: agmsgd on and ready -> no bridge, one line saying agmsgd delivers" {
+  GATE_READY=1 _codex_direct_bridge_run on
   sleep 1
   [ ! -f "$GATE_LOG" ]
   [ ! -e "$TEST_SKILL_DIR"/run/codex-bridge.*.thread ]
   [ "$(printf '%s\n' "$GATE_OUT" | grep -c 'agmsgd delivers notices for this session')" -eq 1 ]
+}
+
+@test "session-start.sh for codex: agmsgd on but stopped -> no bridge, and the line says notices are not delivered and how to start it" {
+  _codex_direct_bridge_run on
+  sleep 1
+  [ ! -f "$GATE_LOG" ]
+  refute grep -q 'agmsgd delivers notices for this session' <<<"$GATE_OUT"
+  grep -q 'NOT delivered to this session' <<<"$GATE_OUT"
+  grep -q 'agmsg daemon start' <<<"$GATE_OUT"
 }
 
 @test "session-start.sh for codex: agmsgd off, unknown, or opted out of for the project -> the bridge starts as before" {
