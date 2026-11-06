@@ -242,8 +242,10 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   local rec="$TEST_SKILL_DIR/run/down/watch-install.$pid.json" since_before since_after n
   since_before="$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$rec")"
   [ -n "$since_before" ]
-  _wait_for "[ \"\$(grep -c 'restarting on the new code' '$TEST_SKILL_DIR/run/watch.sid-684d.log')\" -ge 7 ]" || true
-  n="$(grep -c 'restarting on the new code' "$TEST_SKILL_DIR/run/watch.sid-684d.log")"
+  # The log is named after the normalized session id, which carries the agent
+  # pid where one is found (macOS), so match it rather than spell it out.
+  _wait_for "[ \"\$(cat '$TEST_SKILL_DIR'/run/watch.sid-684d*.log 2>/dev/null | grep -c 'restarting on the new code')\" -ge 7 ]" || true
+  n="$(cat "$TEST_SKILL_DIR"/run/watch.sid-684d*.log | grep -c 'restarting on the new code')"
   [ "$n" -ge 7 ]
   kill -0 "$pid"
   grep -q '"state":"degraded"' "$rec"
