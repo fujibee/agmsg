@@ -947,6 +947,7 @@ export default function App() {
     });
   }
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    appLog(`agent-state ${paneId} -> ${state} received at ${Date.now()} ms`);
     noticeFlusherRef.current?.state(paneId, state);
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
