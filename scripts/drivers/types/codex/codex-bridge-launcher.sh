@@ -767,6 +767,7 @@ bridge_notice_reason=""
 bridge_notice_clear=0
 bridge_notice_next_try=0
 bridge_notice_err_logged=0
+bridge_stable_cleared=0
 bridge_notice_flush() {
   local err
   [ -n "$bridge_down_key" ] || return 0
@@ -809,6 +810,7 @@ bridge_note_death() {
   fi
   bridge_quick_deaths=$((bridge_quick_deaths + 1))
   [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || return 0
+  bridge_stable_cleared=0
   delay=$((BRIDGE_BACKOFF_FIRST * (1 << (bridge_quick_deaths - BRIDGE_BACKOFF_AFTER > 6 ? 6 : bridge_quick_deaths - BRIDGE_BACKOFF_AFTER))))
   [ "$delay" -le "$BRIDGE_BACKOFF_MAX" ] || delay="$BRIDGE_BACKOFF_MAX"
   bridge_backoff_until=$((SECONDS + delay))
@@ -832,11 +834,17 @@ bridge_note_death() {
 # launch attempt counts it) and the long wait that follows must not be read as
 # recovery.
 bridge_note_stable() {
-  [ -n "$bridge_launch_at" ] && [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || return 0
+  [ -n "$bridge_launch_at" ] || return 0
   [ "$bridge_death_counted" != "$bridge_launch_at" ] || return 0
   [ $((SECONDS - bridge_launch_at)) -ge "$BRIDGE_STABLE_SECS" ] || return 0
   _agmsg_pid_alive_local "${launched_pid:-}" || return 0
-  bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
+  # Once per stable spell: the first healthy bridge of this launcher also clears
+  # a record an earlier launcher left (the notice is keyed by the seat, not by
+  # this process), so a restart cannot leave a false "down" behind.
+  if [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || [ "$bridge_stable_cleared" = 0 ]; then
+    bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
+  fi
+  bridge_stable_cleared=1
   bridge_quick_deaths=0
   bridge_backoff_until=0
   bridge_last_delay=0

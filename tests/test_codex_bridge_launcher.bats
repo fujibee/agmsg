@@ -329,6 +329,21 @@ run_launcher() {
   wait "$launcher" 2>/dev/null || true
 }
 
+@test "launcher: a healthy bridge of a fresh launcher clears a down notice an earlier launcher left" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  # The record an earlier launcher for this seat wrote.
+  AGMSG_DOWN_NOTICE_ROOT="$TEST_SKILL_DIR" bash -c '. "$1/lib/down-notice.sh"; down_notice_set "$(down_notice_key bridge team.alice)" down "left by an earlier launcher" "x"' _ "$SCRIPTS"
+  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
+  export AGMSG_CODEX_BRIDGE_STABLE_SECS=2 MOCK_BRIDGE_SLEEP=25
+  sleep 30 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..100}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 || break; sleep 0.2; done
+  refute ls "$RUN_DIR"/down/bridge.*
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
 @test "launcher: a down notice that cannot be written is tried again and the error is logged once" {
   put_record team alice rec-thread-1 "$PROJ" codex
   export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=1 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=1 AGMSG_CODEX_BRIDGE_NOTICE_RETRY_SECS=1
