@@ -4546,3 +4546,52 @@ EOF
   [ -f "$rule" ]
   [ "$(cat "$rule")" = "$before" ]
 }
+
+# The direct (hook-started) bridge steps aside while agmsgd delivers Codex
+# notices; every other state keeps it.
+_codex_direct_bridge_run() {   # <desired|none> [delivery-choice mode]
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-gate "$TEST_PROJECT" codex
+  mkdir -p "$TEST_SKILL_DIR/run"
+  if [ "$1" != none ]; then
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='$1';"
+  fi
+  if [ -n "${2:-}" ]; then
+    printf 'codex\t%s\t%s\n' "$(cd "$TEST_PROJECT" && pwd -P)" "$2" > "$TEST_SKILL_DIR/run/delivery-choice"
+  fi
+  GATE_FAKE="$TEST_SKILL_DIR/fake-codex-bridge"
+  GATE_LOG="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  cat >"$GATE_FAKE" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
+SH
+  chmod +x "$GATE_FAKE"
+  GATE_OUT="$(AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.gate.sock" \
+    AGMSG_CODEX_BRIDGE_CMD="$GATE_FAKE" AGMSG_TEST_LOG="$GATE_LOG" CODEX_THREAD_ID=thread-gate \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" 2>&1 </dev/null)"
+  local _
+  for _ in {1..20}; do [ -f "$GATE_LOG" ] && break; sleep 0.1; done
+}
+
+@test "session-start.sh for codex: agmsgd on -> no bridge, one line saying agmsgd delivers" {
+  _codex_direct_bridge_run on
+  sleep 1
+  [ ! -f "$GATE_LOG" ]
+  [ ! -e "$TEST_SKILL_DIR"/run/codex-bridge.*.thread ]
+  [ "$(printf '%s\n' "$GATE_OUT" | grep -c 'agmsgd delivers notices for this session')" -eq 1 ]
+}
+
+@test "session-start.sh for codex: agmsgd off, unknown, or opted out of for the project -> the bridge starts as before" {
+  _codex_direct_bridge_run off
+  [ -f "$GATE_LOG" ]
+  grep -q -- "--thread thread-gate" "$GATE_LOG"
+  refute grep -q 'agmsgd delivers notices' <<<"$GATE_OUT"
+  rm -f "$GATE_LOG"
+  _codex_direct_bridge_run none
+  [ -f "$GATE_LOG" ]
+  rm -f "$GATE_LOG"
+  _codex_direct_bridge_run on turn
+  [ -f "$GATE_LOG" ]
+  refute grep -q 'agmsgd delivers notices' <<<"$GATE_OUT"
+}

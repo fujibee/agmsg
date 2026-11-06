@@ -276,6 +276,24 @@ EOF
     exit 0
   fi
 
+  # The direct path below starts a bridge from this hook. With agmsgd turned on
+  # for this project, agmsgd delivers Codex notices (codex-shim.sh and
+  # codex-monitor.sh already start plain Codex for the same reason), so a bridge
+  # here would deliver the same notice a second time. Step aside and say so.
+  # Turning agmsgd off, or the project choosing another delivery, restores the
+  # bridge at the next session start; an unknown state changes nothing. The
+  # launcher branch above only writes a request file and is not touched.
+  if ! declare -F agmsg_daemon_read_state >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/daemon-state.sh"
+  fi
+  agmsg_daemon_read_state
+  agmsg_daemon_apply_project_choice codex "$PROJECT"
+  if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
+    echo 'AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. To use the bridge instead, run: agmsg daemon disable (or choose another delivery for this project).'
+    exit 0
+  fi
+
   [ -n "$app_server" ] || exit 0
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
