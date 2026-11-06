@@ -13,6 +13,11 @@ import {createHash} from 'node:crypto';
 // still work everywhere.
 //
 export class PlatformUnsupported extends Error {}
+// The violation record's lock stayed taken for the whole wait (~3 s). That is a
+// busy lock, not a bad record: callers that stay resident retry it, while the
+// guard command keeps refusing (exit 13) as before.
+export class GuardBusy extends Error {code='GUARD_BUSY';}
+const LOCK_BUSY=75;
 function _requirePosix(what) {
   if (process.platform !== 'linux' && process.platform !== 'darwin') {
     throw new PlatformUnsupported(`Antigravity ${what} requires POSIX process and lock primitives; this host (${process.platform}) is unsupported`);
@@ -44,13 +49,14 @@ function _darwinLocked(file, data, append) {
     '        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); break',
     '    except BlockingIOError:',
     '        time.sleep(0.1)',
-    'else: raise SystemExit(1)',
+    `else: raise SystemExit(${LOCK_BUSY})`,
     'if sys.argv[3] == "read":',
     '    sys.stdout.write(open(sys.argv[2]).read())',
     'else:',
     '    with open(sys.argv[2], "a") as target: target.write(sys.stdin.read())',
   ].join('\n');
   const out=spawnSync('python3',['-c',script,`${file}.lock`,file,append?'append':'read'],{encoding:'utf8',input:data||''});
+  if(out.status===LOCK_BUSY) throw new GuardBusy('the violation record is locked by another process');
   if(out.status!==0) throw Error('failed to read or lock the violation record');
   return out.stdout;
 }
@@ -67,7 +73,8 @@ export function violations(file) {
   _requirePosix('violation inspection');
   const out=process.platform==='darwin'
     ? {status:0,stdout:_darwinLocked(file,'',false)}
-    : spawnSync('flock',['-w','3',`${file}.lock`,'cat',file],{encoding:'utf8'});
+    : spawnSync('flock',['-w','3','-E',String(LOCK_BUSY),`${file}.lock`,'cat',file],{encoding:'utf8'});
+  if(out.status===LOCK_BUSY) throw new GuardBusy('the violation record is locked by another process');
   if(out.status!==0) throw Error('failed to read or lock the violation record');
   const rows=out.stdout.trim()?out.stdout.trim().split('\n').map(JSON.parse):[];
   for(const r of rows) if(r.event!=='read-denied'||!Number.isInteger(r.pid)) throw Error('corrupt violation record');

@@ -12,7 +12,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // so 15 seconds can misjudge a normal NEEDS_ATTENTION arrival as a timeout.
 // Raise the limit to 60 seconds.
 async function waitFor(fn){for(let i=0;i<600;i++){if(fn())return;await delay(100);}throw Error('wait timeout');}
-function fixture(driver='sqlite',mode='success',extra={}) {
+function fixture(driver='sqlite',mode='success',extra={},bridgeArgs=[],prepare=null) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'agmsg-agy-test-'));
   const install=path.join(dir,'install'),project=path.join(dir,'project');
   fs.mkdirSync(install);fs.mkdirSync(project);
@@ -24,7 +24,8 @@ function fixture(driver='sqlite',mode='success',extra={}) {
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
   sh('delivery.sh',['set','monitor','antigravity',project]);
-  let output='';const child=spawn('bash',[path.join(install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',project,'--team','fixture','--name','worker','--agy',fake,'--poll','100'],{env,stdio:['pipe','pipe','pipe'],detached:true});
+  if(prepare)prepare({dir,install,project,env});
+  let output='';const child=spawn('bash',[path.join(install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',project,'--team','fixture','--name','worker','--agy',fake,'--poll','100',...bridgeArgs],{env,stdio:['pipe','pipe','pipe'],detached:true});
   const children=[child];
   child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
   const unread=()=>sh('drivers/types/antigravity/inbox-transport.sh',['peek',project,'fixture','worker',state().owner]).trim();
@@ -225,4 +226,95 @@ for(const mode of ['attack','append-failure','crash','broken'])test(`abnormal ${
     assert.equal(unread.length,mode==='attack'||mode==='append-failure'?2:1);
     assert.equal(f.state().batch.messages.length,1);
   }catch(e){e.message+='\n'+f.output();throw e;}finally{await f.close();}
+});
+
+// --- T15: a time or restart budget no longer ends delivery (class C) ---
+const notices=f=>{const dir=path.join(f.install,'run','down');return fs.existsSync(dir)?fs.readdirSync(dir).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(path.join(dir,n),'utf8'))):[];};
+const quick=['--init-ms','600','--grace-ms','200','--restart-delays','30,30'];
+
+test('a child that never answers its first init is replaced, and delivery goes on',async()=>{
+  const counter=path.join(os.tmpdir(),`agmsg-agy-count-${process.pid}-${Date.now()}`);
+  const f=fixture('sqlite','hang-at-start',{FAKE_AGY_COUNTER:counter,FAKE_AGY_BAD_LAUNCHES:'1'},quick);
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    assert.match(f.output(),/replacing the child: init time exceeded/);
+    assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
+    f.sh('send.sh',['fixture','sender','worker','after the replacement']);
+    await waitFor(()=>f.output().includes('turn 2')&&f.state().batch===null);
+    assert.equal(f.unread(),'');
+    assert.equal(notices(f).length,0);
+  }catch(e){e.message+='\n'+f.output();throw e;}finally{fs.rmSync(counter,{force:true});await f.close();}
+});
+
+test('more than three early child exits no longer end the bridge; the record goes when it is ready',async()=>{
+  const counter=path.join(os.tmpdir(),`agmsg-agy-count-${process.pid}-${Date.now()}`);
+  const f=fixture('sqlite','exit-at-start',{FAKE_AGY_COUNTER:counter,FAKE_AGY_BAD_LAUNCHES:'5'},['--restart-delays','20','--down-after-ms','0']);
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    assert.equal((f.output().match(/replacing the child/g)||[]).length,5);
+    assert.doesNotMatch(f.output(),/restart budget exceeded|NEEDS_ATTENTION/);
+    await waitFor(()=>notices(f).length===0);
+    f.sh('send.sh',['fixture','sender','worker','after five exits']);
+    await waitFor(()=>f.state().batch===null&&f.output().includes('turn 2'));
+  }catch(e){e.message+='\n'+f.output();throw e;}finally{fs.rmSync(counter,{force:true});await f.close();}
+});
+
+test('a turn that runs out of time keeps the uncertain batch and leaves a down record with the way back',async()=>{
+  const f=fixture('sqlite','hang-turn',{}, ['--turn-ms','600','--grace-ms','200']);
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    f.sh('send.sh',['fixture','sender','worker','slow one']);
+    await waitFor(()=>f.output().includes('NEEDS_ATTENTION'));
+    assert.match(f.output(),/turn time exceeded/);
+    assert.equal(f.state().batch.phase,'uncertain');
+    assert.equal(f.unread().split('\n').length,1,'not acknowledged');
+    await waitFor(()=>notices(f).length===1);
+    const [n]=notices(f);
+    assert.equal(n.state,'down');
+    assert.match(n.reason,/turn time exceeded/);
+    assert.match(n.reason,/kept unread/);
+    assert.match(n.recovery,/antigravity-monitor\.sh --project .* --command status/);
+    const status=spawnSync('bash',[path.join(f.install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',f.project,'--team','fixture','--name','worker','--command','status'],{env:f.env,encoding:'utf8'});
+    assert.match(JSON.parse(status.stdout).down_notice,/^down since /);
+  }catch(e){e.message+='\n'+f.output();throw e;}finally{await f.close();}
+});
+
+test('a busy violation lock delays delivery instead of ending the bridge',async()=>{
+  const f=fixture('sqlite','success',{},['--down-after-ms','0']);
+  let holder;
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    const lock=path.join(f.install,'run',fs.readdirSync(path.join(f.install,'run')).find(n=>n.endsWith('.violations.lock')));
+    holder=spawn('python3',['-c','import fcntl,sys,time\nl=open(sys.argv[1],"a+")\nfcntl.flock(l,fcntl.LOCK_EX)\nprint("held",flush=True)\ntime.sleep(float(sys.argv[2]))',lock,'5'],{stdio:['ignore','pipe','inherit']});
+    await once(holder.stdout,'data');
+    f.sh('send.sh',['fixture','sender','worker','through a busy lock']);
+    await waitFor(()=>notices(f).length===1);
+    assert.match(notices(f)[0].reason,/locked by another process/);
+    await once(holder,'close');
+    await waitFor(()=>f.output().includes('turn 2')&&f.state().batch===null);
+    assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
+    assert.equal(f.unread(),'');
+    await waitFor(()=>notices(f).length===0);
+  }catch(e){e.message+='\n'+f.output();throw e;}finally{try{holder?.kill();}catch{}await f.close();}
+});
+
+test('a stale down record whose first clear fails is cleared once the helper works again',async()=>{
+  let downDir;
+  const f=fixture('sqlite','success',{},['--notice-retry-ms','200'],({install,env})=>{
+    const lib=path.join(install,'scripts/lib/down-notice.sh');
+    const r=spawnSync('bash',['-c','source "$1"; down_notice_set "$(down_notice_key antigravity.bridge fixture/worker)" down "left by an earlier bridge" "restart it"',' x',lib],{env,encoding:'utf8'});
+    assert.equal(r.status,0,r.stderr);
+    downDir=path.join(install,'run','down');
+    fs.chmodSync(downDir,0o500);
+  });
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    await delay(600);
+    assert.equal(notices(f).length,1);
+    assert.match(f.output(),/down notice clear failed/);
+    fs.chmodSync(downDir,0o700);
+    await waitFor(()=>notices(f).length===0);
+    f.sh('send.sh',['fixture','sender','worker','after the repair']);
+    await waitFor(()=>f.state().batch===null&&f.output().includes('turn 2'));
+  }catch(e){e.message+='\n'+f.output();throw e;}finally{try{fs.chmodSync(downDir,0o700);}catch{}await f.close();}
 });
