@@ -152,6 +152,9 @@ if [ -r "$SCRIPT_DIR/lib/down-notice.sh" ]; then
   _agmsg_seat_key="$(down_notice_key agmsgd.seat "$TEAM/$TO")"
   while IFS=$'\t' read -r _dn_component _dn_state _dn_since _dn_reason _dn_recovery; do
     [ "$_dn_component" = "$_agmsg_seat_key" ] || continue
+    # The record's reason already says "messages are stored but not delivered"
+    # for doctor and session start; this line says it once, in its own words.
+    _dn_reason="${_dn_reason%; messages are stored but not delivered}"
     echo "Note: $TO is not reachable by agmsgd since $_dn_since, so this message is stored but not delivered yet ($_dn_reason)."
   done < <(down_notice_list)
 fi

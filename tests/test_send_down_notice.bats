@@ -37,3 +37,13 @@ teardown() { teardown_test_env; }
   run bash "$SCRIPTS/send.sh" team alice bob "hi"
   [ "$output" = "Sent to bob in team team" ]
 }
+
+@test "the daemon's own reason text is not repeated in the note" {
+  down_notice_set "$(down_notice_key agmsgd.seat team/bob)" down "agmsgd cannot reach bob@team (sessions_file_socket_missing); messages are stored but not delivered" "run /agmsg actas bob in that session"
+  run bash "$SCRIPTS/send.sh" team alice bob "hi"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "stored but not delivered yet (agmsgd cannot reach bob@team (sessions_file_socket_missing))."
+  [ "$(printf '%s\n' "$output" | grep -o 'stored but not delivered' | wc -l | tr -d ' ')" = 1 ]
+  # The record itself keeps the full text for doctor and session start.
+  down_notice_list | grep -qF "; messages are stored but not delivered"
+}
