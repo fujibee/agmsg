@@ -23,9 +23,11 @@ cancels_in() { # refusals the app logged between a step's attempt and done marke
 win_guard_present() { grep -q '^\[addons\] frame nav [0-9]* start ' "$L"; }
 app_navs_ids() { sed -n 's/^\[addons\] frame nav \([0-9]*\) start target=app allowed=\(.*\)$/\1 \2/p' "$L"; }
 nav_done_of() { sed -n "s/^\[addons\] frame nav $1 done success=\([a-z]*\) status=\(.*\)\$/\1 \2/p" "$L" | head -1; }   # "<success> <status>" or nothing
-# ids of the frame navigations to the app origin that started inside one nav case (from its NAV_case_start to the next pane's START)
+# ids of the frame navigations to the app origin that started inside one nav case: from its NAV_case_start to the START
+# of ANOTHER pane. The case's own START is reported by a separate call and can land on either side of the case start
+# (a Windows run logged it after NAV_case_start and before the guard's record), so it does not end the window.
 case_app_ids() {
-  awk -v c="\"k\":\"NAV_case_start\",\"v\":\"$1\"}" 'index($0,c){f=1;next} f && /"k":"START"/{f=0} f && /^\[addons\] frame nav [0-9]+ start target=app /{print $4}' "$L"
+  awk -v c="\"k\":\"NAV_case_start\",\"v\":\"$1\"}" -v own="\"k\":\"START\",\"v\":\"$1 " 'index($0,c){f=1;next} f && /"k":"START"/ && !index($0,own){f=0} f && /^\[addons\] frame nav [0-9]+ start target=app /{print $4}' "$L"
 }
 # any completion with success=true for this navigation id (all records of the id are looked at, not the first)
 nav_committed() { grep -q "^\[addons\] frame nav $1 done success=true " "$L"; }

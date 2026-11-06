@@ -11,8 +11,8 @@ use super::panes::Declared;
 pub const MAX_CONF_BYTES: usize = 64 * 1024;
 pub const MAX_CONF_LINES: usize = 1000;
 
-pub const PERMISSIONS: [&str; 4] = ["messages:read", "files:read", "git:read", "network"];
-const KEYS: [&str; 7] = ["title", "entry", "min_app", "protocol", "permissions", "network", "opens"];
+pub const PERMISSIONS: [&str; 7] = ["messages:read", "files:read", "git:read", "network", "team:join", "messages:send", "agents:spawn"];
+const KEYS: [&str; 8] = ["title", "entry", "min_app", "protocol", "permissions", "network", "opens", "member"];
 const OPENS: [&str; 2] = ["path", "url"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,8 @@ pub struct AddonConf {
     /// The raw `network` value (`*` or a list of origins), when declared.
     pub network: Option<String>,
     pub opens: Vec<String>,
+    /// The name the add-on asks for as a team member (`member`), when declared.
+    pub member: Option<String>,
     /// `why.<permission>` lines, shown next to each permission.
     pub why: BTreeMap<String, String>,
 }
@@ -132,6 +134,18 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
     if has("git:read") && !has("files:read") {
         errors.push(format!("{}: git:read needs files:read too.", at("permissions")));
     }
+    for p in ["messages:send", "agents:spawn"] {
+        if has(p) && !has("team:join") {
+            errors.push(format!("{}: {p} needs team:join too.", at("permissions")));
+        }
+    }
+    if let Some(m) = val("member") {
+        if !has("team:join") {
+            errors.push(format!("{}: \"member\" is set but the team:join permission is not declared.", at("member")));
+        } else if let Err(why) = super::agents::validate_name(m) {
+            errors.push(format!("{}: member {why}.", at("member")));
+        }
+    }
     if has("network") {
         match val("network") {
             None | Some("") => errors.push(format!("{}: network is declared but \"network = *\" or a list of origins is missing.", at("permissions"))),
@@ -190,6 +204,7 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
             permissions: perms.clone(),
             network: val("network").map(str::to_string),
             opens,
+            member: val("member").map(str::to_string),
             why,
         })
     } else {
@@ -245,7 +260,7 @@ impl AddonConf {
         } else {
             None
         };
-        Declared { messages_read: has("messages:read"), files_read: has("files:read"), git_read: has("git:read"), network }
+        Declared { messages_read: has("messages:read"), files_read: has("files:read"), git_read: has("git:read"), team_join: has("team:join"), messages_send: has("messages:send"), agents_spawn: has("agents:spawn"), member: self.member.clone(), network }
     }
 }
 
@@ -363,5 +378,20 @@ mod tests {
     fn declared_matches_every_permission() {
         let d = ok("title=T\nprotocol=1\npermissions=messages:read,files:read,git:read\n").declared();
         assert!(d.messages_read && d.files_read && d.git_read);
+    }
+
+    #[test]
+    fn team_powers_need_team_join_and_a_valid_member_name() {
+        let base = "title = T\nprotocol = 1\n";
+        let r = parse(&format!("{base}permissions = messages:send\n"), "c");
+        assert!(r.errors.iter().any(|e| e.contains("messages:send needs team:join")), "{:?}", r.errors);
+        let r = parse(&format!("{base}permissions = team:join, agents:spawn\nmember = bad.name\n"), "c");
+        assert!(r.errors.iter().any(|e| e.contains("member must not contain")), "{:?}", r.errors);
+        let r = parse(&format!("{base}permissions = messages:read\nmember = x\n"), "c");
+        assert!(r.errors.iter().any(|e| e.contains("team:join permission is not declared")), "{:?}", r.errors);
+        let c = ok(&format!("{base}permissions = messages:read, team:join, messages:send, agents:spawn\nmember = referee\n"));
+        let d = c.declared();
+        assert!(d.team_join && d.messages_send && d.agents_spawn && !d.files_read);
+        assert_eq!(d.member.as_deref(), Some("referee"));
     }
 }

@@ -188,22 +188,27 @@ impl GuardStatus {
 /// A frame is about to navigate: cancel unless the rule says allow. An address
 /// that could not be read or parsed is cancelled (and a failed read is recorded).
 pub fn frame_navigation_allowed(rule: &FrameNav, policy: &NavPolicy, uri: Result<String, String>, status: &GuardStatus) -> bool {
+    frame_navigation_verdict(rule, policy, uri, status).0
+}
+
+/// `frame_navigation_allowed`, with the reason when it refuses: a fixed phrase, never an address.
+pub fn frame_navigation_verdict(rule: &FrameNav, policy: &NavPolicy, uri: Result<String, String>, status: &GuardStatus) -> (bool, &'static str) {
     let uri = match uri {
         Ok(u) => u,
         Err(e) => {
             status.fail(&format!("could not read a frame's navigation target: {e}"));
-            return false;
+            return (false, "the target could not be read");
         }
     };
     match Url::parse(&uri) {
-        Ok(url) => {
-            let allow = rule.decide(policy, &url).is_allow();
-            if !allow {
+        Ok(url) => match rule.decide(policy, &url) {
+            Decision::Allow => (true, ""),
+            Decision::Deny(why) => {
                 status.note_cancelled(url.as_str());
+                (false, why)
             }
-            allow
-        }
-        Err(_) => false,
+        },
+        Err(_) => (false, "the target is not an address"),
     }
 }
 

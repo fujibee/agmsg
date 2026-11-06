@@ -3,6 +3,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   actasSpawnArgs,
+  kickoffText,
+  appendIfNew,
+  firstSight,
+  mergeById,
+  routeMessage,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -36,6 +41,99 @@ describe("actasSpawnArgs", () => {
 
   it("copilot: no cmd_prefix (defaults to '/') with prompt_arg '--interactive'", () => {
     expect(actasSpawnArgs("agmsg", "X", null, "--interactive")).toEqual(["--interactive", "/agmsg actas X"]);
+  });
+});
+
+describe("appendIfNew", () => {
+  const m = (id: string) => ({ id, body: id });
+  it("history before watch: the same message from the watcher is not added twice", () => {
+    expect(appendIfNew([m("late-first")], m("late-first")).map((x) => x.id)).toEqual(["late-first"]);
+  });
+  it("watch before history: a second delivery of a message already in the feed adds nothing", () => {
+    const afterWatch = appendIfNew([], m("a"));
+    expect(appendIfNew(afterWatch, m("a"))).toHaveLength(1);
+  });
+  it("a store found again re-emits its rows: still once each", () => {
+    let feed = appendIfNew(appendIfNew([], m("a")), m("b"));
+    feed = appendIfNew(appendIfNew(feed, m("a")), m("b"));
+    expect(feed.map((x) => x.id)).toEqual(["a", "b"]);
+  });
+  it("a new id is appended in order", () => {
+    expect(appendIfNew([m("a")], m("b")).map((x) => x.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("mergeById and firstSight", () => {
+  const m = (id: string) => ({ id });
+  it("history then live that arrived during the load: each id once, live extras kept after", () => {
+    expect(mergeById([m("a"), m("b")], [m("b"), m("c")]).map((x) => x.id)).toEqual(["a", "b", "c"]);
+  });
+  it("a message re-emitted by a rediscovered store is typed into a pane once", () => {
+    const seen = new Map<string, Set<string>>();
+    expect(firstSight(seen, "p1", "m1")).toBe(true);
+    expect(firstSight(seen, "p1", "m1")).toBe(false);
+    expect(firstSight(seen, "p2", "m1")).toBe(true);
+  });
+  it("the per-pane record is bounded", () => {
+    const seen = new Map<string, Set<string>>();
+    for (let i = 0; i < 20; i++) firstSight(seen, "p1", `m${i}`, 10);
+    expect(seen.get("p1")!.size).toBe(10);
+  });
+});
+
+describe("routeMessage", () => {
+  const leaf = (id: string) => ({ kind: "leaf", paneId: id }) as never;
+  const windows = [
+    { team: "A", root: leaf("a-white") },
+    { team: "B", root: leaf("b-white") },
+    { team: "B", root: leaf("b-black") },
+  ];
+  const panes = [
+    { id: "a-white", label: "white", native: false },
+    { id: "b-white", label: "white", native: false },
+    { id: "b-black", label: "black", native: true },
+  ];
+
+  it("selected A, message for B: feeds B's pane only, and the room feed of A is unchanged", () => {
+    const r = routeMessage("A", { team: "B", to: "white" }, windows, panes);
+    expect(r.feed).toBe(false);
+    expect(r.pane?.id).toBe("b-white");
+  });
+
+  it("never reaches a same-named pane of another team", () => {
+    expect(routeMessage("A", { team: "B", to: "white" }, windows, panes).pane?.id).not.toBe("a-white");
+    expect(routeMessage("B", { team: "A", to: "white" }, windows, panes).pane?.id).toBe("a-white");
+  });
+
+  it("a native pane is not fed", () => {
+    expect(routeMessage("B", { team: "B", to: "black" }, windows, panes).pane).toBeUndefined();
+  });
+
+  it("the selected team's message updates the room feed and feeds its pane", () => {
+    const r = routeMessage("B", { team: "B", to: "white" }, windows, panes);
+    expect(r.feed).toBe(true);
+    expect(r.pane?.id).toBe("b-white");
+  });
+
+  it("a message for nobody with a pane feeds nothing", () => {
+    expect(routeMessage("B", { team: "B", to: "ghost" }, windows, panes).pane).toBeUndefined();
+  });
+
+  it("every miss says why, so none is silent", () => {
+    expect(routeMessage("B", { team: "B", to: "ghost" }, windows, panes).why).toContain("no open pane is named ghost");
+    expect(routeMessage("B", { team: "B", to: "black" }, windows, panes).why).toContain("native");
+    expect(routeMessage("B", { team: "C", to: "white" }, windows, panes).why).toContain("not in a window of team C");
+    expect(routeMessage("B", { team: "B", to: "white" }, windows, panes).why).toBeUndefined();
+  });
+});
+
+describe("kickoffText", () => {
+  it("names this install's scripts, the team, the agent and the sender; one line", () => {
+    const k = kickoffText("chesstest", "chess-try", "black", "chess", "Reply with one move");
+    expect(k).toContain("bash ~/.agents/skills/chesstest/scripts/inbox.sh chess-try black");
+    expect(k).toContain('bash ~/.agents/skills/chesstest/scripts/send.sh chess-try black chess "<your reply>"');
+    expect(k).toContain("not delivered");
+    expect(k).not.toContain("\n");
   });
 });
 

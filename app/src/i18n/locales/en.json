@@ -49,6 +49,8 @@
       "none": "none"
     },
     "member": {
+      "held": "starting, {{count}} waiting",
+      "heldTitle": "Notices are held until the agent has finished starting up (at most 10 minutes)",
       "checkboxTitle": "show in team room",
       "titleRunning": "already running — click to focus",
       "titleSpawn": "spawn in a PTY pane",
@@ -172,6 +174,8 @@
     "renameTeam": "Renamed team '{{from}}' to '{{to}}'.",
     "deleteTeam": "Deleted team '{{team}}'.",
     "deleteTeamForce": "Deleted team '{{team}}' (removed {{count}} member(s)).",
+    "noticeInjectFailed": "Could not type a message notice into an agent's terminal ({{reason}}). It is kept and will be tried again.",
+    "noticeWithoutReadySignal": "Delivered {{count}} message notice(s) to an agent that gave no ready signal.",
     "purgeMessages": "Deleted messages for team '{{team}}'.",
     "actionFailed": "Failed: {{reason}}"
   },

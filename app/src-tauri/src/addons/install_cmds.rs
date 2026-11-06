@@ -284,7 +284,7 @@ pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Fa
     }
     let gone = || Failure { code: "pane_gone", message: "That pane is closed, so its permission was not saved.".into() };
     let v = host.panes.registry.lock().unwrap().consent_view(spec.pane_id).ok_or_else(gone)?;
-    let (addon, pane, commit, team, root) = (v.addon, v.pane, v.commit, v.team, v.root);
+    let (addon, pane, commit, team, root, powers) = (v.addon, v.pane, v.commit, v.team, v.root, v.powers);
     if addon != spec.id || pane != spec.pane {
         return Err(Failure { code: "pane_gone", message: "That pane is not this add-on's pane.".into() });
     }
@@ -303,6 +303,9 @@ pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Fa
     let held = match spec.permission.as_str() {
         "files:read" => root.as_deref() == Some(spec.scope.as_str()),
         "messages:read" => team.as_deref() == Some(spec.scope.as_str()),
+        "team:join" => powers.join && team.as_deref() == Some(spec.scope.as_str()),
+        "messages:send" => powers.send && team.as_deref() == Some(spec.scope.as_str()),
+        "agents:spawn" => powers.spawn && team.as_deref() == Some(spec.scope.as_str()),
         _ => false,
     };
     if !held {
@@ -360,9 +363,13 @@ mod tests {
     const SHA2: &str = "2222222222222222222222222222222222222222";
 
     fn install(addons: &std::path::Path, sha: &str) {
+        install_with(addons, sha, "files:read, messages:read", "why.files:read = r\nwhy.messages:read = m\n");
+    }
+
+    fn install_with(addons: &std::path::Path, sha: &str, perms: &str, why: &str) {
         let tar = tarball(&[
             json!({"path": "agmsg-plugin.conf", "type": "file", "text": "name = x\n"}),
-            json!({"path": "app-panes/main/addon.conf", "type": "file", "text": "title = M\nprotocol = 1\npermissions = files:read, messages:read\nwhy.files:read = r\nwhy.messages:read = m\n"}),
+            json!({"path": "app-panes/main/addon.conf", "type": "file", "text": format!("title = M\nprotocol = 1\npermissions = {perms}\n{why}")}),
             json!({"path": "app-panes/main/web/index.html", "type": "file", "text": "<div></div>"}),
         ]);
         let s = stage::stage(addons, "o/r", sha, &tar[..], "0.5.0", Limits::default()).unwrap();
@@ -494,6 +501,49 @@ mod tests {
         let now = current_saved_grants(&h, "o/r", "main");
         assert_eq!(now.iter().map(|g| g.scope.as_str()).collect::<Vec<_>>(), vec!["/old"], "only rows given to the installed commit");
         assert!(current_saved_grants(&h, "x/unknown", "main").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn team_powers_survive_save_read_and_revoke_through_the_real_store() {
+        let d = tempfile::tempdir().unwrap();
+        install_with(d.path(), SHA1, "team:join, messages:send, agents:spawn", "why.team:join = j\nwhy.messages:send = s\nwhy.agents:spawn = a\n");
+        let h = host_with(d.path());
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"x".to_vec());
+        let declared = Declared { team_join: true, messages_send: true, agents_spawn: true, ..Default::default() };
+        let open = |h: &AddonHost| {
+            let mut reg = h.panes.registry.lock().unwrap();
+            let id = reg
+                .add(AddPane { addon: "o/r".into(), commit: SHA1.into(), name: "main".into(), payload: Payload::Embedded(files.clone()), entry: "index.html".into(), declared: declared.clone(), open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
+                .unwrap()
+                .id;
+            reg.begin_generation(id);
+            reg.grant_team(id, "team-a").unwrap();
+            id
+        };
+        let p = open(&h);
+        for perm in ["team:join", "messages:send", "agents:spawn"] {
+            // not allowed in this pane yet: nothing to remember
+            assert_eq!(save_serialized(&h, &save("o/r", p, SHA1, perm, "team-a")).unwrap_err().code, "not_granted");
+            h.panes.registry.lock().unwrap().set_power(p, crate::addons::panes::Power::parse(perm).unwrap(), true).unwrap();
+            save_serialized(&h, &save("o/r", p, SHA1, perm, "team-a")).unwrap();
+        }
+        // a wrong team is never stored
+        assert_eq!(save_serialized(&h, &save("o/r", p, SHA1, "agents:spawn", "team-b")).unwrap_err().code, "not_granted");
+        // read back, as a re-open would: all three are there, so the user is not asked again
+        let mut got: Vec<String> = current_saved_grants(&h, "o/r", "main").into_iter().map(|g| g.permission).collect();
+        got.sort();
+        assert_eq!(got, vec!["agents:spawn", "messages:send", "team:join"]);
+        // revoke one: the live pane loses that power at once, the saved row is gone
+        let closed = h.panes.revoke_matching(&h.nav, "o/r", "main", "messages:send", "team-a");
+        assert!(closed.is_empty(), "the pane keeps running");
+        assert!(grants::revoke(d.path(), "o/r", "main", "messages:send", "team-a").unwrap());
+        let mut left: Vec<String> = current_saved_grants(&h, "o/r", "main").into_iter().map(|g| g.permission).collect();
+        left.sort();
+        assert_eq!(left, vec!["agents:spawn", "team:join"]);
+        let again = save_serialized(&h, &save("o/r", p, SHA1, "messages:send", "team-a"));
+        assert_eq!(again.unwrap_err().code, "not_granted", "a revoked power is not held, so it cannot be saved again");
     }
 
     #[test]

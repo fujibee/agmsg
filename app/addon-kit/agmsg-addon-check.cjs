@@ -15,8 +15,8 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const LIMITS = { totalBytes: 200 * 1024 * 1024, files: 5000, fileBytes: 50 * 1024 * 1024 };
-const PERMISSIONS = new Set(['messages:read', 'files:read', 'git:read', 'network']);
-const KEYS = new Set(['title', 'entry', 'min_app', 'protocol', 'permissions', 'network', 'opens']);
+const PERMISSIONS = new Set(['messages:read', 'files:read', 'git:read', 'network', 'team:join', 'messages:send', 'agents:spawn']);
+const KEYS = new Set(['title', 'entry', 'min_app', 'protocol', 'permissions', 'network', 'opens', 'member']);
 const OPENS = new Set(['path', 'url']);
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
@@ -57,6 +57,15 @@ function list(v) {
   return v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
 }
 
+// The rules of agmsg_validate_agent_name (scripts/lib/validate.sh), the same ones the app applies.
+function memberNameProblem(name) {
+  if (!name) return 'must not be empty';
+  if (name === '.' || name === '..') return 'must not be "." or ".."';
+  if (name.startsWith('-')) return 'must not start with "-"';
+  if (/[./\\"\[\]\u0000-\u001f\u007f]/.test(name)) return 'must not contain . / \\ " [ ] or control characters';
+  return null;
+}
+
 function checkConf(confPath, rel) {
   const out = { errors: [], warnings: [], conf: null };
   const { values, errors } = parseConf(fs.readFileSync(confPath, 'utf8'));
@@ -78,6 +87,17 @@ function checkConf(confPath, rel) {
   }
   if (perms.includes('git:read') && !perms.includes('files:read')) {
     out.errors.push(at('permissions') + ': git:read needs files:read too.');
+  }
+  for (const p of ['messages:send', 'agents:spawn']) {
+    if (perms.includes(p) && !perms.includes('team:join')) out.errors.push(at('permissions') + ': ' + p + ' needs team:join too.');
+  }
+  if (values.member) {
+    if (!perms.includes('team:join')) {
+      out.errors.push(at('member') + ': "member" is set but the team:join permission is not declared.');
+    } else {
+      const why = memberNameProblem(values.member.value);
+      if (why) out.errors.push(at('member') + ': member ' + why + '.');
+    }
   }
   if (perms.includes('network')) {
     if (!values.network || !values.network.value) {

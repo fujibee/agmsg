@@ -28,7 +28,7 @@ tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # Terminal-embedded core: own agent PTYs (spawn + read + write + inject) and
 # read the agmsg SQLite DB directly for the view-only team room.
 portable-pty = "0.8"
@@ -67,4 +67,4 @@ objc2 = "0.6"
 # Frame navigation guard for WebView2 (nav_win.rs); same versions tauri/wry resolve to.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

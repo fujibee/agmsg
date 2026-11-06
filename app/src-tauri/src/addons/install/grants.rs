@@ -1,6 +1,7 @@
 //! `<base>/addons/grants.tsv`: the grants a user chose to remember (design 2, 3.1).
 //! `repo, sha, pane, permission, scope, granted_at`. "Only this time" grants are
-//! never written. `scope` is a stable team name for `messages:read` and the real
+//! never written. `scope` is a stable team name for `messages:read` and the three team
+//! powers (`team:join`, `messages:send`, `agents:spawn`) and the real
 //! path of a folder for `files:read`. Replaced atomically; a line that does not
 //! parse is not a grant (fail closed).
 
@@ -18,7 +19,7 @@ pub struct SavedGrant {
     pub granted_at: String,
 }
 
-const GRANTABLE: [&str; 2] = ["messages:read", "files:read"];
+const GRANTABLE: [&str; 5] = ["messages:read", "files:read", "team:join", "messages:send", "agents:spawn"];
 
 fn clean(s: &str) -> bool {
     !s.is_empty() && !s.contains(['\t', '\n', '\r', '\0'])
@@ -151,6 +152,18 @@ mod tests {
             assert!(add(d.path(), bad).is_err());
         }
         assert!(!path(d.path()).exists());
+    }
+
+    #[test]
+    fn the_team_powers_are_remembered_and_forgotten_like_other_grants() {
+        let d = tempfile::tempdir().unwrap();
+        for p in ["team:join", "messages:send", "agents:spawn"] {
+            add(d.path(), g("o/r", "main", p, "team-a")).unwrap();
+        }
+        assert_eq!(for_pane(d.path(), "o/r", "main").len(), 3);
+        assert!(revoke(d.path(), "o/r", "main", "messages:send", "team-a").unwrap());
+        let left: Vec<String> = read(d.path()).into_iter().map(|x| x.permission).collect();
+        assert_eq!(left, vec!["team:join", "agents:spawn"]);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use webview2_com::{take_pwstr, FrameChildFrameCreatedEventHandler, FrameCreatedE
 use windows::core::{Interface, PWSTR};
 
 use super::host::{AddonHost, GATE_EVENT};
-use super::nav::{frame_navigation_allowed, FrameNav};
+use super::nav::{frame_navigation_verdict, FrameNav};
 
 /// Runs a setup step; on failure add-ons go off and open panes close.
 fn step<R: Runtime>(app: &AppHandle<R>, host: &AddonHost, what: &str, r: windows::core::Result<()>) -> bool {
@@ -57,7 +57,7 @@ fn guard_frame<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, frame: &IC
                 let mut raw = PWSTR::null();
                 let uri = unsafe { args.Uri(&mut raw) }.map(|_| take_pwstr(raw)).map_err(|e| e.to_string());
                 let target = uri.as_ref().ok().and_then(|u| tauri::Url::parse(u).ok());
-                let allow = frame_navigation_allowed(&r, &h.nav, uri, &h.guard);
+                let (allow, why) = frame_navigation_verdict(&r, &h.nav, uri, &h.guard);
                 // What the measurement needs to show that no frame ever became the app: the class of every
                 // frame navigation (never the address) and whether the guard let it start.
                 let class = match &target {
@@ -69,6 +69,8 @@ fn guard_frame<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, frame: &IC
                 let _ = unsafe { args.NavigationId(&mut id) };
                 eprintln!("[addons] frame nav {id} start target={class} allowed={allow}");
                 if !allow {
+                    // the reason is a fixed phrase (never an address): why a navigation was refused, for the measurement runs
+                    eprintln!("[addons] frame nav {id} refused: {why}");
                     eprintln!("[addons] cancelled a frame navigation");
                     step(&a, &h, "cancelling a frame navigation", unsafe { args.SetCancel(true) });
                     if h.guard.problem().is_some() {

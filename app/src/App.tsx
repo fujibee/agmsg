@@ -22,6 +22,9 @@ import { useOpenRequests } from "./addons/useOpenRequests";
 import { useOpenRequestsSetting } from "./addons/openRequestsSetting";
 import { useAddonCatalog } from "./addons/catalog";
 import { mockOpenView, mockSnapshot } from "./addons/mock";
+import { createLatestOnly } from "./latestOnly";
+import { createNoticeFlusher } from "./noticeFlusher";
+import { heldCount, type Queues } from "./noticeQueue";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
@@ -86,6 +89,8 @@ export type Pane = {
    *  False for actas-booted types with no monitor of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** The journal entry of an agent an add-on started: the backend learns the process from it. */
+  agentKey?: string;
   /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
    *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
    *  the shell instead of a new tab" behavior below: it has to be an
@@ -361,6 +366,8 @@ export type AgentType = {
   options: string[];
   cmd_prefix: string | null;
   prompt_arg: string | null;
+  /** The flag that carries a model name, when the CLI takes one. */
+  model_arg: string | null;
 };
 
 // The trailing spawn args that hand a freshly launched CLI its identity:
@@ -382,6 +389,74 @@ export function actasSpawnArgs(
 ): string[] {
   const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}`;
   return promptArg ? [promptArg, prompt] : [prompt];
+}
+
+// Where a message the app sees goes. The room feed is the selected team's. A pane is reached by the team it
+// belongs to (the team of the window that holds it), not by the team that happens to be selected: an agent an
+// add-on starts for another team (a game in its own team) has no other way to hear, so a message for it must not be
+// dropped because the user is looking at a different team, and a same-named pane of the selected team must not get
+// it. Only a pane that is not native is fed: a native (actas-booted) agent runs its own agmsg monitor and would
+// receive the message twice.
+export function routeMessage(
+  selectedTeam: string | null,
+  msg: { team: string; to: string },
+  windows: ReadonlyArray<Pick<Window, "team" | "root">>,
+  panes: ReadonlyArray<Pick<Pane, "id" | "label" | "native">>,
+): { feed: boolean; pane: Pick<Pane, "id" | "label" | "native"> | undefined; why?: string } {
+  const inTeam = new Set(windows.filter((w) => w.team === msg.team).flatMap((w) => leaves(w.root)));
+  const feed = msg.team === selectedTeam;
+  const named = panes.filter((pn) => pn.label === msg.to);
+  const pane = named.find((pn) => !pn.native && inTeam.has(pn.id));
+  if (pane) return { feed, pane };
+  const why =
+    named.length === 0
+      ? `no open pane is named ${msg.to}`
+      : named.every((pn) => pn.native)
+        ? `pane ${msg.to} is native (it has its own delivery)`
+        : `pane ${msg.to} is not in a window of team ${msg.team}`;
+  return { feed, pane: undefined, why };
+}
+
+// The one-line notice typed into an agent whose pane the app feeds (no delivery of its own). It says how to read
+// the inbox and how to answer, with this install's name, the team, the agent's own name and the sender spelled
+// out: an agent that is not told where a reply goes writes it in its own chat, where nobody reads it. The
+// scripts are the install's own (`--cmd` renames the skill folder), run through bash.
+// Add a live message to the room feed unless the feed already has it (the history load and the watcher can both
+// deliver the same message, in either order, and a store found again re-reads its rows).
+export function appendIfNew<T extends { id: string }>(feed: ReadonlyArray<T>, msg: T): T[] {
+  return feed.some((m) => m.id === msg.id) ? [...feed] : [...feed, msg];
+}
+
+// The history page followed by whatever live messages arrived while it loaded and are not in it.
+export function mergeById<T extends { id: string }>(history: ReadonlyArray<T>, live: ReadonlyArray<T>): T[] {
+  const have = new Set(history.map((m) => m.id));
+  return [...history, ...live.filter((m) => !have.has(m.id))];
+}
+
+// True the first time a message id is seen for a pane (and records it), false after: a message re-emitted by a
+// store found again is not typed into the same pane twice. The record keeps the last `cap` ids per pane, so this
+// holds inside that window; the watcher's cursors are what keep a row from being emitted twice in the first place.
+export function firstSight(seen: Map<string, Set<string>>, paneId: string, msgId: string, cap = 500): boolean {
+  let ids = seen.get(paneId);
+  if (!ids) seen.set(paneId, (ids = new Set()));
+  if (ids.has(msgId)) return false;
+  ids.add(msgId);
+  if (ids.size > cap) ids.delete(ids.values().next().value as string);
+  return true;
+}
+
+// One line to the app's own log (stderr), for the notice path: what was typed, held, or dropped and why.
+function appLog(line: string) {
+  void invoke("app_log", { line }).catch(() => {});
+}
+
+export function kickoffText(cmdName: string, team: string, to: string, from: string, preview: string): string {
+  const scripts = `~/.agents/skills/${cmdName}/scripts`;
+  return (
+    `[agmsg] ${from}: "${preview}" — read your inbox with: bash ${scripts}/inbox.sh ${team} ${to} ; ` +
+    `answer with: bash ${scripts}/send.sh ${team} ${to} ${from} "<your reply>" ` +
+    `(a reply written in this chat is not delivered; /${cmdName} does the same).`
+  );
 }
 
 // Whether the outdated-CLI banner should render. A pure function (rather
@@ -536,6 +611,8 @@ export default function App() {
     },
     [t],
   );
+  const pushCompletionNoticeRef = useRef<(kind: "success" | "error", spec: ToastSpec) => void>(() => {});
+  pushCompletionNoticeRef.current = pushCompletionNotice;
   useEffect(() => {
     if (!completionNotice || completionNotice.kind !== "success") return;
     const timer = window.setTimeout(() => {
@@ -729,6 +806,7 @@ export default function App() {
   const renameDraftRef = useRef("");
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
+  const deliveryCache = useRef(new Map<string, boolean>());
   const feedRef = useRef<HTMLDivElement>(null);
   // Set right before prepending an older history page, so the scroll-to-
   // bottom effect below skips that render (loadOlderMessages restores the
@@ -794,7 +872,29 @@ export default function App() {
   // suppress in different ways (see shouldSuppressClickAfterDrag's own doc
   // and git history; review, PR #481, rounds 2 and 3).
   const dragJustFinishedRef = useRef<DragFinishInfo>(null);
+  // Notices wait for a pane to be ready for input (see noticeQueue.ts). The ref is what the flush reads; the state
+  // twin only drives the held count shown next to the agent.
+  const [heldNotices, setHeldNotices] = useState<Queues>({});
+  const noticedRef = useRef<Map<string, Set<string>>>(new Map());
+  const noticeFlusherRef = useRef<ReturnType<typeof createNoticeFlusher> | null>(null);
+  if (noticeFlusherRef.current === null) {
+    noticeFlusherRef.current = createNoticeFlusher({
+      inject: (id, text) => invoke("pty_inject", { id, text }),
+      livePanes: () => panesRef.current.map((p) => p.id),
+      now: () => Date.now(),
+      setTimer: (fn, ms) => void window.setTimeout(fn, ms),
+      onHeldChange: setHeldNotices,
+      log: appLog,
+      onInjectFailed: (_id, attempt, reason) => {
+        // Said once per run of failures; the notices stay held and are retried with a growing delay.
+        if (attempt === 1) pushCompletionNoticeRef.current("error", { key: "toast.noticeInjectFailed", vars: { reason } });
+      },
+      onWithoutReadySignal: (count) =>
+        pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count } }),
+    });
+  }
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    noticeFlusherRef.current?.state(paneId, state);
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
 
@@ -1070,12 +1170,17 @@ export default function App() {
   // The most recent history page for `t`, replacing whatever's currently
   // shown — used both on team switch and after purging a team's messages
   // (the same reset a stale page would otherwise leave behind).
+  // Only the latest load may apply (a slower earlier one, another team's or a stale reload, is dropped), and the
+  // history flag with it.
+  const roomLoadRef = useRef(createLatestOnly());
   const loadRoomMessages = useCallback((t: string) => {
+    const current = roomLoadRef.current.start();
     setMessages([]);
     setHasMoreHistory(true);
     return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
       .then((msgs) => {
-        setMessages(msgs);
+        if (!current()) return;
+        setMessages((live) => mergeById(msgs, live));
         setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
       })
       .catch(console.error);
@@ -1102,12 +1207,12 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
-      if (e.payload.team !== team) return;
-      setMessages((prev) => [...prev, e.payload]);
-      // Only inject into NON-native panes; a native (actas-booted) agent runs
-      // its own agmsg monitor and would otherwise receive the message twice.
-      const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native);
-      if (pane) {
+      const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
+      if (!pane) appLog(`notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}`);
+      if (feed) setMessages((prev) => appendIfNew(prev, e.payload));
+      if (pane && !firstSight(noticedRef.current, pane.id, e.payload.id)) {
+        appLog(`notice not typed: message ${e.payload.id} was already typed into ${pane.id}`);
+      } else if (pane) {
         // Inject a kickoff notice, not the raw message body verbatim. The
         // real agmsg Monitor (watch.sh) never types a message's contents
         // into an agent — it hands over a structured "<from> → <to> | <body>"
@@ -1125,12 +1230,13 @@ export default function App() {
         // territory since it can no longer contain newlines or run long.
         const flat = e.payload.body.replace(/\s+/g, " ").trim();
         const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
-        const kickoff = `[agmsg] ${e.payload.from}: "${preview}" — run /${cmdName} to check it.`;
-        void invoke("pty_inject", { id: pane.id, text: kickoff });
+        const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
+        noticeFlusherRef.current?.notice(pane.id, kickoff);
       }
     });
     return () => void p.then((u) => u());
   }, [team, cmdName]);
+
 
   useEffect(() => {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
@@ -1208,7 +1314,7 @@ export default function App() {
   const spawnMember = useCallback(
     // targetWindowId: spawn straight into an existing tab as an extra
     // side-by-side pane, instead of opening a new tab (the default).
-    async (m: Member, targetWindowId?: string) => {
+    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string }) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -1225,6 +1331,7 @@ export default function App() {
       const freshOptionsFor = new Map(types.map((t) => [t.name, t.options]));
       const freshCmdPrefixFor = new Map(types.map((t) => [t.name, t.cmd_prefix]));
       const freshPromptArgFor = new Map(types.map((t) => [t.name, t.prompt_arg]));
+      const freshModelArgFor = new Map(types.map((t) => [t.name, t.model_arg]));
       setSpawnTypes(types);
 
       const type = m.types.find((t) => freshCliFor.has(t));
@@ -1232,6 +1339,7 @@ export default function App() {
       const options = type ? (freshOptionsFor.get(type) ?? []) : [];
       const cmdPrefix = type ? freshCmdPrefixFor.get(type) : undefined;
       const promptArg = type ? freshPromptArgFor.get(type) : undefined;
+      const modelArg = type ? freshModelArgFor.get(type) : undefined;
       // `native` = "this (type, project) actually self-delivers agmsg
       // messages" — asked from agmsg's own delivery.sh status (mode derived
       // from the project's real hooks file), NOT a static type.conf flag.
@@ -1241,10 +1349,17 @@ export default function App() {
       // NOT self-delivering, the app's PTY stdin-inject universal monitor is
       // this pane's only way to receive agmsg messages.
       let monitors = false;
-      if (type && m.project) {
+      // An agent an add-on starts is a fresh folder under ~/agmsg-agents, set up the same way every time for a
+      // type, so its answer is asked of agmsg once per type and spawn options for this run of the app (the
+      // second chess player does not ask again). An agent added by hand is always asked.
+      const deliveryKey = fromAddon && type ? `${type}|${options.join(" ")}` : null;
+      if (deliveryKey && deliveryCache.current.has(deliveryKey)) {
+        monitors = deliveryCache.current.get(deliveryKey)!;
+      } else if (type && m.project) {
         try {
           const mode = await invoke<string>("agmsg_delivery_mode", { agentType: type, project: m.project });
           monitors = mode === "monitor" || mode === "both";
+          if (deliveryKey) deliveryCache.current.set(deliveryKey, monitors);
         } catch (err) {
           console.error(err);
         }
@@ -1261,9 +1376,10 @@ export default function App() {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
+            args: [...options, ...(fromAddon?.model && modelArg ? [modelArg, fromAddon.model] : []), ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
             cwd: m.project || undefined,
             native: monitors,
+            agentKey: fromAddon?.key,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       setPanes((prev) => [...prev, pane]);
@@ -1274,12 +1390,33 @@ export default function App() {
         setActive(targetWindowId);
       } else {
         const winId = `w-${seq.current++}`;
-        setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: id }, team }]);
+        setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: id }, team: fromAddon?.team ?? team }]);
         setActive(winId);
       }
     },
     [cmdName, spawnTypes, team],
   );
+
+  // An add-on asked for a terminal for an agent it started. Only the member and the type cross: the command,
+  // the spawn options and the actas prompt come from the same code as "add agent", from the member as agmsg has it.
+  const spawnMemberRef = useRef(spawnMember);
+  spawnMemberRef.current = spawnMember;
+  useEffect(() => {
+    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null }>("addon-agent-open", (e) => {
+      const { key, team: agentTeam, name, type: agentType, project, model } = e.payload;
+      const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
+      // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
+      const open = panesRef.current.find((p) => p.label === name);
+      if (open) {
+        if (open.agentKey !== key) fail(`A pane named ${name} is already open.`);
+        return;
+      }
+      // The member as the backend just joined it (name, type, folder): agmsg is not asked for the member list again.
+      const m: Member = { name, types: [agentType], project };
+      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined }).catch((err) => fail(String(err)));
+    });
+    return () => void p.then((unlisten) => unlisten());
+  }, []);
 
   // Close one pane (from its header's × or the context menu). If it was the
   // last pane in its window, the window/tab disappears too.
@@ -2535,6 +2672,11 @@ export default function App() {
                         }
                       >
                         <span className="member-name">{m.name}</span>
+                        {pane && heldCount(heldNotices, pane.id) > 0 && (
+                          <span className="member-held" title={t("sidebar.member.heldTitle")}>
+                            {t("sidebar.member.held", { count: heldCount(heldNotices, pane.id) })}
+                          </span>
+                        )}
                         <span className="member-types">
                           {m.types.join(", ") || t("sidebar.member.noTypes")}
                         </span>
@@ -2812,6 +2954,7 @@ export default function App() {
                     cmd={p.cmd}
                     args={p.args}
                     cwd={p.cwd}
+                    agentKey={p.agentKey}
                     fontSize={terminalFontSize}
                     active={isActiveWindow}
                     onAgentState={applyAgentState}

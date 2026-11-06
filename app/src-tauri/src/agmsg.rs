@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// matching a stray leftover directory from an earlier broken run instead
 /// of erroring outright). USERPROFILE is Windows' own always-set
 /// equivalent, set by the OS itself regardless of what launched the process.
-fn home_dir_string() -> Option<String> {
+pub(crate) fn home_dir_string() -> Option<String> {
     std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
 }
 
@@ -562,6 +562,59 @@ const MESSAGES_SINCE_LEGACY_ONLY_SQL: &str = "\
      WHERE id > ?2
      ORDER BY at ASC, ord ASC";
 
+/// Ask the watcher to look for stores now instead of at the next rescan beat. Called after the app joins a member
+/// or sends a message: a team's store file can appear with its first message, and a store found late must not
+/// miss what was written before it was found.
+static RESCAN_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_rescan() {
+    RESCAN_NOW.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Where to begin reading a store the watcher has just opened. A store that was there when the app started begins
+/// at its current end (the room loads its history itself, and replaying it would also type old messages into
+/// panes). A store that did not exist then is new: it is read from its start, so rows written before it was found
+/// are not lost. This is decided by what existed, never by a row's own time, which an imported message keeps from
+/// its origin.
+fn start_reading(conn: &rusqlite::Connection, new_store: bool) -> Cursors {
+    if new_store {
+        Cursors::default()
+    } else {
+        Cursors {
+            seq: conn.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0)).unwrap_or(0),
+            legacy_id: conn.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0)).unwrap_or(0),
+        }
+    }
+}
+
+/// Whether a store file the watcher is opening is new since the app started, and why that was decided. A file
+/// present at the first look is not new. Otherwise its creation time decides, for the first look as well as later
+/// ones: created at or after the app started (with 2 s of slack: a file made up to 2 s before the start counts as new) is new, so a team's store
+/// made while the first look is still running keeps its first row. Where the system gives no creation time the
+/// answer is "new" for a later look (the file was not in the first look) and "not new" for the first look (the
+/// file was there when the app began), and the reason says so; the log carries it.
+fn is_new_store(
+    path: &std::path::Path,
+    present_at_start: &std::collections::HashSet<PathBuf>,
+    started: std::time::SystemTime,
+    first_scan: bool,
+) -> (bool, &'static str) {
+    if present_at_start.contains(path) {
+        return (false, "present at the first look");
+    }
+    match std::fs::metadata(path).and_then(|m| m.created()) {
+        Ok(t) => {
+            if t + Duration::from_secs(2) >= started {
+                (true, "created since the app started")
+            } else {
+                (false, "created before the app started")
+            }
+        }
+        Err(_) if first_scan => (false, "no creation time; treated as there at startup"),
+        Err(_) => (true, "no creation time; not in the first look, treated as new"),
+    }
+}
+
 /// Where each of the two id spaces has been read up to.
 #[derive(Clone, Copy, Default)]
 struct Cursors {
@@ -786,6 +839,8 @@ pub struct AgentType {
     /// prompt is passed positionally (claude-code). Mirrors the prompt half
     /// of scripts/lib/boot-command.sh's agmsg_role_cli_args.
     pub prompt_arg: Option<String>,
+    /// The flag that carries a model name (manifest `model_arg=`), when the CLI takes one.
+    pub model_arg: Option<String>,
 }
 
 /// Read one key from a type.conf manifest (read-only key=value data, never
@@ -887,7 +942,8 @@ pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
             let options = spawn_options_tokens(&name);
             let cmd_prefix = manifest_get(&conf, "cmd_prefix");
             let prompt_arg = manifest_get(&conf, "prompt_arg");
-            types.push(AgentType { name, cli, options, cmd_prefix, prompt_arg });
+            let model_arg = manifest_get(&conf, "model_arg").filter(|m| !m.is_empty());
+            types.push(AgentType { name, cli, options, cmd_prefix, prompt_arg, model_arg });
         }
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1194,6 +1250,10 @@ fn run_script(name: &str, args: &[&str]) -> Result<String, String> {
     let output = bash_command()?
         .arg(bash_path(&script))
         .args(args)
+        // The app is not a seat. Core's self-naming (a seat names its own terminal pane when it sends or reads)
+        // would otherwise ask the terminal the app was started from, which costs about two seconds per send when
+        // that terminal is herdr or tmux, and can bind the sending member to that pane.
+        .env("AGMSG_SELF_NAME", "off")
         .output()
         .map_err(|e| e.to_string())?;
     if output.status.success() {
@@ -1207,7 +1267,11 @@ fn run_script(name: &str, args: &[&str]) -> Result<String, String> {
 /// app-user identity; it must already be a member of `team`.
 #[tauri::command]
 pub fn agmsg_send(team: String, from: String, to: String, body: String) -> Result<(), String> {
-    run_script("send.sh", &[&team, &from, &to, &body]).map(|_| ())
+    let r = run_script("send.sh", &[&team, &from, &to, &body]).map(|_| ());
+    if r.is_ok() {
+        request_rescan();
+    }
+    r
 }
 
 /// The installed agmsg slash-command name (basename of the skill dir). Used to
@@ -1258,7 +1322,11 @@ pub fn agmsg_join(
     let project = msys_to_native(&project);
     std::fs::create_dir_all(&project).map_err(|e| e.to_string())?;
     let project = bash_path(std::path::Path::new(&project));
-    run_script("join.sh", &[&team, &name, &agent_type, &project]).map(|_| ())
+    let r = run_script("join.sh", &[&team, &name, &agent_type, &project]).map(|_| ());
+    if r.is_ok() {
+        request_rescan();
+    }
+    r
 }
 
 /// Rename a member in a team (updates team config + rewrites message history).
@@ -1341,18 +1409,25 @@ pub fn start_watcher(app: AppHandle) {
         // permanently missing live updates and stdin-inject delivery.
         // One open connection and cursor pair per store, keyed by path.
         let mut open: Vec<(PathBuf, rusqlite::Connection, Cursors)> = Vec::new();
+        let started = std::time::SystemTime::now();
+        // Store files that existed at the first look.
+        let mut present_at_start: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         // Re-enumerating costs a subprocess per team, so it happens on a much
         // slower beat than the poll. `join` creating a team is an ordinary
         // action, though, so it cannot be startup-only: "I joined and the app
         // never showed it, until I restarted" is a bug report nobody can
         // diagnose.
         let mut ticks_until_rescan = 0u32;
+        let mut first_scan = true;
         // Teams the app cannot read directly, and how far each has been read.
         // Polled on the rescan beat, not the fast one: this path costs a
         // subprocess per team per poll.
         let mut via_api: Vec<(String, Option<String>)> = Vec::new();
 
         loop {
+            if RESCAN_NOW.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                ticks_until_rescan = 0;
+            }
             if ticks_until_rescan == 0 {
                 ticks_until_rescan = 12; // ~10s at the poll interval below
                 let (direct, fallback) = watchable_stores_timed();
@@ -1373,26 +1448,22 @@ pub fn start_watcher(app: AppHandle) {
                         continue;
                     }
                     if let Ok(conn) = open_ro(&path) {
-                        // Start at the current end of both id spaces: the room
-                        // loads its own history separately, so replaying it
-                        // here would double every message already on screen.
-                        let cursors = Cursors {
-                            seq: conn
-                                .query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| {
-                                    r.get(0)
-                                })
-                                .unwrap_or(0),
-                            legacy_id: conn
-                                .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| {
-                                    r.get(0)
-                                })
-                                .unwrap_or(0),
-                        };
+                        let (new_store, why) = is_new_store(&path, &present_at_start, started, first_scan);
+                        let cursors = start_reading(&conn, new_store);
+                        if new_store {
+                            eprintln!("[agmsg-app] watcher opened a new store and reads it from its start ({why})");
+                        } else if why.starts_with("no creation time") {
+                            eprintln!("[agmsg-app] watcher opened a store at its end ({why})");
+                        }
+                        if first_scan {
+                            present_at_start.insert(path.clone());
+                        }
                         open.push((path, conn, cursors));
                     }
                 }
             }
             ticks_until_rescan -= 1;
+            first_scan = false;
 
             // A read failure is transient here (a WAL checkpoint, a store
             // being recreated), not a reason to end the thread — the previous
@@ -2042,6 +2113,18 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         assert_eq!(agmsg_base(), dir.path());
     }
 
+    /// Every script the app runs is told not to self-name, whatever the app's own environment says.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    #[serial]
+    fn scripts_run_by_the_app_are_told_not_to_name_a_terminal_pane() {
+        let _b = fake_base(&[("probe.sh", "printf '%s' \"${AGMSG_SELF_NAME-unset}\"\n")]);
+        let _on = EnvGuard::set("AGMSG_SELF_NAME", "on");
+        assert_eq!(run_script("probe.sh", &[]).unwrap(), "off", "the app's own setting does not reach the script");
+        drop(_on);
+        assert_eq!(run_script("probe.sh", &[]).unwrap(), "off");
+    }
+
     #[test]
     #[serial]
     fn scripts_dir_is_the_scripts_folder_of_the_base_in_use() {
@@ -2262,6 +2345,89 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
     /// is covered by `the_store_path_comes_from_agmsg_not_from_a_guess`.
     ///
     /// It exercises the watcher's own reader, not a copy of its SQL.
+    #[test]
+    #[serial]
+    fn a_new_store_is_read_from_its_start_whatever_the_rows_own_time_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        // An imported row keeps its origin's time, so it can look old (or skewed) to this machine.
+        store_with(
+            dir.path(),
+            &[
+                ("019faa2a-0000-7000-8000-000000000001", "2001-01-01T00:00:00Z"),
+                ("019faa2a-0000-7000-8000-000000000002", "2026-07-28T10:00:06Z"),
+            ],
+            &[],
+        );
+        let conn = super::open_ro(&dir.path().join("db/messages.db")).expect("open");
+        let mut cursors = super::start_reading(&conn, true);
+        let got = super::read_new_messages(&conn, &mut cursors).expect("read");
+        assert_eq!(got.len(), 2, "found late: every row is emitted, old origin time or not");
+        assert!(super::read_new_messages(&conn, &mut cursors).expect("read").is_empty(), "and each once");
+        // A row that arrives afterwards with an old origin time is still emitted.
+        add_linked(dir.path(), "019faa2a-0000-7000-8000-00000000000c", "2001-01-01T00:00:01Z", None);
+        let later = super::read_new_messages(&conn, &mut cursors).expect("read");
+        assert_eq!(later.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn a_store_that_existed_at_startup_begins_at_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        store_with(dir.path(), &[("019faa2a-0000-7000-8000-000000000001", "2026-07-28T10:00:05Z")], &[]);
+        let conn = super::open_ro(&dir.path().join("db/messages.db")).expect("open");
+        let mut cursors = super::start_reading(&conn, false);
+        assert!(super::read_new_messages(&conn, &mut cursors).expect("read").is_empty());
+        add_linked(dir.path(), "019faa2a-0000-7000-8000-00000000000d", "2001-01-01T00:00:01Z", None);
+        assert_eq!(super::read_new_messages(&conn, &mut cursors).expect("read").len(), 1, "a later row with an old origin time is emitted");
+    }
+
+    #[test]
+    fn a_file_made_while_the_first_look_runs_is_new_but_one_present_at_the_first_look_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("messages.db");
+        let started = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+        std::fs::write(&f, b"").unwrap(); // created after `started`
+        let mut present = std::collections::HashSet::new();
+        // First look, file born after the app started: new, so its first row is kept.
+        assert_eq!(super::is_new_store(&f, &present, started, true).0, true);
+        // A later look: new as well.
+        assert_eq!(super::is_new_store(&f, &present, started, false).0, true);
+        // Present at the first look: never new.
+        present.insert(f.clone());
+        assert_eq!(super::is_new_store(&f, &present, started, false).0, false);
+        // Born long before the app started: not new, at either look.
+        present.clear();
+        let later_start = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(super::is_new_store(&f, &present, later_start, true).0, false);
+        assert_eq!(super::is_new_store(&f, &present, later_start, false).0, false);
+    }
+
+    #[test]
+    #[serial]
+    fn a_store_created_during_the_first_look_with_its_first_row_already_in_it_keeps_that_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        store_with(dir.path(), &[("019faa2a-0000-7000-8000-000000000001", "2026-07-28T10:00:06Z")], &[]);
+        let path = dir.path().join("db/messages.db");
+        let (new_store, _) = super::is_new_store(&path, &Default::default(), started, true);
+        let conn = super::open_ro(&path).expect("open");
+        let mut cursors = super::start_reading(&conn, new_store);
+        assert_eq!(super::read_new_messages(&conn, &mut cursors).expect("read").len(), 1);
+    }
+
+    #[test]
+    fn a_missing_creation_time_is_decided_by_the_look_and_says_so() {
+        // The reason strings are what the log shows; a path that does not exist has no creation time.
+        let nowhere = std::path::Path::new("/nonexistent/agmsg/messages.db");
+        let present = Default::default();
+        let now = std::time::SystemTime::now();
+        assert_eq!(super::is_new_store(nowhere, &present, now, true), (false, "no creation time; treated as there at startup"));
+        assert_eq!(super::is_new_store(nowhere, &present, now, false), (true, "no creation time; not in the first look, treated as new"));
+    }
+
     #[test]
     #[serial]
     fn a_sent_message_reaches_the_app_from_both_the_event_log_and_the_legacy_table() {

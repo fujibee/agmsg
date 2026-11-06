@@ -197,6 +197,12 @@ pub struct LoginShellInfo {
     home: String,
 }
 
+/// One line from the window to the app's log, for the notice path (what was typed, held, dropped, and why).
+#[tauri::command]
+fn app_log(line: String) {
+    eprintln!("[agmsg-app] {}", line.chars().take(300).collect::<String>());
+}
+
 #[tauri::command]
 fn login_shell() -> LoginShellInfo {
     #[cfg(unix)]
@@ -645,6 +651,11 @@ pub fn run() {
             }
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
+            // Members and agents add-ons made before the app last stopped: settle what a crash left half done.
+            {
+                let mgr = addons::agents::init_global(app.handle().clone());
+                std::thread::spawn(move || mgr.recover());
+            }
             app.state::<PtyManager>().start_detection_tick(app.handle().clone());
             // Quiet startup check — only surfaces a dialog when an update is
             // actually available (see check_for_updates's user_initiated flag).
@@ -673,6 +684,12 @@ pub fn run() {
             addons::commands::addon_pane_remove,
             addons::commands::addon_pane_loaded,
             addons::commands::addon_grant_team,
+            addons::commands::addon_set_power,
+            addons::agents::addon_members_state,
+            addons::agents::addon_agent_reopen,
+            addons::trust::addon_trust_agents_folder,
+            addons::trust::addon_agents_folder_trust,
+            addons::agents::addon_agent_open_failed,
             addons::commands::addon_revoke_team,
             addons::commands::addon_grant_root,
             addons::commands::addon_resolve_folder,
@@ -688,6 +705,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_inject,
+            app_log,
             pty::agent_state,
             login_shell,
             agmsg::agmsg_is_installed,
