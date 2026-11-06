@@ -4,6 +4,11 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): no test here is about agent-pid
+  # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
+  # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
+  # agent process too.
+  export AGMSG_AGENT_PID=""
   export PROJECT_ALICE="$BATS_TEST_TMPDIR/project-alice"
   export PROJECT_BOB="$BATS_TEST_TMPDIR/project-bob"
   export PROJECT_MULTI="$BATS_TEST_TMPDIR/project-multi"
