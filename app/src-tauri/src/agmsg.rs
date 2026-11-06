@@ -1428,7 +1428,7 @@ struct Watcher {
     via_api: Vec<(String, Option<String>, bool)>,
     // Ids the last look through api.sh gave, in this step, for a team that has just become directly readable, so
     // the direct reader (which starts at the store's end) does not emit them a second time in the same step.
-    handed_over: std::collections::HashSet<String>,
+    handed_over: std::collections::HashSet<(String, String)>,
 }
 
 impl Watcher {
@@ -1452,35 +1452,60 @@ impl Watcher {
         if self.ticks_until_rescan == 0 {
             self.ticks_until_rescan = 12; // ~10s at the poll interval
             let (direct, fallback) = watchable_stores_timed();
-            // A team whose store can now be read directly leaves the api.sh list. Its direct reader starts at the
-            // store's end, so the rows after the api.sh watermark come from one last api.sh look, made after the
-            // store is open (below): nothing between the two is lost, and `handed_over` keeps what both see from
-            // being emitted twice.
-            let leaving: Vec<(String, Option<String>)> = self
-                .via_api
-                .iter()
-                .filter(|(t, _, looked)| *looked && !fallback.contains(t))
-                .map(|(t, seen, _)| (t.clone(), seen.clone()))
-                .collect();
-            self.via_api.retain(|(t, _, _)| fallback.contains(t));
-            for team in fallback {
-                if !self.via_api.iter().any(|(t, _, _)| t == &team) {
-                    self.via_api.push((team, None, false));
+            // Teams whose store can now be read directly are leaving the api.sh list. Their direct reader starts at
+            // the store's end, so the rows after the api.sh watermark come from one last api.sh look made after
+            // the store is open. The handoff is committed only if all of that worked: every new store opened and
+            // every last look succeeded. Otherwise nothing changes (the teams stay on api.sh with their
+            // watermarks, the stores just opened are dropped) and the next rescan tries again.
+            let leaving: Vec<String> =
+                self.via_api.iter().filter(|(t, _, looked)| *looked && !fallback.contains(t)).map(|(t, _, _)| t.clone()).collect();
+            for team in &fallback {
+                if !self.via_api.iter().any(|(t, _, _)| t == team) {
+                    self.via_api.push((team.clone(), None, false));
                 }
             }
+            // what this beat's ordinary look gave for a team that is leaving: the direct reader may see it too
+            let mut polled_leaving: Vec<(String, String)> = Vec::new();
             for (team, seen, looked) in self.via_api.iter_mut() {
                 let (fresh, watermark, ok) = fallback_new_messages(team, seen.as_deref(), *looked);
                 *seen = watermark;
                 *looked = *looked || ok;
+                if leaving.contains(team) {
+                    polled_leaving.extend(fresh.iter().map(|m| (m.team.clone(), m.id.clone())));
+                }
                 out.extend(fresh);
             }
+            // stores to open now, not yet part of the watcher
+            let mut staged: Vec<(PathBuf, rusqlite::Connection, Cursors, bool, &'static str)> = Vec::new();
+            let mut open_failed = false;
             for path in direct {
                 if self.open.iter().any(|(p, _, _)| p == &path) {
                     continue;
                 }
-                if let Ok(conn) = open_ro(&path) {
-                    let (new_store, why) = is_new_store(&path, &self.present_at_start, self.started, self.first_scan);
-                    let cursors = start_reading(&conn, new_store);
+                match open_ro(&path) {
+                    Ok(conn) => {
+                        let (new_store, why) = is_new_store(&path, &self.present_at_start, self.started, self.first_scan);
+                        let cursors = start_reading(&conn, new_store);
+                        staged.push((path, conn, cursors, new_store, why));
+                    }
+                    Err(_) => open_failed = true,
+                }
+            }
+            let mut last_looks: Vec<Message> = Vec::new();
+            let mut handoff_ok = !(open_failed && !leaving.is_empty());
+            if handoff_ok {
+                for team in &leaving {
+                    let seen = self.via_api.iter().find(|(t, _, _)| t == team).and_then(|(_, s, _)| s.clone());
+                    let (fresh, _, ok) = fallback_new_messages(team, seen.as_deref(), true);
+                    if !ok {
+                        handoff_ok = false;
+                        break;
+                    }
+                    last_looks.extend(fresh);
+                }
+            }
+            if leaving.is_empty() || handoff_ok {
+                for (path, conn, cursors, new_store, why) in staged {
                     if new_store {
                         eprintln!("[agmsg-app] watcher opened a new store and reads it from its start ({why})");
                     } else if why.starts_with("no creation time") {
@@ -1491,13 +1516,16 @@ impl Watcher {
                     }
                     self.open.push((path, conn, cursors));
                 }
-            }
-            for (team, seen) in leaving {
-                let (fresh, _, _) = fallback_new_messages(&team, seen.as_deref(), true);
-                for m in fresh {
-                    self.handed_over.insert(m.id.clone());
-                    out.push(m);
+                if !leaving.is_empty() {
+                    self.via_api.retain(|(t, _, _)| !leaving.contains(t));
+                    self.handed_over.extend(polled_leaving);
+                    for m in last_looks {
+                        self.handed_over.insert((m.team.clone(), m.id.clone()));
+                        out.push(m);
+                    }
                 }
+            } else {
+                eprintln!("[agmsg-app] handoff from api.sh to the direct reader not done ({} team(s)); trying again at the next rescan", leaving.len());
             }
         }
         self.ticks_until_rescan -= 1;
@@ -1514,7 +1542,10 @@ impl Watcher {
         if !self.handed_over.is_empty() {
             // a row both readers saw is emitted once: the handed-over copy is already in `out` from the look
             let mut seen_here = std::collections::HashSet::new();
-            out.retain(|m| !self.handed_over.contains(&m.id) || seen_here.insert(m.id.clone()));
+            out.retain(|m| {
+                let key = (m.team.clone(), m.id.clone());
+                !self.handed_over.contains(&key) || seen_here.insert(key)
+            });
             self.handed_over.clear();
         }
         out
@@ -2704,6 +2735,7 @@ exit 0
     fn the_first_message_of_a_team_without_a_store_is_emitted_within_one_rescan() {
         let base = real_base();
         let store = add_real_team(&base, "a", "{}", false);
+        super::request_rescan(); // the timer's last look is shared by every test: start without it
         let mut w = super::Watcher::new();
         assert!(w.step().is_empty());
         write_first_message(&store);
@@ -2724,6 +2756,7 @@ exit 0
         let root = base.dir.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // the answer is not kept
         let store = add_real_team(&base, "a", "{}", false);
+        super::request_rescan(); // the timer's last look is shared by every test: start without it
         let mut w = super::Watcher::new();
         assert!(w.step().is_empty());
         write_first_message(&store);
@@ -2784,6 +2817,7 @@ exit 0
              INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES ('a','x','y','one','2026-06-01T00:00:00Z');",
         )
         .unwrap();
+        super::request_rescan(); // the timer's last look is shared by every test: start without it
         let mut w = super::Watcher::new();
         // the store was there before the app started
         w.started = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
@@ -2798,5 +2832,140 @@ exit 0
         }
         assert_eq!(got.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), vec!["two"], "once, not lost and not twice");
         drop(base);
+    }
+
+    /// api.sh whose `messages` answer is driven by files in the install: `n` counts the calls, row 2 shows from
+    /// call `row2at` on, and call `failat` fails. `store` answers jsonl (api.sh only) until `direct` exists, then
+    /// the sqlite path in `direct`'s content (`miss` = a path that does not exist).
+    #[cfg(unix)]
+    fn handoff_base() -> FakeBase {
+        fake_base(&[(
+            "api.sh",
+            r#"B="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$*" = "get teams" ]; then echo '{"name":"a"}'; exit 0; fi
+if [ "$4" = "store" ]; then
+  if [ -f "$B/direct" ]; then echo "{\"team\":\"a\",\"driver\":\"sqlite\",\"partition\":\"shared\",\"path\":\"$(cat "$B/direct")\",\"exists\":true}"
+  else echo '{"team":"a","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'; fi
+  exit 0
+fi
+n=$(cat "$B/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$B/n"
+[ "$n" = "$(cat "$B/failat" 2>/dev/null)" ] && exit 1
+echo '{"type":"message_sent","id":"1","team":"a","from":"x","to":"y","body":"one","at":"t1"}'
+[ "$n" -ge "$(cat "$B/row2at" 2>/dev/null || echo 999)" ] && echo '{"type":"message_sent","id":"2","team":"a","from":"x","to":"y","body":"two","at":"t2"}'
+exit 0
+"#,
+        )])
+    }
+
+    #[cfg(unix)]
+    fn legacy_store(path: &std::path::Path, team: &str, rows: &[&str]) -> rusqlite::Connection {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL,
+               from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, body TEXT NOT NULL,
+               created_at TEXT NOT NULL, read_at TEXT);",
+        )
+        .unwrap();
+        for b in rows {
+            conn.execute("INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES (?1,'x','y',?2,'2026-06-01T00:00:00Z')", [team, b]).unwrap();
+        }
+        conn
+    }
+
+    fn bodies(v: &[super::Message]) -> Vec<&str> {
+        v.iter().map(|m| m.body.as_str()).collect()
+    }
+
+    /// A last api.sh look that fails does not commit the handoff: the team stays on api.sh with its watermark and
+    /// the store just opened is dropped; the next rescan tries again and the row is emitted once.
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_failed_last_look_keeps_the_team_on_api_sh_and_the_next_rescan_emits_the_row_once() {
+        let _base = handoff_base();
+        let root = super::agmsg_base();
+        let conn = legacy_store(&root.join("db/messages.db"), "a", &["one"]);
+        super::request_rescan(); // the timer's last look is shared by every test: start without it
+        let mut w = super::Watcher::new();
+        w.started = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(w.step().is_empty()); // call 1: the baseline
+        conn.execute("INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES ('a','x','y','two','2026-06-01T00:00:01Z')", []).unwrap();
+        std::fs::write(root.join("row2at"), "3").unwrap(); // row 2 appears after this beat's ordinary look
+        std::fs::write(root.join("failat"), "3").unwrap(); // and the last look (call 3) fails
+        std::fs::write(root.join("direct"), root.join("db/messages.db").to_string_lossy().as_bytes()).unwrap();
+        super::request_rescan();
+        let first = w.step();
+        assert!(first.is_empty(), "nothing emitted, nothing committed: {:?}", bodies(&first));
+        assert_eq!(w.via_api.len(), 1, "still on api.sh");
+        assert!(w.open.is_empty(), "the store opened for the handoff is not kept");
+        let mut got = Vec::new();
+        for _ in 0..13 {
+            got.extend(w.step());
+        }
+        assert_eq!(bodies(&got), vec!["two"], "recovered, once");
+        assert!(w.via_api.is_empty() && w.open.len() == 1, "handed over at the retry");
+    }
+
+    /// The direct store cannot be opened: nothing changes, the team is still read through api.sh.
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_direct_store_that_cannot_be_opened_leaves_the_team_on_api_sh() {
+        let _base = handoff_base();
+        let root = super::agmsg_base();
+        super::request_rescan(); // the timer's last look is shared by every test: start without it
+        let mut w = super::Watcher::new();
+        assert!(w.step().is_empty()); // baseline
+        std::fs::write(root.join("row2at"), "2").unwrap();
+        std::fs::write(root.join("direct"), root.join("db/missing.db").to_string_lossy().as_bytes()).unwrap();
+        super::request_rescan();
+        let got = w.step();
+        assert_eq!(bodies(&got), vec!["two"], "api.sh still delivers");
+        assert_eq!(w.via_api.len(), 1);
+        assert!(w.open.is_empty());
+    }
+
+    /// Ids are only unique per team (legacy stores each have an id 2): two teams handing off in one step lose
+    /// neither message, and an unrelated team's direct row with the same id is not taken for a duplicate.
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn two_teams_handing_off_in_one_step_with_the_same_id_lose_neither_and_an_unrelated_row_survives() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"B="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$*" = "get teams" ]; then printf '{"name":"a"}\n{"name":"b"}\n{"name":"c"}\n'; exit 0; fi
+t="$3"
+if [ "$4" = "store" ]; then
+  if [ "$t" = c ] || [ -f "$B/direct" ]; then echo "{\"team\":\"$t\",\"driver\":\"sqlite\",\"partition\":\"per-team\",\"path\":\"$B/db_$t/messages.db\",\"exists\":true}"
+  else echo "{\"team\":\"$t\",\"driver\":\"jsonl\",\"partition\":\"per-team\",\"path\":\"/x/$t.jsonl\",\"exists\":true}"; fi
+  exit 0
+fi
+echo "{\"type\":\"message_sent\",\"id\":\"1\",\"team\":\"$t\",\"from\":\"x\",\"to\":\"y\",\"body\":\"$t-one\",\"at\":\"t1\"}"
+[ -f "$B/row2" ] && echo "{\"type\":\"message_sent\",\"id\":\"2\",\"team\":\"$t\",\"from\":\"x\",\"to\":\"y\",\"body\":\"$t-two\",\"at\":\"t2\"}"
+exit 0
+"#,
+        )]);
+        let root = super::agmsg_base();
+        let stores: Vec<_> = ["a", "b", "c"].iter().map(|t| legacy_store(&root.join(format!("db_{t}/messages.db")), t, &[&format!("{t}-one")])).collect();
+        super::request_rescan(); // the timer's last look is shared by every test: start without it
+        let mut w = super::Watcher::new();
+        w.started = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(w.step().is_empty());
+        for (t, conn) in ["a", "b", "c"].iter().zip(&stores) {
+            conn.execute("INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES (?1,'x','y',?2,'2026-06-01T00:00:01Z')", [*t, &format!("{t}-two")]).unwrap();
+        }
+        std::fs::write(root.join("row2"), "").unwrap();
+        std::fs::write(root.join("direct"), "").unwrap();
+        super::request_rescan();
+        let mut got = Vec::new();
+        for _ in 0..14 {
+            got.extend(w.step());
+        }
+        let mut b = bodies(&got);
+        b.sort();
+        assert_eq!(b, vec!["a-two", "b-two", "c-two"], "each once");
     }
 }
