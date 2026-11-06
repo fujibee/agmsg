@@ -312,24 +312,15 @@ export function hasNoTerminalByDesign(types: ReadonlyArray<string>): boolean {
   return types.includes(APP_USER_TYPE) || types.includes(ADDON_MEMBER_TYPE);
 }
 
-// Member types per team, fetched when a message finds no pane. A name not in the cached list is looked for again
-// at most every MEMBER_TYPES_TTL_MS, so a stream of messages for one unknown name costs one lookup per interval.
-export const MEMBER_TYPES_TTL_MS = 30_000;
-export type MemberTypesCache = Map<string, { at: number; types: Map<string, string[]> }>;
-
-export async function typesOfMember(
-  cache: MemberTypesCache,
-  team: string,
+// The types of `name` from the member list the app already holds (the selected team's). Undefined when that list
+// is for another team or does not have the name: nothing is fetched to find out.
+export function knownTypes(
+  members: ReadonlyArray<{ name: string; types: string[] }>,
+  membersTeam: string | null,
+  msgTeam: string,
   name: string,
-  now: number,
-  fetchMembers: (team: string) => Promise<ReadonlyArray<{ name: string; types: string[] }>>,
-): Promise<string[] | undefined> {
-  const hit = cache.get(team);
-  if (hit?.types.has(name)) return hit.types.get(name);
-  if (hit && now - hit.at < MEMBER_TYPES_TTL_MS) return undefined;
-  const ms = await fetchMembers(team);
-  cache.set(team, { at: now, types: new Map(ms.map((m) => [m.name, m.types])) });
-  return cache.get(team)?.types.get(name);
+): string[] | undefined {
+  return membersTeam === msgTeam ? members.find((m) => m.name === name)?.types : undefined;
 }
 // Team-room history page size — the initial load, and each scroll-up "load more".
 const ROOM_PAGE_SIZE = 30;
@@ -602,7 +593,8 @@ export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
-  const memberTypesRef = useRef<MemberTypesCache>(new Map());
+  const membersRef = useRef<Member[]>([]);
+  membersRef.current = members;
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
@@ -1238,13 +1230,11 @@ export default function App() {
     const p = listen<Message>("agmsg-message", (e) => {
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
       if (!pane) {
-        const msg = e.payload;
-        typesOfMember(memberTypesRef.current, msg.team, msg.to, Date.now(), (t) => invoke<Member[]>("agmsg_members", { team: t }))
-          .catch(() => undefined)
-          .then((types) => {
-            if (types && hasNoTerminalByDesign(types)) return;
-            appLog(`notice not typed: message ${msg.from} -> ${msg.to} in ${msg.team}: ${why}`);
-          });
+        const types = knownTypes(membersRef.current, team, e.payload.team, e.payload.to);
+        if (!types || !hasNoTerminalByDesign(types))
+          appLog(
+            `notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}${types ? "" : " (member type not known here)"}`,
+          );
       }
       if (feed) setMessages((prev) => appendIfNew(prev, e.payload));
       if (pane && !firstSight(noticedRef.current, pane.id, e.payload.id)) {

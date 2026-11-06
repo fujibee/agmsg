@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -9,8 +9,7 @@ import {
   mergeById,
   routeMessage,
   hasNoTerminalByDesign,
-  typesOfMember,
-  MEMBER_TYPES_TTL_MS,
+  knownTypes,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -571,26 +570,17 @@ describe("members with no terminal by design", () => {
     expect(hasNoTerminalByDesign([])).toBe(false);
   });
 
-  it("looks a team up once, then answers from the cache", async () => {
-    const cache = new Map();
-    const fetchMembers = vi.fn(async () => [
+  it("reads types from the held member list only for its own team, and never fetches", () => {
+    const ms = [
       { name: "chess", types: ["app-addon"] },
       { name: "you", types: ["agmsg-app"] },
       { name: "white", types: ["claude"] },
-    ]);
-    expect(await typesOfMember(cache, "t", "chess", 0, fetchMembers)).toEqual(["app-addon"]);
-    expect(await typesOfMember(cache, "t", "you", 1, fetchMembers)).toEqual(["agmsg-app"]);
-    expect(await typesOfMember(cache, "t", "white", 2, fetchMembers)).toEqual(["claude"]);
-    expect(fetchMembers).toHaveBeenCalledTimes(1);
-  });
-
-  it("looks again for an unknown name only after the interval", async () => {
-    const cache = new Map();
-    const fetchMembers = vi.fn(async () => [{ name: "white", types: ["claude"] }]);
-    expect(await typesOfMember(cache, "t", "ghost", 0, fetchMembers)).toBeUndefined();
-    expect(await typesOfMember(cache, "t", "ghost", MEMBER_TYPES_TTL_MS - 1, fetchMembers)).toBeUndefined();
-    expect(fetchMembers).toHaveBeenCalledTimes(1);
-    await typesOfMember(cache, "t", "ghost", MEMBER_TYPES_TTL_MS, fetchMembers);
-    expect(fetchMembers).toHaveBeenCalledTimes(2);
+    ];
+    expect(knownTypes(ms, "t", "t", "chess")).toEqual(["app-addon"]);
+    expect(knownTypes(ms, "t", "t", "you")).toEqual(["agmsg-app"]);
+    expect(knownTypes(ms, "t", "t", "white")).toEqual(["claude"]);
+    expect(knownTypes(ms, "t", "t", "ghost")).toBeUndefined();
+    expect(knownTypes(ms, "t", "other", "chess")).toBeUndefined();
+    expect(knownTypes(ms, null, "t", "chess")).toBeUndefined();
   });
 });
