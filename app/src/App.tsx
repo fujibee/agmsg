@@ -386,9 +386,22 @@ export function actasSpawnArgs(
   name: string,
   cmdPrefix?: string | null,
   promptArg?: string | null,
+  team?: string,
 ): string[] {
-  const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}`;
+  const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}${team ? startupInboxText(cmdName, team, name) : ""}`;
   return promptArg ? [promptArg, prompt] : [prompt];
+}
+
+// Said after the actas line of an app-opened agent: the startup turn itself reads the inbox, so a message sent
+// before the agent was ready is picked up without waiting for a typed notice (which, held until the first Idle,
+// then finds nothing new). The scripts are the install's own, as in kickoffText.
+export function startupInboxText(cmdName: string, team: string, name: string): string {
+  const scripts = `~/.agents/skills/${cmdName}/scripts`;
+  return (
+    `\n\nThen read your inbox with: bash ${scripts}/inbox.sh ${team} ${name} and act on what is waiting. ` +
+    `Reply with: bash ${scripts}/send.sh ${team} ${name} <sender> "<your reply>" ` +
+    `(a reply written in this chat is not delivered).`
+  );
 }
 
 // Where a message the app sees goes. The room feed is the selected team's. A pane is reached by the team it
@@ -1376,7 +1389,7 @@ export default function App() {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, ...(fromAddon?.model && modelArg ? [modelArg, fromAddon.model] : []), ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
+            args: [...options, ...(fromAddon?.model && modelArg ? [modelArg, fromAddon.model] : []), ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg, fromAddon?.team ?? team)],
             cwd: m.project || undefined,
             native: monitors,
             agentKey: fromAddon?.key,
