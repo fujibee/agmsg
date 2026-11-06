@@ -6,6 +6,8 @@ import {randomBytes,randomUUID,createHash} from 'node:crypto';
 import {once} from 'node:events';
 import {read,atomic,proc,violations} from './bridge-read-guard.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
+// A value that is safe bare stays as it is; anything else is single-quoted for a shell.
+const shq=v=>/^[A-Za-z0-9_\/.:=@%+-]+$/.test(String(v))?String(v):`'${String(v).replace(/'/g,`'\\''`)}'`;
 const root=path.resolve(here,'../../../..');
 const transport=path.join(here,'inbox-transport.sh');
 const downNotice=path.join(root,'scripts/lib/down-notice.sh');
@@ -29,7 +31,7 @@ export class Bridge {
     this.initMs=Number(options['init-ms']||60000);this.turnMs=Number(options['turn-ms']||330000);
     this.delays=(options['restart-delays']||'1000,5000,15000,60000,300000').split(',').map(Number);
     this.graceMs=Number(options['grace-ms']||30000);this.downAfterMs=Number(options['down-after-ms']||600000);
-    this.troubles=new Map();this.noticed=false;this.noticeCleared=false;this.ackAt=0;this.ackFails=0;
+    this.troubles=new Map();this.noticed=false;this.noticeCleared=false;this.noticeTried=0;this.noticeRetryMs=Number(options['notice-retry-ms']||30000);this.ackAt=0;this.ackFails=0;
     const [actas,state]=this.call('paths').trim().split('\n');this.file=state;this.actas=actas;
     const key=`${encodePart(this.team)}__${encodePart(this.role)}`;
     this.reservation=path.join(root,'run',`read-reservation.${key}.json`);
@@ -57,7 +59,15 @@ export class Bridge {
     if(r.status!==0)console.error(`down notice ${action} failed: ${(r.stderr||'').trim()}`);
     return r.status===0;
   }
-  recoveryCommand(){return `bash ${path.join(here,'antigravity-monitor.sh')} --project ${this.project} --team ${this.team} --name ${this.role} --command status`;}
+  // A record left by an earlier bridge goes once this one is ready. A failed
+  // clear is not remembered as done: it is retried at most every 30 s.
+  clearStale() {
+    if(this.noticeCleared||Date.now()-this.noticeTried<this.noticeRetryMs)return;
+    this.noticeTried=Date.now();
+    if(this.notice('clear')){this.noticeCleared=true;this.noticed=false;}
+  }
+  monitorCommand(){return `bash ${shq(path.join(here,'antigravity-monitor.sh'))} --project ${shq(this.project)} --team ${shq(this.team)} --name ${shq(this.role)}`;}
+  recoveryCommand(){return `${this.monitorCommand()} --command status`;}
   trouble(kind,reason) {
     if(!this.troubles.has(kind))this.troubles.set(kind,{since:Date.now(),reason});
     const t=this.troubles.get(kind);t.reason=reason;
@@ -234,13 +244,14 @@ export class Bridge {
     if(this.phase==='ACK_PENDING')return;
     this.phase='IDLE';this.log('ready');
     // The first time this process is ready, a record left by an earlier bridge goes.
-    if(!this.noticeCleared){this.noticeCleared=true;if(this.notice('clear'))this.noticed=false;}
+    this.clearStale();
     if(initial&&this.replay){this.replay=false;await this.input(JSON.stringify(this.state.batch));}
   }
   async tick() {
     try {this.check();}
     catch(error) {if(error.code==='GUARD_BUSY'){this.trouble('guard',error.message);return;}throw error;}
     this.healthy('guard');
+    if(this.phase==='IDLE')this.clearStale();
     if(this.restarting)return;
     if(this.pendingResult) {
       const held=this.pendingResult;this.pendingResult=null;
@@ -281,7 +292,7 @@ export class Bridge {
     // The bridge ends here and nothing starts it again: say so, with the way back.
     const b=this.state?.batch;
     this.noticed=this.notice('set','down',`Antigravity delivery for ${this.role}@${this.team} stopped: ${error.message}${b?`; batch ${b.id} is kept unread (${b.phase}) and is not acknowledged or replayed on its own`:''}`,
-      b?`${this.recoveryCommand()} (then rerun with --action ack or --action replay --batch ${b.id} --confirm-ids <ids>)`:`bash ${path.join(here,'antigravity-monitor.sh')} --project ${this.project} --team ${this.team} --name ${this.role}`)||this.noticed;
+      b?`${this.recoveryCommand()} (then rerun with --action ack or --action replay --batch ${b.id} --confirm-ids <ids>)`:this.monitorCommand())||this.noticed;
     this.stop().catch(e=>console.error(e.message));
   }
   async stop() {

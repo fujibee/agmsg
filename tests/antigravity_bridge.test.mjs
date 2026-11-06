@@ -12,7 +12,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // so 15 seconds can misjudge a normal NEEDS_ATTENTION arrival as a timeout.
 // Raise the limit to 60 seconds.
 async function waitFor(fn){for(let i=0;i<600;i++){if(fn())return;await delay(100);}throw Error('wait timeout');}
-function fixture(driver='sqlite',mode='success',extra={},bridgeArgs=[]) {
+function fixture(driver='sqlite',mode='success',extra={},bridgeArgs=[],prepare=null) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'agmsg-agy-test-'));
   const install=path.join(dir,'install'),project=path.join(dir,'project');
   fs.mkdirSync(install);fs.mkdirSync(project);
@@ -24,6 +24,7 @@ function fixture(driver='sqlite',mode='success',extra={},bridgeArgs=[]) {
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
   sh('delivery.sh',['set','monitor','antigravity',project]);
+  if(prepare)prepare({dir,install,project,env});
   let output='';const child=spawn('bash',[path.join(install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',project,'--team','fixture','--name','worker','--agy',fake,'--poll','100',...bridgeArgs],{env,stdio:['pipe','pipe','pipe'],detached:true});
   const children=[child];
   child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
@@ -295,4 +296,25 @@ test('a busy violation lock delays delivery instead of ending the bridge',async(
     assert.equal(f.unread(),'');
     await waitFor(()=>notices(f).length===0);
   }catch(e){e.message+='\n'+f.output();throw e;}finally{try{holder?.kill();}catch{}await f.close();}
+});
+
+test('a stale down record whose first clear fails is cleared once the helper works again',async()=>{
+  let downDir;
+  const f=fixture('sqlite','success',{},['--notice-retry-ms','200'],({install,env})=>{
+    const lib=path.join(install,'scripts/lib/down-notice.sh');
+    const r=spawnSync('bash',['-c','source "$1"; down_notice_set "$(down_notice_key antigravity.bridge fixture/worker)" down "left by an earlier bridge" "restart it"',' x',lib],{env,encoding:'utf8'});
+    assert.equal(r.status,0,r.stderr);
+    downDir=path.join(install,'run','down');
+    fs.chmodSync(downDir,0o500);
+  });
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    await delay(600);
+    assert.equal(notices(f).length,1);
+    assert.match(f.output(),/down notice clear failed/);
+    fs.chmodSync(downDir,0o700);
+    await waitFor(()=>notices(f).length===0);
+    f.sh('send.sh',['fixture','sender','worker','after the repair']);
+    await waitFor(()=>f.state().batch===null&&f.output().includes('turn 2'));
+  }catch(e){e.message+='\n'+f.output();throw e;}finally{try{fs.chmodSync(downDir,0o700);}catch{}await f.close();}
 });
