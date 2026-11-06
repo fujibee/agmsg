@@ -174,6 +174,8 @@ pub struct OpenPane {
     pub pane: Option<PaneId>,
     /// Where this agent sits among the ones the same pane started (smaller is higher up); None = after the others.
     pub order: Option<u32>,
+    /// CLI tokens for the chosen reasoning effort, built by the app from a validated value (empty: none chosen).
+    pub effort_args: Vec<String>,
 }
 
 /// The real thing: agmsg's scripts, the process table, the window.
@@ -324,6 +326,9 @@ pub struct Entry {
     /// Where the terminal opens (see `Place`); entries written before this field existed have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<Place>,
+    /// The reasoning effort the add-on asked for (an id the type's model list offered); the CLI tokens are built from it at open.
+    #[serde(default)]
+    pub effort: Option<String>,
     pub state: State,
     pub pid: Option<u32>,
     pub start: Option<String>,
@@ -528,7 +533,7 @@ impl Manager {
         let project_s = project.to_string_lossy().into_owned();
         let key = format!("m-{claim}");
         self.update(|es| {
-            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, place: None, state: State::Claimed, pid: None, start: None, reason: None })
+            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, place: None, effort: None, state: State::Claimed, pid: None, start: None, reason: None })
         })?;
         // The lock covers the name decision and the claim. join.sh runs outside it: it takes core's own registry
         // lock for its read-modify-write of the team config, and the names are already distinct.
@@ -606,12 +611,22 @@ impl Manager {
         if !types.iter().any(|t| t.name == agent_type) {
             return Err(BrokerError::new("bad_args", format!("`{agent_type}` is not a type the app can start")));
         }
-        let (source, models, reason): (&str, Vec<ModelOption>, Option<String>) = match agent_type.as_str() {
+        let (source, models, reason) = self.model_list(&agent_type);
+        let mut out = json!({ "type": agent_type, "source": source, "models": models.iter().map(ModelOption::to_json).collect::<Vec<_>>() });
+        if let Some(r) = reason {
+            out["reason"] = json!(r);
+        }
+        Ok(out)
+    }
+
+    /// The choices for a (spawnable) type and where they came from; the Codex read is cached here.
+    fn model_list(&self, agent_type: &str) -> (&'static str, Vec<ModelOption>, Option<String>) {
+        match agent_type {
             "claude-code" => ("fixed", agent_models::claude_models(), None),
             "codex" => {
                 // held across the read: two panes asking at once start one process, not two
                 let mut cache = self.models.lock().unwrap();
-                let fresh = match cache.get(&agent_type) {
+                let fresh = match cache.get(agent_type) {
                     Some(c) if c.list.is_some() => true,
                     Some(c) => c.at.elapsed() < agent_models::FAILURE_BACKOFF,
                     None => false,
@@ -622,21 +637,34 @@ impl Manager {
                         Ok(l) => (Some(l), None),
                         Err(e) => (None, Some(e)),
                     };
-                    cache.insert(agent_type.clone(), ModelsCache { at: std::time::Instant::now(), list, reason });
+                    cache.insert(agent_type.to_string(), ModelsCache { at: std::time::Instant::now(), list, reason });
                 }
-                let c = cache.get(&agent_type).expect("just filled");
+                let c = cache.get(agent_type).expect("just filled");
                 match &c.list {
                     Some(l) => ("app-server", l.clone(), None),
                     None => ("fallback", agent_models::codex_fallback_models(), c.reason.clone()),
                 }
             }
             _ => ("none", Vec::new(), None),
-        };
-        let mut out = json!({ "type": agent_type, "source": source, "models": models.iter().map(ModelOption::to_json).collect::<Vec<_>>() });
-        if let Some(r) = reason {
-            out["reason"] = json!(r);
         }
-        Ok(out)
+    }
+
+    /// An `effort` for `agents.spawn`: only a value the chosen model's list offers (the asked-for model, else the
+    /// list's default) is accepted. Nothing else about the CLI's argv comes from the frame.
+    fn validate_effort(&self, agent_type: &str, model: Option<&str>, effort: &str) -> Result<(), BrokerError> {
+        if agent_models::effort_args(agent_type, effort).is_none() {
+            return Err(BrokerError::new("bad_args", format!("{agent_type} takes no effort of that form")));
+        }
+        let (_, models, _) = self.model_list(agent_type);
+        if models.is_empty() {
+            return Err(BrokerError::new("bad_args", format!("{agent_type} takes no effort")));
+        }
+        let m = agent_models::model_for_effort(&models, model).ok_or_else(|| BrokerError::new("bad_args", format!("`{}` is not a model {agent_type} lists, so its efforts are not known", model.unwrap_or(""))))?;
+        if !m.efforts.iter().any(|e| e.id == effort) {
+            let allowed = m.efforts.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(", ");
+            return Err(BrokerError::new("bad_args", format!("effort `{effort}` is not one of {allowed} for {}", m.id)));
+        }
+        Ok(())
     }
 
     fn agents_spawn(&self, a: &Authorized, deny: &Denylist, team: &str, tid: &str, args: &Value) -> Res {
@@ -669,6 +697,16 @@ impl Manager {
             Some(Value::String(f)) => Some(f.clone()),
             Some(_) => return Err(BrokerError::new("bad_args", "`folder` must be a string")),
         };
+        // Last of the argument checks: validating an effort may need the model list, which can start the one
+        // short-lived `codex app-server` when it has not been read yet, so the cheap type checks come first.
+        let effort = match args.get("effort") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(e)) => {
+                self.validate_effort(&agent_type, model.as_deref(), e)?;
+                Some(e.clone())
+            }
+            Some(_) => return Err(BrokerError::new("bad_args", "`effort` must be a string")),
+        };
         // 2. a retry: the entry for this requested name decides
         if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
             return self.retry(&e, model);
@@ -695,7 +733,7 @@ impl Manager {
         let claim = random_id();
         let key = format!("a-{claim}");
         self.update(|es| {
-            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), place: Some(Place { pane: a.id, order }), state: State::Claimed, pid: None, start: None, reason: None })
+            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), place: Some(Place { pane: a.id, order }), effort: effort.clone(), state: State::Claimed, pid: None, start: None, reason: None })
         })?;
         // The lock covers the name decision and the journal claim. join.sh runs outside it (core's registry lock
         // serialises the config writes themselves); the check after it is per name.
@@ -767,7 +805,7 @@ impl Manager {
                 None => return Err(BrokerError::new("not_available", "the entry is gone")),
             }
         }
-        let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone(), pane: e.place.as_ref().map(|p| p.pane), order: e.place.as_ref().and_then(|p| p.order) };
+        let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone(), pane: e.place.as_ref().map(|p| p.pane), order: e.place.as_ref().and_then(|p| p.order), effort_args: e.effort.as_deref().and_then(|f| agent_models::effort_args(&e.agent_type, f)).unwrap_or_default() };
         if let Err(why) = phase("spawn: emit open", || self.world.open_pane(&req)) {
             // the member stays joined and recorded; the add-on may ask again
             self.set_state(key, State::Joined, Some(why.clone()))?;
@@ -1378,6 +1416,82 @@ mod tests {
     }
 
     #[test]
+    fn an_effort_the_model_offers_reaches_the_window_as_fixed_cli_tokens() {
+        let f = fx(all_powers());
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white", "model": "opus", "effort": "xhigh"})).unwrap();
+        // no model asked: checked against the list's default model
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "gray", "effort": "max"})).unwrap();
+        *f.world.codex_answer.lock().unwrap() = Some(Ok(vec![ModelOption {
+            id: "gpt-x".into(), name: "GPT-X".into(), description: String::new(), is_default: true, default_effort: Some("low".into()),
+            efforts: ["low", "ultra"].iter().map(|e| agent_models::Effort { id: (*e).into(), description: String::new() }).collect(),
+        }]));
+        call(&f, "agents.spawn", json!({"type": "codex", "name": "black", "model": "gpt-x", "effort": "ultra"})).unwrap();
+        let opened = f.world.opened.lock().unwrap().clone();
+        let got = |n: &str| opened.iter().find(|o| o.name == n).unwrap().effort_args.clone();
+        assert_eq!(got("white"), ["--effort", "xhigh"]);
+        assert_eq!(got("gray"), ["--effort", "max"]);
+        assert_eq!(got("black"), ["-c", "model_reasoning_effort=ultra"]);
+        let none = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "plain"})).unwrap();
+        assert_eq!(none["state"], "running");
+        assert!(f.world.opened.lock().unwrap().iter().find(|o| o.name == "plain").unwrap().effort_args.is_empty());
+    }
+
+    #[test]
+    fn an_effort_the_model_does_not_offer_is_refused_before_anything_happens() {
+        let f = fx(all_powers());
+        *f.world.codex_answer.lock().unwrap() = Some(Ok(vec![ModelOption {
+            id: "gpt-x".into(), name: "GPT-X".into(), description: String::new(), is_default: true, default_effort: Some("low".into()),
+            efforts: vec![agent_models::Effort { id: "low".into(), description: String::new() }],
+        }]));
+        let cases = [
+            json!({"type": "codex", "name": "w", "model": "gpt-x", "effort": "ultra"}),
+            json!({"type": "codex", "name": "w", "model": "not-listed", "effort": "low"}),
+            json!({"type": "codex", "name": "w", "effort": "high"}),
+            json!({"type": "claude-code", "name": "w", "effort": "ultra"}),
+            json!({"type": "claude-code", "name": "w", "effort": "--evil"}),
+            json!({"type": "claude-code", "name": "w", "effort": "low; rm"}),
+            json!({"type": "claude-code", "name": "w", "effort": 3}),
+            json!({"type": "gemini", "name": "w", "effort": "low"}),
+        ];
+        for args in cases {
+            let e = call(&f, "agents.spawn", args.clone()).unwrap_err();
+            assert_eq!(e.code, "bad_args", "{args}: {}", e.message);
+        }
+        let e = call(&f, "agents.spawn", json!({"type": "codex", "name": "w", "model": "gpt-x", "effort": "ultra"})).unwrap_err();
+        assert!(e.message.contains("low"), "the allowed values are named: {}", e.message);
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 0, "nothing joined");
+        assert!(f.world.opened.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cheap_argument_errors_come_before_the_model_list_is_looked_up() {
+        let f = fx(all_powers());
+        for args in [
+            json!({"type": "codex", "name": "w", "effort": "low", "folder": 5}),
+            json!({"type": "codex", "name": "w", "effort": "low", "model": 7}),
+            json!({"type": "codex", "name": "..", "effort": "low"}),
+        ] {
+            assert_eq!(call(&f, "agents.spawn", args.clone()).unwrap_err().code, "bad_args", "{args}");
+        }
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 0, "no codex app-server was asked for a call that was malformed anyway");
+        // a well-formed one does look it up, once
+        call(&f, "agents.spawn", json!({"type": "codex", "name": "w", "effort": "low"})).unwrap();
+        assert_eq!(f.world.codex_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_resumed_agent_opens_with_the_effort_it_was_asked_for() {
+        let f = fx(all_powers());
+        *f.world.fail_open.lock().unwrap() = true;
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "black", "effort": "high"})).unwrap_err();
+        *f.world.fail_open.lock().unwrap() = false;
+        // the retry names no effort at all: the one recorded with the entry is used
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "black"})).unwrap();
+        let o = f.world.opened.lock().unwrap().clone();
+        assert_eq!(o.last().unwrap().effort_args, ["--effort", "high"]);
+    }
+
+    #[test]
     fn a_folder_comes_only_from_inside_the_granted_one() {
         let f = fx(all_powers());
         let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "w", "folder": "sub"})).unwrap();
@@ -1444,7 +1558,7 @@ mod tests {
     // ---- recovery -------------------------------------------------------------------
 
     fn entry(state: State, kind: Kind) -> Entry {
-        Entry { key: "k1".into(), addon: "o/chess".into(), team_id: "id-t".into(), team: "t".into(), kind, requested: "w".into(), name: "w".into(), agent_type: "claude-code".into(), project: "/p".into(), claim: "c".into(), model: None, place: None, state, pid: None, start: None, reason: None }
+        Entry { key: "k1".into(), addon: "o/chess".into(), team_id: "id-t".into(), team: "t".into(), kind, requested: "w".into(), name: "w".into(), agent_type: "claude-code".into(), project: "/p".into(), claim: "c".into(), model: None, place: None, effort: None, state, pid: None, start: None, reason: None }
     }
 
     fn with_entries(f: &Fx, es: Vec<Entry>) -> Manager {
