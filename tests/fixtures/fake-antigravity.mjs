@@ -7,6 +7,16 @@ const mode = process.env.FAKE_AGY_MODE || 'success';
 const args = process.argv.slice(2);
 const conversation = args.includes('--conversation') ? args[args.indexOf('--conversation') + 1] : 'fixture-conversation';
 let turn = 0;
+// Launch counting for the recovery tests: the first FAKE_AGY_BAD_LAUNCHES processes
+// misbehave the way FAKE_AGY_MODE says; later ones are healthy.
+let launch = 0;
+if (process.env.FAKE_AGY_COUNTER) {
+  fs.appendFileSync(process.env.FAKE_AGY_COUNTER, 'x\n');
+  launch = fs.readFileSync(process.env.FAKE_AGY_COUNTER, 'utf8').split('\n').filter(Boolean).length;
+}
+const bad = launch > 0 && launch <= Number(process.env.FAKE_AGY_BAD_LAUNCHES || 0);
+if (bad && mode === 'exit-at-start') process.exit(3);
+if (bad && mode === 'hang-at-start') { setInterval(() => {}, 1000); await new Promise(() => {}); }
 const emit = async (event) => {
   const line = JSON.stringify(event) + '\n';
   if (mode === 'split') {
@@ -33,6 +43,7 @@ for await (const line of createInterface({input: process.stdin})) {
     await emit({event:'step_update',step_update:{conversation_id:conversation,step_type:'tool',tool_name:'run_command',tool_info:{parameters:{CommandLine:'bash '+install+'/scripts/inbox.sh fixture worker'}}}});
   }
   if (mode === 'crash' && turn > 1) process.exit(7);
+  if (mode === 'hang-turn' && turn > 1) { setInterval(() => {}, 1000); await new Promise(() => {}); }
   if (mode === 'broken' && turn > 1) { process.stdout.write('{broken\n'); continue; }
   await emit({event:'step_update', step_update:{conversation_id:conversation, step_type:'agent_response', text_delta:`turn ${turn}`}});
   await emit({event:'result', result:{conversation_id:conversation, status:'SUCCESS', response:`turn ${turn}`}});
