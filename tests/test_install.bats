@@ -295,6 +295,90 @@ _agy_failing_mv_fixture() {
   grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
 }
 
+# A stand-in for a running agmsgd: listens on a socket recorded in install.db,
+# and on a stop request (obeying it unless told to hang) notes whether the
+# installed scripts were still the old ones, marks the owner "none" and exits.
+_fake_agmsgd() {   # <obey|hang>
+  local sock="$FAKE_HOME/d.sock" db="$SK/run/install.db"
+  rm -f "$sock"
+  node -e '
+    const net = require("node:net"); const fs = require("node:fs");
+    const { DatabaseSync } = require("node:sqlite");
+    const [sock, db, mode, marker, log] = process.argv.slice(1);
+    net.createServer((c) => { let b = "";
+      c.on("data", (d) => { b += d; if (!b.includes("\"stop\"")) return;
+        fs.appendFileSync(log, fs.readFileSync(marker, "utf8").includes("OLD-SCRIPT") ? "stop-before-swap\n" : "stop-after-swap\n");
+        if (mode === "obey") { const x = new DatabaseSync(db); x.exec("PRAGMA busy_timeout=5000; UPDATE daemon_owner SET state=\"none\", socket=NULL, executor_pid=NULL;"); x.close(); process.exit(0); }
+      });
+    }).listen(sock, () => fs.writeFileSync(log + ".up", "1"));
+  ' "$sock" "$db" "$1" "$SK/scripts/daemon.sh" "$FAKE_HOME/fake.log" &
+  FAKE_PID=$!
+  _agmsg_watch_pid "$FAKE_PID" "$sock"
+  local i=0
+  while [ ! -e "$FAKE_HOME/fake.log.up" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+  sqlite3 "$db" "UPDATE daemon_intent SET desired='on'; UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_owner SET state='ready', socket='$sock', executor_pid=$FAKE_PID;"
+}
+
+@test "install --update: a running agmsgd is stopped, and gone, before any script is replaced" {
+  _restore_install
+  printf '\n# OLD-SCRIPT\n' >> "$SK/scripts/daemon.sh"
+  _fake_agmsgd obey
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "agmsgd stopped before the update (exit confirmed)" <<<"$output"
+  [ "$(cat "$FAKE_HOME/fake.log")" = "stop-before-swap" ]
+  refute grep -q "OLD-SCRIPT" "$SK/scripts/daemon.sh"
+  [ "$(sqlite3 "$SK/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
+}
+
+@test "install --update: an agmsgd that does not exit within the bound is reported, and the update still finishes" {
+  _restore_install
+  _fake_agmsgd hang
+  run env HOME="$FAKE_HOME" AGMSG_UPDATE_STOP_WAIT=2 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "agmsgd has not exited after about 2s; the update goes on" <<<"$output"
+  grep -Fq "daemon stop, then daemon start" <<<"$output"
+  grep -Fq "Update complete" <<<"$output"
+}
+
+@test "install --update: a record that says ready for a process that is gone does not hold the update" {
+  _restore_install
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', socket='$FAKE_HOME/none.sock', executor_pid=999999;"
+  run env HOME="$FAKE_HOME" AGMSG_UPDATE_STOP_WAIT=20 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "agmsgd stopped before the update (exit confirmed)" <<<"$output"
+}
+
+# A process that exists but cannot be signalled must not be taken for one that
+# has exited: only "No such process" counts. The shell function stands in for
+# the builtin, as the extracted-function harnesses above do.
+_pid_gone_harness() {   # <kill message>
+  local fn; fn="$(sed -n '/^agmsg_install_pid_gone() {/,/^}/p' "$REPO_ROOT/install.sh")"
+  bash -c '
+    kill() { echo "$KILL_MSG" >&2; return 1; }
+    eval "$1"
+    agmsg_install_pid_gone 4242
+  ' _ "$fn"
+}
+
+@test "install --update: a pid that cannot be signalled (permission denied) is not treated as exited" {
+  KILL_MSG="kill: (4242) - Operation not permitted" run _pid_gone_harness
+  [ "$status" -eq 1 ]
+}
+
+@test "install --update: only 'No such process' means the executor is gone" {
+  KILL_MSG="kill: (4242) - No such process" run _pid_gone_harness
+  [ "$status" -eq 0 ]
+}
+
+@test "install --update: with no agmsgd running nothing about stopping is printed" {
+  _restore_install
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  refute grep -Fq "agmsgd stopped before the update" <(printf '%s' "$output")
+  refute grep -Fq "agmsgd has not exited" <(printf '%s' "$output")
+}
+
 @test "install --update: an owned Codex shim is removed while agmsgd is on, and put back once it is off" {
   _restore_install
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
