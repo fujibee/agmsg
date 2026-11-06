@@ -59,30 +59,51 @@ teardown() { teardown_test_env; }
   [ "$output" = 1 ]
   run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c2.json') AS TEXT), '\$.component');"
   [ "$output" = c2 ]
-  # The quote and the lone backslash are JSON-escaped, not rewritten into
-  # other characters -- sqlite's own JSON decoder recovers the exact
-  # original text (control characters still flattened to a space).
+  # The quote, the lone backslash AND the control characters are all
+  # JSON-escaped, not rewritten into other characters -- sqlite's own JSON
+  # decoder recovers the exact original text, newline/tab included.
   run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c2.json') AS TEXT), '\$.reason');"
-  [ "$output" = 'two lines and "quotes" and \ slash' ]
+  [ "$output" = $'two\nlines\tand "quotes" and \\ slash' ]
 }
 
-@test "set -> list/print round trip preserves space, apostrophe, backslash, double quote and newline exactly (down-notice.sh escaping fix)" {
-  local reason=$'a line with a space, an apostrophe (it'"'"'s), a "quote", a \\backslash and a' newline=$'\nnext line'
-  down_notice_set c3 down "${reason}${newline}" "recover"
+@test "set -> list/print round trip preserves space, apostrophe, backslash and double quote exactly (down-notice.sh escaping fix)" {
+  local reason
+  reason=$'a line with a space, an apostrophe (it'"'"'s), a "quote" and a \\backslash'
+  down_notice_set c3 down "$reason" "recover"
   run sqlite_mem "SELECT json_valid(CAST(readfile('$DIR/c3.json') AS TEXT));"
   [ "$output" = 1 ]
   run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c3.json') AS TEXT), '\$.reason');"
-  # The newline became a space (records stay one line); everything else,
-  # including the apostrophe, the quote and the backslash, is intact.
-  [ "$output" = $'a line with a space, an apostrophe (it'"'"'s), a "quote", a \\backslash and a next line' ]
+  [ "$output" = "$reason" ]
   run down_notice_list
   local field
   field="$(printf '%s\n' "$output" | awk -F'\t' '{print $4}')"
-  [ "$field" = $'a line with a space, an apostrophe (it'"'"'s), a "quote", a \\backslash and a next line' ]
+  [ "$field" = "$reason" ]
+}
+
+@test "a control character in free text is JSON-escaped and kept (not flattened to a space), but down_notice_list shows its literal escape text, not a raw control byte" {
+  down_notice_set c3b down $'a\tb\nc' "recover"
+  run sqlite_mem "SELECT json_valid(CAST(readfile('$DIR/c3b.json') AS TEXT));"
+  [ "$output" = 1 ]
+  # The RECORD holds the real control characters (sqlite's own JSON decoder,
+  # unescaping \t and \n, recovers the raw bytes) --
+  run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c3b.json') AS TEXT), '\$.reason');"
+  [ "$output" = $'a\tb\nc' ]
+  # -- but down_notice_list is one-record-per-line TSV, so ITS OWN decoder
+  # leaves \t/\n as that literal two-character escape text rather than
+  # turning them back into a real tab/newline, which would break the
+  # framing. An install path (or any other free text) containing a literal
+  # control character is accordingly not a supported case for an
+  # executable saved recovery command -- nothing refuses or fails over it.
+  run down_notice_list
+  local field
+  field="$(printf '%s\n' "$output" | awk -F'\t' '{print $4}')"
+  [ "$field" = 'a\tb\nc' ]
 }
 
 @test "set -> list persists a single-quote-escaped recovery command for an apostrophe-containing path, executable as-is (down-notice.sh escaping fix)" {
-  local side="$BATS_TEST_TMPDIR/dn-test-side's install" path="$side/scripts/agmsg" shq recovery
+  local side path shq recovery
+  side="$BATS_TEST_TMPDIR/dn-test-side's install"
+  path="$side/scripts/agmsg"
   shq="'$(printf '%s' "$path" | sed "s/'/'\\\\''/g")'"
   recovery="$shq daemon start"
   down_notice_set c4 down "stopped" "$recovery"
@@ -324,14 +345,23 @@ teardown() { teardown_test_env; }
   done
 }
 
-@test "every control character in free text becomes a space, so the record is valid JSON" {
+@test "every control character in free text is \\u00XX-escaped, so the record is valid JSON and the raw byte round-trips" {
   local sh
   for sh in /bin/bash bash; do
     "$sh" -c '. "$1"; down_notice_set esc degraded $'"'"'colored\033[31m error\bx\001y'"'"' "agmsg doctor"' _ "$SCRIPTS/lib/down-notice.sh"
     run sqlite_mem "SELECT json_valid(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT));"
     [ "$output" = 1 ]
-    run sqlite_mem "SELECT json_extract(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT), '\$.reason');"
-    [ "$output" = "colored [31m error x y" ]
+    # Not sqlite3's own CLI output for the control-character byte check: the
+    # sqlite3 binary renders control characters as ^X caret notation in its
+    # own query output, which looks deceptively similar but is NOT the raw
+    # byte -- python's json module gives the actual decoded byte.
+    run python3 -I -c "
+import json
+with open('$TEST_SKILL_DIR/run/down/esc.json') as f:
+    d = json.load(f)
+print('MATCH' if d['reason'] == 'colored\x1b[31m error\bx\x01y' else repr(d['reason']))
+"
+    [ "$output" = MATCH ]
   done
 }
 
