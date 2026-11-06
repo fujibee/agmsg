@@ -569,7 +569,7 @@ test('one unusable team is skipped alone: the other teams are still notified and
 
 // --- #1910: a live seat whose recorded socket is gone ---
 
-function missingSocketFixture(t, lookup, socketAlive = null) {
+function missingSocketFixture(t, lookup, socketAlive = null, alive = () => true) {
   const calls = { sets: [], clears: [], sends: [], lookups: 0 };
   const { db, state } = channelFixture(t);
   state.record = { messaging_token: 'tok-1' };
@@ -579,7 +579,7 @@ function missingSocketFixture(t, lookup, socketAlive = null) {
     now: () => Date.UTC(2026, 9, 14) + state.minutes * 60_000,
     socketAlive: socketAlive ?? ((p) => (p === state.socket ? { state: 'unreadable', reason: 'messaging_socket_missing' } : { state: 'ok' })),
     lookupSession: async (args) => { calls.lookups += 1; calls.args = args; return lookup(state); },
-    alive: () => true,
+    alive,
     send: async (args) => { calls.sends.push(args); return { state: 'sent' }; },
     downSet: (key, st, reason, recovery) => { calls.sets.push({ key, st, reason, recovery }); return true; },
     downClear: (key) => { calls.clears.push(key); return true; },
@@ -694,4 +694,22 @@ test('a clear that failed is tried again on the next healthy poll', async (t) =>
   await channel.pollOnce();
   assert.equal(clears.length, 2, 'false then true: two calls, then no more');
   await channel.stop();
+});
+
+test('a cached pid that cannot be checked is unknown: the seat is degraded, not ended, and no record is cleared', async (t) => {
+  let pid = true;
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }),
+    (p) => (p === '/tmp/cc-socks/9.sock' && pid === true ? { state: 'ok' } : { state: 'unreadable', reason: 'messaging_socket_missing' }),
+    () => pid);
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.length, 1);
+  const clearsBefore = f.calls.clears.length;
+  pid = null;
+  f.state.minutes = 0.5; await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'degraded');
+  assert.match(f.calls.sets[0].reason, /session_pid_unreadable/);
+  assert.equal(f.calls.clears.length, clearsBefore);
+  assert.notEqual(f.db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'session_ended');
 });

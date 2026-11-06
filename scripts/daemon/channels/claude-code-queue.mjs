@@ -278,8 +278,12 @@ export function createClaudeCodeQueueChannel({
       if (found.get(seat)?.identity !== identity) found.delete(seat);
       if (lastLookup.get(seat)?.identity !== identity) lastLookup.delete(seat);
       const cached = found.get(seat);
-      if (cached && alive(cached.pid) && socketAlive(cached.socket).state === "ok") {
+      const cachedAlive = cached ? alive(cached.pid) : false;
+      if (cached && cachedAlive === true && socketAlive(cached.socket).state === "ok") {
         socketPath = cached.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
+      } else if (cached && cachedAlive === null) {
+        // The pid check failed: keep the cache, and do not call the session ended or down.
+        lookupState = "unknown"; lookupReason = "session_pid_unreadable";
       } else {
         found.delete(seat);
         const before = lastLookup.get(seat);
