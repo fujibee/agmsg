@@ -9,6 +9,9 @@ import {
   firstSight,
   mergeById,
   routeMessage,
+  hasNoTerminalByDesign,
+  knownTypes,
+  loadRoster,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -29,6 +32,7 @@ import {
   teamActionInvocation,
   type LoginShellInfo,
 } from "./App";
+import { createLatestOnly } from "./latestOnly";
 import { RailAvatar, SidebarUser, type Translate } from "./SidebarUser";
 
 describe("actasSpawnArgs", () => {
@@ -582,5 +586,61 @@ describe("renameTeamKey", () => {
     const prevTeamRefAfterFix = "new-team";
     byTeam = { ...byTeam, [prevTeamRefAfterFix]: "w-1" };
     expect(Object.keys(byTeam)).toEqual(["new-team"]);
+  });
+});
+
+describe("members with no terminal by design", () => {
+  it("recognises the app user and add-on members, not terminal agents", () => {
+    expect(hasNoTerminalByDesign(["agmsg-app"])).toBe(true);
+    expect(hasNoTerminalByDesign(["app-addon"])).toBe(true);
+    expect(hasNoTerminalByDesign(["claude"])).toBe(false);
+    expect(hasNoTerminalByDesign([])).toBe(false);
+  });
+
+  const mem = (name: string, ...types: string[]) => ({ name, types, project: "" });
+
+  it("reads types from the roster only for the team it was fetched for, and never fetches", () => {
+    const roster = { team: "t", list: [mem("chess", "app-addon"), mem("you", "agmsg-app"), mem("white", "claude")] };
+    expect(knownTypes(roster, "t", "chess")).toEqual(["app-addon"]);
+    expect(knownTypes(roster, "t", "you")).toEqual(["agmsg-app"]);
+    expect(knownTypes(roster, "t", "white")).toEqual(["claude"]);
+    expect(knownTypes(roster, "t", "ghost")).toBeUndefined();
+    expect(knownTypes(roster, "other", "chess")).toBeUndefined();
+    expect(knownTypes(null, "t", "chess")).toBeUndefined();
+  });
+
+  it("the same name with different types in two teams is never mixed up, across a switch with a fetch pending", async () => {
+    const latest = createLatestOnly();
+    let adopted: { team: string; list: unknown[] } | null = null;
+    const adopt = (r: { team: string; list: unknown[] }) => (adopted = r);
+    const gates: Record<string, (v: ReturnType<typeof mem>[]) => void> = {};
+    const fetchMembers = (team: string) => new Promise<ReturnType<typeof mem>[]>((res) => (gates[team] = res));
+    const a = loadRoster(latest, fetchMembers as never, "A", adopt as never);
+    gates.A([mem("same", "app-addon")]);
+    await a;
+    expect((adopted as never as { team: string }).team).toBe("A");
+    // switch to B: its fetch is pending, A's roster is still held
+    const b = loadRoster(latest, fetchMembers as never, "B", adopt as never);
+    expect(knownTypes(adopted as never, "B", "same")).toBeUndefined();
+    expect(knownTypes(adopted as never, "A", "same")).toEqual(["app-addon"]);
+    gates.B([mem("same", "claude")]);
+    await b;
+    expect(knownTypes(adopted as never, "B", "same")).toEqual(["claude"]);
+    expect(knownTypes(adopted as never, "A", "same")).toBeUndefined();
+  });
+
+  it("a response for a team already switched away from is dropped", async () => {
+    const latest = createLatestOnly();
+    let adopted: { team: string } | null = null;
+    const adopt = (r: { team: string }) => (adopted = r);
+    const gates: Record<string, (v: ReturnType<typeof mem>[]) => void> = {};
+    const fetchMembers = (team: string) => new Promise<ReturnType<typeof mem>[]>((res) => (gates[team] = res));
+    const a = loadRoster(latest, fetchMembers as never, "A", adopt as never);
+    const b = loadRoster(latest, fetchMembers as never, "B", adopt as never);
+    gates.B([mem("same", "claude")]);
+    await b;
+    gates.A([mem("same", "app-addon")]);
+    expect(await a).toEqual([mem("same", "app-addon")]);
+    expect((adopted as never as { team: string }).team).toBe("B");
   });
 });

@@ -307,6 +307,38 @@ type Modal =
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
 export const APP_USER_TYPE = "agmsg-app";
+// The type an add-on's own member joins with (it reads through the broker, not a terminal).
+export const ADDON_MEMBER_TYPE = "app-addon";
+
+// A member with no terminal by design: the app's own user and add-on members. A message for one is not a missed
+// notice, so it is not logged as one.
+export function hasNoTerminalByDesign(types: ReadonlyArray<string>): boolean {
+  return types.includes(APP_USER_TYPE) || types.includes(ADDON_MEMBER_TYPE);
+}
+
+// A member list and the team it was fetched for.
+export type Roster = { team: string; list: Member[] };
+
+// The types of `name` from the roster the app already holds. Undefined when the roster is for another team than the
+// message's, or does not have the name: nothing is fetched to find out, and a name in one team says nothing about
+// the same name in another.
+export function knownTypes(roster: Roster | null, msgTeam: string, name: string): string[] | undefined {
+  return roster && roster.team === msgTeam ? roster.list.find((m) => m.name === name)?.types : undefined;
+}
+
+// Fetch a team's members and adopt them only if no later fetch has started since (a response for a team the user
+// has already switched away from is dropped, however late it arrives). Always returns what was fetched.
+export async function loadRoster(
+  latest: ReturnType<typeof createLatestOnly>,
+  fetchMembers: (team: string) => Promise<Member[]>,
+  team: string,
+  adopt: (roster: Roster) => void,
+): Promise<Member[]> {
+  const current = latest.start();
+  const list = await fetchMembers(team);
+  if (current()) adopt({ team, list });
+  return list;
+}
 // Team-room history page size — the initial load, and each scroll-up "load more".
 const ROOM_PAGE_SIZE = 30;
 // Persists which team was selected across restarts. Window/pane state is
@@ -593,6 +625,7 @@ export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
+  const rosterRef = useRef<Roster | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
@@ -983,11 +1016,15 @@ export default function App() {
     return t;
   }, []);
 
-  const loadMembers = useCallback(async (t: string) => {
-    const m = await invoke<Member[]>("agmsg_members", { team: t });
-    setMembers(m);
-    return m;
-  }, []);
+  const rosterLoadRef = useRef(createLatestOnly());
+  const loadMembers = useCallback(
+    (t: string) =>
+      loadRoster(rosterLoadRef.current, (x) => invoke<Member[]>("agmsg_members", { team: x }), t, (r) => {
+        rosterRef.current = r;
+        setMembers(r.list);
+      }),
+    [],
+  );
 
   // The agmsg slash-command name, for the `/<cmd> actas <name>` boot prompt.
   useEffect(() => {
@@ -1228,7 +1265,13 @@ export default function App() {
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
-      if (!pane) appLog(`notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}`);
+      if (!pane) {
+        const types = knownTypes(rosterRef.current, e.payload.team, e.payload.to);
+        if (!types || !hasNoTerminalByDesign(types))
+          appLog(
+            `notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}${types ? "" : " (member type not known here)"}`,
+          );
+      }
       if (feed) setMessages((prev) => appendIfNew(prev, e.payload));
       if (pane && !firstSight(noticedRef.current, pane.id, e.payload.id)) {
         appLog(`notice not typed: message ${e.payload.id} was already typed into ${pane.id}`);
