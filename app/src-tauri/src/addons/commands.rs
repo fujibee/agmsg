@@ -456,6 +456,41 @@ pub fn listen_for_live_messages<R: Runtime>(app: &AppHandle<R>, host: Arc<AddonH
     });
 }
 
+/// Largest report the window may make: a batch of notices has a few ids, never this many.
+const MAX_NOTICE_IDS: usize = 50;
+const MAX_NOTICE_ID_LEN: usize = 100;
+
+/// What to push, and to which panes, after the app typed a notice into an agent's pane. `owner` is the agent's
+/// (add-on, team, member) from the journal; only panes of that add-on that hold the spawn power for that team are
+/// told. A report with no ids, too many, or an odd id is dropped whole.
+pub fn notice_pushes(registry: &Registry, owner: Option<(String, String, String)>, ids: &[String], at: u64) -> Vec<(PaneId, u64, Value)> {
+    let Some((addon, team, name)) = owner else { return Vec::new() };
+    if ids.is_empty() || ids.len() > MAX_NOTICE_IDS || ids.iter().any(|i| i.is_empty() || i.len() > MAX_NOTICE_ID_LEN) {
+        return Vec::new();
+    }
+    registry
+        .panes_holding_spawn(&addon, &team)
+        .into_iter()
+        .map(|(pane, generation)| (pane, generation, feed::notice_event(&name, at, ids)))
+        .collect()
+}
+
+/// The window typed a turn notice into the pane of the agent `key` (an agent an add-on started) at `at`, ms since
+/// epoch. Tells that add-on's panes, once per call, and nothing else: a pane with a different add-on, a team it
+/// does not hold the spawn power for, or a key that is not an agent gets nothing. One call per typed notice, no
+/// process.
+#[tauri::command]
+pub fn addon_notice_typed<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, key: String, ids: Vec<String>, at: u64) {
+    let owner = super::agents::global().and_then(|m| m.agent_owner(&key));
+    let pushes = notice_pushes(&host.panes.registry.lock().unwrap(), owner, &ids, at);
+    for (pane, generation, event) in pushes {
+        // re-check right before sending: the grant may have changed since
+        if host.panes.registry.lock().unwrap().authorize(pane, generation, Need::Spawn).is_ok() {
+            let _ = app.emit(PUSH_EVENT, json!({ "pane": pane, "generation": generation, "event": event }));
+        }
+    }
+}
+
 /// The watcher's `Message` has exactly the feed fields; keep only those.
 fn strip_to_feed(payload: &str) -> String {
     payload.to_string()
@@ -645,5 +680,79 @@ mod tests {
         assert!(panes.feeds.lock().unwrap().is_empty());
         assert!(panes.registry.lock().unwrap().authorize(a.id, g, Need::Current).is_err());
         assert!(panes.close_all().is_empty());
+    }
+
+    // ---- the notice report (the window typed a turn notice into an add-on agent's pane)
+
+    fn spawn_pane(r: &mut Registry, addon: &str, team: &str) -> (PaneId, u64) {
+        use crate::addons::panes::Power;
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"<div></div>".to_vec());
+        let id = r
+            .add(AddPane {
+                addon: addon.into(),
+                commit: "c".into(),
+                name: "n".into(),
+                payload: Payload::Embedded(files),
+                entry: "index.html".into(),
+                declared: Declared { team_join: true, messages_send: true, agents_spawn: true, ..Default::default() },
+                open_args: OpenArgs::default(),
+                expected_digest: None,
+                pinned: None,
+                on_tamper: None,
+            })
+            .unwrap()
+            .id;
+        let g = r.begin_generation(id).unwrap();
+        r.grant_team(id, team).unwrap();
+        r.set_power(id, Power::Join, true).unwrap();
+        r.set_power(id, Power::Spawn, true).unwrap();
+        (id, g)
+    }
+
+    fn owner(addon: &str, team: &str, name: &str) -> Option<(String, String, String)> {
+        Some((addon.into(), team.into(), name.into()))
+    }
+
+    #[test]
+    fn a_typed_notice_is_reported_only_to_the_owning_add_ons_panes_for_that_team() {
+        let mut r = Registry::new();
+        let (mine, g) = spawn_pane(&mut r, "o/r", "t");
+        let (_other_addon, _) = spawn_pane(&mut r, "x/y", "t");
+        let (_other_team, _) = spawn_pane(&mut r, "o/r", "u");
+        let ids = vec!["m1".to_string()];
+        let out = notice_pushes(&r, owner("o/r", "t", "white"), &ids, 1234);
+        assert_eq!(out.len(), 1, "one pane: the owner's, in that team");
+        assert_eq!((out[0].0, out[0].1), (mine, g));
+        assert_eq!(out[0].2, json!({ "agmsg": 1, "type": "notice", "name": "white", "at": 1234, "ids": ["m1"] }));
+        assert!(!out[0].2.to_string().contains("body"), "no text goes along");
+    }
+
+    #[test]
+    fn a_report_for_something_that_is_not_an_add_on_agent_pushes_nothing() {
+        let mut r = Registry::new();
+        spawn_pane(&mut r, "o/r", "t");
+        assert!(notice_pushes(&r, None, &["m1".to_string()], 1).is_empty(), "no journal agent behind the key");
+    }
+
+    #[test]
+    fn a_report_with_no_ids_too_many_or_an_odd_one_is_dropped() {
+        let mut r = Registry::new();
+        spawn_pane(&mut r, "o/r", "t");
+        let o = || owner("o/r", "t", "white");
+        assert!(notice_pushes(&r, o(), &[], 1).is_empty());
+        assert!(notice_pushes(&r, o(), &vec!["x".to_string(); MAX_NOTICE_IDS + 1], 1).is_empty());
+        assert!(notice_pushes(&r, o(), &["".to_string()], 1).is_empty());
+        assert!(notice_pushes(&r, o(), &["y".repeat(MAX_NOTICE_ID_LEN + 1)], 1).is_empty());
+        assert_eq!(notice_pushes(&r, o(), &vec!["x".to_string(); MAX_NOTICE_IDS], 1).len(), 1);
+    }
+
+    #[test]
+    fn a_pane_that_lost_the_spawn_power_is_no_longer_told() {
+        use crate::addons::panes::Power;
+        let mut r = Registry::new();
+        let (id, _) = spawn_pane(&mut r, "o/r", "t");
+        r.set_power(id, Power::Spawn, false).unwrap();
+        assert!(notice_pushes(&r, owner("o/r", "t", "white"), &["m1".to_string()], 1).is_empty());
     }
 }

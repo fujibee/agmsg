@@ -472,6 +472,11 @@ impl Manager {
         self.journal.lock().unwrap().entries.iter().find(|e| e.addon == addon && e.team_id == tid && e.kind == Kind::Member && e.state == State::Joined).cloned()
     }
 
+    /// Who an agent belongs to: its add-on, its team's name and its member name, from its journal key.
+    pub fn agent_owner(&self, key: &str) -> Option<(String, String, String)> {
+        self.journal.lock().unwrap().entries.iter().find(|e| e.key == key && e.kind == Kind::Agent).map(|e| (e.addon.clone(), e.team.clone(), e.name.clone()))
+    }
+
     /// Every entry of one add-on in one team, for the add-on's own `agents.list` and the app's settings.
     pub fn entries_for(&self, addon: &str, tid: &str) -> Vec<Entry> {
         self.journal.lock().unwrap().entries.iter().filter(|e| e.addon == addon && e.team_id == tid).cloned().collect()

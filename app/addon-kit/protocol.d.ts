@@ -19,6 +19,24 @@ export interface InitEvent {
   team: string;
   members: Member[];
   messages: Message[]; // at most 500, newest kept
+  /**
+   * The app reports `notice` events (below). Absent with an older app: the add-on must then work without them.
+   * The kit shows it as `app.canReportDelivery`.
+   */
+  notice?: boolean;
+}
+
+/**
+ * The app typed a notice into the terminal of an agent THIS add-on started, in a team where the pane holds
+ * `agents:spawn`. Pushed only to that add-on's panes, once per typed notice, carrying no text.
+ *  - name: the agent's member name
+ *  - at:   when the notice was typed (ms since epoch)
+ *  - ids:  the ids of the messages the notice was about, to match against messages the add-on sent
+ */
+export interface NoticeEvent {
+  name: string;
+  at: number;
+  ids: string[];
 }
 
 /**
