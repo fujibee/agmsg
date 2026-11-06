@@ -11,6 +11,14 @@ setup() {
 }
 
 teardown() {
+  # Unconditional cleanup: several tests in this file start a real resident
+  # agmsgd and make several fallible assertions before their own explicit
+  # `stop`. A failed assertion mid-test would otherwise skip that `stop` and
+  # leak a live process into the next test. Run first, before the
+  # plist-removal safety net below, and tolerate "nothing to stop".
+  if [ -n "${TEST_SKILL_DIR:-}" ] && [ -n "${DAEMON:-}" ]; then
+    bash "$DAEMON" stop >/dev/null 2>&1 || true
+  fi
   # Safety net: recompute this test's own unit id/plist path the same way
   # daemon.sh does and remove that exact, deterministic file -- never a
   # glob or a freshly-recomputed variable standing in for "whatever is
@@ -227,7 +235,11 @@ _assert_start_result() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on'; DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','executor missing',0);"
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped'
   [ "$status" -eq 0 ]
-  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  # Not asserted here: the detached self-heal child can already have
+  # started, become ready, and cleared the notice by the time this line
+  # runs, so a single immediate check for the notice's presence is racy.
+  # The state=ready poll below, and the notice-cleared poll after it, are
+  # what this test actually needs to confirm.
   local tries=0 state
   while [ "$tries" -lt 50 ]; do
     state="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"

@@ -849,6 +849,28 @@ EOF
   [ "$(cat "$fake/tries")" = 1 ]
 }
 
+@test "agmsg_install_restart_daemon: a guarded skip (desired/op_gen changed while waiting) exits 0 but is NOT treated as confirmed running, so an existing down_notice is left in place" {
+  local fns fake="$FAKE_HOME/fake-skill3"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',9); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  ( . "$fake/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$fake/run/down/agmsgd.json" ]
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+# cmd_start's own guarded-skip path (scripts/daemon.sh): desired/op_gen
+# moved on between this read and the guarded UPDATE, so it exits 0
+# having started nothing.
+echo "agmsg daemon start: agmsgd was turned off or changed while waiting; left as it is now"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.

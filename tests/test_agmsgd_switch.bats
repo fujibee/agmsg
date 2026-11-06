@@ -400,14 +400,37 @@ WRAPPER
 @test "self-heal never re-triggers itself (AGMSG_DAEMON_SELF_HEAL guard, no recursion)" {
   # Point daemon.sh at a shim that would record a call if one ever happened,
   # so the guard's effect is checked by its absence, not just the function's
-  # own early return.
-  mkdir -p "$TEST_SKILL_DIR/selfheal-root/scripts"
+  # own early return. A VALID op_gen is seeded (review round 2 NEEDS FIX:
+  # without one, _agmsg_daemon_self_heal returns before the guard even
+  # matters, via its own op_gen read failing, so this would pass whether or
+  # not the guard worked at all) -- the positive control right after this
+  # proves that, with the guard out of the way, this same root's state DOES
+  # make the function call through.
+  mkdir -p "$TEST_SKILL_DIR/selfheal-root/scripts" "$TEST_SKILL_DIR/selfheal-root/run"
   printf '#!/usr/bin/env bash\necho called >> "%s/selfheal-called"\n' "$TEST_SKILL_DIR" > "$TEST_SKILL_DIR/selfheal-root/scripts/daemon.sh"
   chmod +x "$TEST_SKILL_DIR/selfheal-root/scripts/daemon.sh"
+  sqlite3 "$TEST_SKILL_DIR/selfheal-root/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',4);"
   run env AGMSG_DAEMON_SELF_HEAL=1 bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_DAEMON_ROOT="$1"; _agmsg_daemon_self_heal; echo done' _ "$TEST_SKILL_DIR/selfheal-root"
   [ "$status" -eq 0 ]
   [ "$output" = done ]
+  # The spawn (when the guard does not stop it) is a detached background
+  # process, so a call that should NOT happen can still land a moment
+  # after this line returns -- give it the same window the positive
+  # control below waits up to, instead of a single immediate check that a
+  # slow-to-land call would silently pass.
+  sleep 1
   [ ! -f "$TEST_SKILL_DIR/selfheal-called" ]
+}
+
+@test "self-heal positive control: the same seeded root calls through when the guard does not apply" {
+  mkdir -p "$TEST_SKILL_DIR/selfheal-root2/scripts" "$TEST_SKILL_DIR/selfheal-root2/run"
+  printf '#!/usr/bin/env bash\necho called >> "%s/selfheal-called2"\n' "$TEST_SKILL_DIR" > "$TEST_SKILL_DIR/selfheal-root2/scripts/daemon.sh"
+  chmod +x "$TEST_SKILL_DIR/selfheal-root2/scripts/daemon.sh"
+  sqlite3 "$TEST_SKILL_DIR/selfheal-root2/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',4);"
+  run env -u AGMSG_DAEMON_SELF_HEAL bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_DAEMON_ROOT="$1"; _agmsg_daemon_self_heal; for i in $(seq 1 50); do [ -f "$2/selfheal-called2" ] && break; sleep 0.1; done; echo done' _ "$TEST_SKILL_DIR/selfheal-root2" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = done ]
+  [ -f "$TEST_SKILL_DIR/selfheal-called2" ]
 }
 
 @test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {

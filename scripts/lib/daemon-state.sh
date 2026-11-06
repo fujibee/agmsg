@@ -248,7 +248,12 @@ agmsg_daemon_warn_if_stopped() {
   # Record it (doctor / status / session-start show this) whenever the
   # state is unambiguously "stopped" -- not for "unchecked"/"unverifiable",
   # which are "cannot tell", not "down" (#1821, #1872's own distinction).
-  [ "$AGMSGD_HEALTH" != stopped ] || down_notice_set agmsgd down "$AGMSGD_REASON" "agmsg daemon start" || :
+  # A persisted recovery COMMAND, not text for a person to read: the bare
+  # word "agmsg" would run whichever install owns that name on PATH, not
+  # necessarily this one -- a --cmd side install's own agmsg wrapper is
+  # the one that must actually recover it (same reasoning as #1927).
+  [ "$AGMSGD_HEALTH" != stopped ] || down_notice_set agmsgd down "$AGMSGD_REASON" \
+    "$(printf '%q' "$_AGMSG_DAEMON_ROOT/scripts/agmsg") daemon start" || :
   if [ "${1:-}" = always ]; then
     agmsg_daemon_recovery_text >&2
     return 0

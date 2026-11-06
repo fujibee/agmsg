@@ -260,27 +260,47 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     esac
   fi
   printf '%s\n' "$start_output"
-  # down-notice.sh resolves its own install root from where IT is sourced
-  # from, not from any variable -- so the copy that matters here is the
-  # one inside the install being updated ($skill), never this installer
-  # script's own location (can be a world away: an npx tarball, this dev
-  # repo, ...). Sourced in a subshell so its own include guard never
-  # suppresses a later, correct source of a different install's copy.
+  # `start --only-if-op-gen` exits 0 both when it actually starts agmsgd
+  # AND when it skips because the intent changed while it waited (the
+  # exact guard that keeps a concurrent stop/disable from being undone,
+  # scripts/daemon.sh's cmd_start) -- rc alone is not a positive
+  # observation that agmsgd is actually up. Only its own "running" /
+  # "already running" lines confirm that; anything else (including the
+  # guarded-skip line) must leave an existing down record as it is.
+  case "$start_output" in
+    *'agmsg daemon start: running'*|*'agmsg daemon start: already running'*)
+      start_rc=0
+      ;;
+    *)
+      [ "$start_rc" -ne 0 ] || start_rc=3
+      ;;
+  esac
   if [ "$start_rc" -eq 0 ]; then
     # A later run (another --update, or a manual `agmsg daemon start`)
     # may be recovering from an EARLIER failed attempt; this success
-    # clears that stale record.
+    # clears that stale record. down-notice.sh resolves its own install
+    # root from where IT is sourced from, not from any variable -- so the
+    # copy that matters here is the one inside the install being updated
+    # ($skill), never this installer script's own location (can be a
+    # world away: an npx tarball, this dev repo, ...). Sourced in a
+    # subshell so its own include guard never suppresses a later, correct
+    # source of a different install's copy.
     ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_clear agmsgd ) || true
+  elif [ "$start_rc" -eq 3 ]; then
+    : # guarded skip: desired/op_gen changed while waiting; nothing to report or record here
   else
     echo "  ! agmsgd did not start after the update; run: bash $(printf '%q' "$skill/scripts/agmsg") daemon start" >&2
     # This was the installer's one restart attempt (decision 11-04,
     # S01/S14): record it so it is not only a line in this terminal --
     # `agmsg doctor`, `agmsg daemon status`, and the next session-start
     # all surface it, so the enabled intent stays visibly recoverable
-    # (`agmsg daemon start`) even once this terminal is gone.
+    # even once this terminal is gone. The recorded command names THIS
+    # install's own agmsg wrapper ($skill), not the bare word "agmsg" --
+    # a --cmd side install must recover itself, not whichever install
+    # happens to own that name on PATH (same reasoning as #1927).
     ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_set agmsgd down \
       "agmsgd did not start after the update" \
-      "agmsg daemon start" ) || true
+      "$(printf '%q' "$skill/scripts/agmsg") daemon start" ) || true
   fi
   rm -f "$skill/run/agmsgd-updating"
 }
