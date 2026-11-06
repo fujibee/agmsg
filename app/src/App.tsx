@@ -1265,6 +1265,7 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
+      appLog(`message ${e.payload.id} ${e.payload.from} -> ${e.payload.to} received at ${Date.now()} ms`);
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
       if (!pane) {
         const types = knownTypes(rosterRef.current, e.payload.team, e.payload.to);
