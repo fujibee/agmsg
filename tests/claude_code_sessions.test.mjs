@@ -65,11 +65,11 @@ test('the down record key and file are the ones scripts/lib/down-notice.sh uses'
   const root = mkdtempSync(path.join(os.tmpdir(), 'agmsg-down-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const lib = path.resolve('scripts/lib/down-notice.sh');
-  for (const text of ['agmsg/tl2', 'My Team/Ünï "x"', 'a'.repeat(200)]) {
+  for (const text of ['agmsg/lead', 'My Team/Ünï "x"', 'a'.repeat(200)]) {
     const shell = execFileSync('bash', ['-c', '. "$1"; down_notice_key agmsgd.seat "$2"', 'x', lib, text], { encoding: 'utf8' }).trim();
     assert.equal(downNoticeKey('agmsgd.seat', text), shell);
   }
-  const key = downNoticeKey('agmsgd.seat', 'agmsg/tl2');
+  const key = downNoticeKey('agmsgd.seat', 'agmsg/lead');
   assert.equal(downNoticeSet(root, key, 'down', 'why "q"', 'run it', () => Date.UTC(2026, 10, 4, 12)), true);
   const listed = execFileSync('bash', ['-c', `AGMSG_DOWN_NOTICE_ROOT="$1"; . "$2"; down_notice_list`, 'x', root, lib], { encoding: 'utf8' }).trim().split('\t');
   assert.deepEqual(listed, [key, 'down', '2026-11-04T12:00:00Z', "why 'q'", 'run it']);
