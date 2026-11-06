@@ -8,11 +8,13 @@ load test_helper
 
 setup() {
   setup_test_env
-  # On MSYS2, the compat shim makes the ppid walk succeed; _iid() (bats
-  # subshell) and watch.sh (standalone bash) have different process trees, so
-  # the walk can produce different instance IDs. Pin to bare-sid on MSYS2 so
-  # both contexts agree deterministically.
-  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export AGMSG_AGENT_PID="" ;; esac
+  # Pin bare instance-id keying (#93) on every host. _iid() (bats subshell)
+  # and watch.sh (standalone bash) have different process trees, so a walk
+  # that finds an agent (the MSYS2 compat shim, or the suite run under an
+  # agent) can give them different instance IDs; pinned, both agree. With no
+  # agent ancestor (CI) the walk finds nothing anyway, so this also skips its
+  # ps calls.
+  export AGMSG_AGENT_PID=""
   export PROJ="/tmp/agmsg-watch-proj"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null

@@ -8,7 +8,10 @@ load test_helper
 
 setup() {
   setup_test_env
-  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export AGMSG_AGENT_PID="" ;; esac
+  # Pin bare instance-id keying (#93) on every host, not only MSYS2: with no
+  # agent ancestor (CI) the ps walk to pid 1 finds nothing anyway, and pinned
+  # it is skipped.
+  export AGMSG_AGENT_PID=""
   export PROJ="$BATS_TEST_TMPDIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null

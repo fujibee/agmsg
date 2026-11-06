@@ -45,7 +45,9 @@
       "titleRunning": "実行中 — クリックしてフォーカス",
       "titleSpawn": "PTYペインで起動",
       "noTypes": "—",
-      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。"
+      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。",
+      "addonBadge": "アドオン",
+      "titleAddon": "アドオンです(エージェントではありません)。設定 → アドオンで管理します。"
     },
     "user": {
       "title": "{{team}} のapp-user",
@@ -321,13 +323,19 @@
       "filesRead": "選んだフォルダのファイルを読む",
       "gitRead": "そのフォルダの git 履歴と変更を読む",
       "network": "{{hosts}} に接続する",
-      "networkAny": "インターネット上の任意のサイトに接続する"
+      "networkAny": "インターネット上の任意のサイトに接続する",
+      "teamJoin": "あなたが選んだチームにメンバーとして参加する",
+      "messagesSend": "そのチームのメンバーにメッセージを送る",
+      "agentsSpawn": "そのチームでエージェントを起動する"
     },
     "grant": {
       "messages": "メッセージを読む: {{scope}}",
       "files": "ファイルを読む: {{scope}}",
       "remembered": "(記憶済み)",
-      "revoke": "取り消す"
+      "revoke": "取り消す",
+      "join": "チームのメンバー: {{scope}}",
+      "send": "メッセージを送信: {{scope}}",
+      "spawn": "エージェントを起動: {{scope}}"
     },
     "card": {
       "grantAria": "権限のリクエスト",
@@ -344,7 +352,8 @@
       "can": "できること",
       "allowed": "許可済み",
       "nothingYet": "まだありません",
-      "installedOn": "{{date}} にインストール"
+      "installedOn": "{{date}} にインストール",
+      "powersWant": "{{title}} がチーム {{team}} で次のことをしようとしています:"
     },
     "installError": {
       "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",
@@ -414,10 +423,14 @@
       "paneCombined": "{{pane}} が、読み取った内容をネットワークへ送れるようになります",
       "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
       "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
-      "neverTitle": "このアドオンができないこと",
+      "neverTitle": "このアドオン自身ができないこと",
       "source_other": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
       "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件",
-      "panes": "追加されるペイン: {{names}}"
+      "panes": "追加されるペイン: {{names}}",
+      "agentsTitle": "やり取りする、または起動するエージェント",
+      "agentsBody": "エージェントは自分の権限で動きます。このアドオンの制限は引き継がれません。エージェント自身の設定が許す範囲で、ファイルの書き込みや削除、ほかのフォルダの読み取り、ネットワークの利用ができます。",
+      "agentsMode": "起動したエージェントの権限モードは、agmsg の既定値、またはその CLI について spawn_options.yaml に書いたあなたの設定です。",
+      "agentsFolder": "作業フォルダは ~/agmsg-agents/<name>、またはこのアドオンに許可したフォルダの中のフォルダです。"
     },
     "remove": {
       "title": "{{title}} を削除しますか?",
@@ -483,6 +496,38 @@
     "intro": "アドオンはアプリにペインを追加します。許可したものしか読めず、許可はここでいつでも取り消せます。",
     "group": {
       "problems_other": "問題 {{count}} 件"
+    },
+    "agents": {
+      "title": "アドオンが作ったメンバーとエージェント",
+      "refresh": "更新",
+      "none": "チームに参加した、またはエージェントを起動したアドオンはありません。",
+      "kind": {
+        "member": "メンバー",
+        "agent": "エージェント"
+      },
+      "state": {
+        "claimed": "参加中",
+        "joined": "参加済み",
+        "opening": "起動中",
+        "running": "実行中",
+        "failed": "失敗",
+        "orphaned": "まだ動いている可能性があります",
+        "unknown": "起動していた可能性があります"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "アプリが止まったあとも動き続けています。選ぶまで、agmsg は別のコピーを起動しません。",
+      "unknownHelp": "起動中にアプリが止まったため、動いているかどうか分かりません。選ぶまで、agmsg は別のコピーを起動しません。",
+      "openNew": "新しく開く",
+      "leave": "そのままにする",
+      "open": "開く"
+    },
+    "trust": {
+      "label": "Claude Code で ~/agmsg-agents を信頼済みにして、起動する agent が「このフォルダを信頼しますか？」で止まらないようにする",
+      "note": "Claude Code の設定に 1 つだけ書き込みます(そのフォルダの信頼フラグ)。ほかの項目は変わりません。",
+      "trusted": "~/agmsg-agents は Claude Code ですでに信頼済みです。",
+      "notFound": "Claude Code の設定が見つからないため、何も設定できません。agent が「このフォルダを信頼しますか？」で止まったら、その pane で Enter を押してください。",
+      "readFailed": "Claude Code の設定を読めませんでした: {{error}} エージェントが「Do you trust this folder?」で止まることがあります。その場合は、ペインで Enter を押してください。",
+      "failed": "~/agmsg-agents を信頼済みにできませんでした: {{error}}"
     }
   }
 }

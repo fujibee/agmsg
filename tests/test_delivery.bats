@@ -4546,3 +4546,104 @@ EOF
   [ -f "$rule" ]
   [ "$(cat "$rule")" = "$before" ]
 }
+
+# The direct (hook-started) bridge steps aside while agmsgd delivers Codex
+# notices; every other state keeps it.
+_codex_direct_bridge_run() {   # <desired|none> [delivery-choice mode]
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-gate "$TEST_PROJECT" codex
+  mkdir -p "$TEST_SKILL_DIR/run"
+  if [ "$1" != none ]; then
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='$1';"
+  fi
+  if [ -n "${GATE_UNVERIFIABLE:-}" ]; then
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)';
+      UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='1234567890', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  fi
+  if [ -n "${GATE_READY:-}" ]; then
+    local boot
+    case "$(uname -s)" in
+      Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+      Linux) boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n 's/^btime //p' /proc/stat)" ;;
+      *) skip 'POSIX beta executor evidence' ;;
+    esac
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)';
+      UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  fi
+  if [ -n "${2:-}" ]; then
+    printf 'codex\t%s\t%s\n' "$(cd "$TEST_PROJECT" && pwd -P)" "$2" > "$TEST_SKILL_DIR/run/delivery-choice"
+  fi
+  GATE_FAKE="$TEST_SKILL_DIR/fake-codex-bridge"
+  GATE_LOG="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  cat >"$GATE_FAKE" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
+SH
+  chmod +x "$GATE_FAKE"
+  GATE_OUT="$(AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.gate.sock" \
+    AGMSG_CODEX_BRIDGE_CMD="$GATE_FAKE" AGMSG_TEST_LOG="$GATE_LOG" CODEX_THREAD_ID=thread-gate \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" 2>&1 </dev/null)"
+  local _
+  for _ in {1..20}; do [ -f "$GATE_LOG" ] && break; sleep 0.1; done
+}
+
+@test "session-start.sh for codex: agmsgd on and ready -> no bridge, one line saying agmsgd delivers" {
+  GATE_READY=1 _codex_direct_bridge_run on
+  sleep 1
+  [ ! -f "$GATE_LOG" ]
+  [ ! -e "$TEST_SKILL_DIR"/run/codex-bridge.*.thread ]
+  [ "$(printf '%s\n' "$GATE_OUT" | grep -c 'agmsgd delivers notices for this session')" -eq 1 ]
+}
+
+@test "session-start.sh for codex: agmsgd on but stopped -> no bridge, and the line says notices are not delivered and how to start it" {
+  _codex_direct_bridge_run on
+  sleep 1
+  [ ! -f "$GATE_LOG" ]
+  refute grep -q 'agmsgd delivers notices for this session' <<<"$GATE_OUT"
+  grep -q 'NOT delivered to this session' <<<"$GATE_OUT"
+  grep -qF "\"$TEST_SKILL_DIR/scripts/agmsg\" daemon start" <<<"$GATE_OUT"
+  refute grep -qE '(^|[^/"])agmsg daemon' <<<"$GATE_OUT"
+}
+
+@test "session-start.sh for codex: agmsgd on, health not verifiable -> no bridge, says it could not be checked, not 'delivers' and not 'not running'" {
+  case "$(uname -s)" in Darwin|Linux) ;; *) skip 'POSIX beta executor evidence' ;; esac
+  GATE_UNVERIFIABLE=1 _codex_direct_bridge_run on
+  sleep 1
+  [ ! -f "$GATE_LOG" ]
+  refute grep -q 'agmsgd delivers notices for this session' <<<"$GATE_OUT"
+  refute grep -q 'is not running' <<<"$GATE_OUT"
+  grep -q 'could not be checked' <<<"$GATE_OUT"
+  grep -q 'not confirmed' <<<"$GATE_OUT"
+  grep -qF "\"$TEST_SKILL_DIR/scripts/agmsg\" daemon status" <<<"$GATE_OUT"
+  refute grep -q 'NOT delivered' <<<"$GATE_OUT"
+  refute grep -qE '(^|[^/"])agmsg daemon' <<<"$GATE_OUT"
+}
+
+@test "session-start.sh for codex: the way back names this install's own command, so a --cmd install does not point at the default one" {
+  GATE_READY=1 _codex_direct_bridge_run on
+  grep -qF "\"$TEST_SKILL_DIR/scripts/agmsg\" daemon disable" <<<"$GATE_OUT"
+  refute grep -qE '(run|then): agmsg daemon disable' <<<"$GATE_OUT"
+  _codex_direct_bridge_run on
+  grep -qF "\"$TEST_SKILL_DIR/scripts/agmsg\" daemon disable" <<<"$GATE_OUT"
+}
+
+@test "session-start.sh for codex: agmsgd off -> the bridge starts as before" {
+  _codex_direct_bridge_run off
+  [ -f "$GATE_LOG" ]
+  grep -q -- "--thread thread-gate" "$GATE_LOG"
+  refute grep -q 'agmsgd delivers notices' <<<"$GATE_OUT"
+}
+
+@test "session-start.sh for codex: no agmsgd install record at all -> the bridge starts as before" {
+  _codex_direct_bridge_run none
+  [ ! -e "$TEST_SKILL_DIR/run/install.db" ]
+  [ -f "$GATE_LOG" ]
+  refute grep -q 'agmsgd' <<<"$GATE_OUT"
+}
+
+@test "session-start.sh for codex: agmsgd on but the project chose turn -> the bridge starts as before" {
+  _codex_direct_bridge_run on turn
+  [ -f "$GATE_LOG" ]
+  refute grep -q 'agmsgd delivers notices' <<<"$GATE_OUT"
+}
