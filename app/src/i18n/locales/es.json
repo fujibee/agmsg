@@ -43,7 +43,9 @@
       "titleRunning": "ya está en ejecución — haga clic para enfocar",
       "titleSpawn": "iniciar en un panel PTY",
       "noTypes": "—",
-      "emptyState": "Aún no hay agentes. Use el botón ＋ de arriba para añadir uno."
+      "emptyState": "Aún no hay agentes. Use el botón ＋ de arriba para añadir uno.",
+      "addonBadge": "complemento",
+      "titleAddon": "Un complemento, no un agente. Se gestiona en la pestaña Add-ons de los ajustes."
     },
     "user": {
       "title": "app-user en {{team}}",
@@ -317,13 +319,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "Unirse como miembro al equipo que elijas",
+      "messagesSend": "Enviar mensajes a los miembros de ese equipo",
+      "agentsSpawn": "Iniciar agentes en ese equipo"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "Miembro del equipo: {{scope}}",
+      "send": "Envía mensajes: {{scope}}",
+      "spawn": "Inicia agentes: {{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -340,7 +348,8 @@
       "can": "Puede",
       "allowed": "Permitido",
       "nothingYet": "nada todavía",
-      "installedOn": "instalado el {{date}}"
+      "installedOn": "instalado el {{date}}",
+      "powersWant": "{{title}} quiere hacer lo siguiente en el equipo {{team}}:"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -410,14 +419,18 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "Lo que no puede hacer",
+      "neverTitle": "Lo que el complemento en sí no puede hacer",
       "source_one": "de {{repo}} · {{sha}} · añade {{count}} panel",
       "source_many": "de {{repo}} · {{sha}} · añade {{count}} paneles",
       "source_other": "de {{repo}} · {{sha}} · añade {{count}} paneles",
       "sourceUpdate_one": "de {{repo}} · {{from}} → {{to}} · {{count}} panel",
       "sourceUpdate_many": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
       "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
-      "panes": "Añade: {{names}}"
+      "panes": "Añade: {{names}}",
+      "agentsTitle": "Agentes con los que habla o que inicia",
+      "agentsBody": "Trabajan con sus propios permisos. No heredan los límites de este complemento: pueden escribir y borrar archivos, leer otras carpetas y usar la red, hasta donde lo permitan sus propios ajustes.",
+      "agentsMode": "Los agentes que inicia usan este modo de permisos: el predeterminado de agmsg, o tu ajuste en spawn_options.yaml para esa CLI.",
+      "agentsFolder": "Su carpeta de trabajo es ~/agmsg-agents/<name>, o una carpeta dentro de una que diste a este complemento."
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -485,6 +498,38 @@
       "problems_one": "{{count}} problema",
       "problems_many": "{{count}} problemas",
       "problems_other": "{{count}} problemas"
+    },
+    "agents": {
+      "title": "Miembros y agentes de complementos",
+      "refresh": "Actualizar",
+      "none": "Ningún complemento se ha unido a un equipo ni ha iniciado un agente.",
+      "kind": {
+        "member": "miembro",
+        "agent": "agente"
+      },
+      "state": {
+        "claimed": "uniéndose",
+        "joined": "unido",
+        "opening": "iniciando",
+        "running": "en ejecución",
+        "failed": "falló",
+        "orphaned": "puede seguir en ejecución",
+        "unknown": "puede haberse iniciado"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "Siguió en ejecución después de que la app se detuviera. agmsg no iniciará otra copia hasta que elijas.",
+      "unknownHelp": "La app se detuvo mientras lo iniciaba, así que no se sabe si se está ejecutando. agmsg no iniciará otra copia hasta que elijas.",
+      "openNew": "Abrir uno nuevo",
+      "leave": "Dejarlo",
+      "open": "Abrir"
+    },
+    "trust": {
+      "label": "Confiar en ~/agmsg-agents en Claude Code para que los agents que inicia no se detengan en «Do you trust this folder?»",
+      "note": "Esto escribe un solo ajuste en la configuración de Claude Code: el indicador de confianza de esa carpeta. Nada más cambia.",
+      "trusted": "~/agmsg-agents ya es de confianza en Claude Code.",
+      "notFound": "No se encontró la configuración de Claude Code, así que no se puede establecer nada. Si los agents se detienen en «Do you trust this folder?», pulsa Intro en su pane.",
+      "readFailed": "No se pudo leer la configuración de Claude Code: {{error}} Los agentes pueden detenerse en \"Do you trust this folder?\"; pulsa Enter en su panel.",
+      "failed": "No se pudo confiar en ~/agmsg-agents: {{error}}"
     }
   }
 }

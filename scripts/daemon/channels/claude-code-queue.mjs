@@ -22,6 +22,8 @@ import {
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
 import { sameProject, seatKey } from "./codex-queue.mjs";
+import { findSessionSocket, pidAlive } from "./claude-code-sessions.mjs";
+import { downNoticeClear, downNoticeKey, downNoticeSet } from "../down-notice.mjs";
 import {
   listClaudeCodeRegistrations,
   readClaudeRoleSession,
@@ -36,6 +38,10 @@ import {
 } from "./claude-code-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
+// A live seat that stays unaddressable this long gets a down record (#1910).
+const DOWN_AFTER_MS = 10 * 60 * 1000;
+// A seat whose socket is gone is looked up again at most this often.
+const LOOKUP_EVERY_MS = 60 * 1000;
 
 function registrationProjects(teamConfig, agent) {
   const registrations = teamConfig?.agents?.[agent]?.registrations;
@@ -117,12 +123,61 @@ export function createClaudeCodeQueueChannel({
   hostPlatform = process.platform,
   readMode = latestPermissionMode,
   transcriptPathOf = resolveTranscriptPath,
+  lookupSession = findSessionSocket,
+  alive = pidAlive,
+  downAfterMs = DOWN_AFTER_MS,
+  downSet = (key, state, reason, recovery) => downNoticeSet(installRoot, key, state, reason, recovery, now),
+  downClear = (key) => downNoticeClear(installRoot, key),
 }) {
   let stopped = false;
   let rosterReasons = new Map();
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
+  // Per seat: the socket found in Claude Code's sessions file, when the record's
+  // own path is gone; and since when the seat could not be reached.
+  const found = new Map();
+  const lastLookup = new Map();
+  const unreachable = new Map();
+  const downKept = new Set();
+  const clearedOnce = new Set();
+
+  const downKeyOf = (team, agent) => downNoticeKey("agmsgd.seat", `${team}/${agent}`);
+
+  // Reached again, or never was a live seat: no record, and the clock restarts.
+  function seatReachable(team, agent) {
+    const seat = seatKey(team, agent);
+    unreachable.delete(seat);
+    // Once per daemon life even when this process wrote none: a record left by
+    // an earlier agmsgd must go once the seat answers.
+    // A clear that failed keeps its retry state for the next healthy poll.
+    if (downKept.has(seat) || !clearedOnce.has(seat)) {
+      if (downClear(downKeyOf(team, agent)) !== false) {
+        downKept.delete(seat);
+        clearedOnce.add(seat);
+      }
+    }
+  }
+
+  // A live session whose socket cannot be reached: after downAfterMs a record
+  // that doctor and session start show. `degraded` when the sessions source
+  // could not even say whether the session is alive.
+  function seatUnreachable(team, agent, state, reason) {
+    const seat = seatKey(team, agent);
+    const first = unreachable.get(seat) ?? now();
+    unreachable.set(seat, first);
+    if (now() - first < downAfterMs) return;
+    const recovery = `run /agmsg actas ${agent} in that session`;
+    if (downSet(downKeyOf(team, agent), state, `agmsgd cannot reach ${agent}@${team} (${reason}); messages are stored but not delivered`, recovery)) downKept.add(seat);
+  }
+
+  // The session is over (or was never live): not down, and no stale record.
+  function seatEnded(team, agent) {
+    const seat = seatKey(team, agent);
+    unreachable.delete(seat);
+    downKept.delete(seat);
+    downClear(downKeyOf(team, agent));
+  }
   const seatPoller = createSeatPoller({
     db, installRoot, channel: 'claude-code', log, timeoutMs: seatDeadlineMs,
     saveTimeout: (seat, reason) => saveSeat(db, { seat, state: 'blocked', reason }, now),
@@ -207,8 +262,59 @@ export function createClaudeCodeQueueChannel({
     }
     // Check every poll, including idle seats. A socket recreated at the same
     // path is eligible immediately; there is no persistent absence cache.
-    const socketCheck = socketAlive(record.messaging_socket);
+    // The record's path is primary. When it is gone, the socket of the session's
+    // live process in Claude Code's own sessions file is the second source (#1910);
+    // it is used only when the process and its start time match, and it is never
+    // written into the record.
+    let socketPath = record.messaging_socket;
+    let source = "";
+    let socketCheck = socketAlive(socketPath);
+    let lookupState = "";
+    let lookupReason = "";
     if (socketCheck.reason === "messaging_socket_missing") {
+      // Both caches belong to the destination the record names now: a new
+      // session or config dir starts from a fresh lookup.
+      const identity = `${record.claude_config_dir ?? ""}\u0000${record.session ?? ""}`;
+      if (found.get(seat)?.identity !== identity) found.delete(seat);
+      if (lastLookup.get(seat)?.identity !== identity) lastLookup.delete(seat);
+      const cached = found.get(seat);
+      if (cached && alive(cached.pid) && socketAlive(cached.socket).state === "ok") {
+        socketPath = cached.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
+      } else {
+        found.delete(seat);
+        const before = lastLookup.get(seat);
+        if (!before || now() - before.at >= LOOKUP_EVERY_MS) {
+          let result;
+          try {
+            result = await lookupSession({ configDir: record.claude_config_dir, sessionId: record.session });
+          } catch (error) {
+            result = { state: "unknown", reason: `sessions_lookup_failed:${error?.code ?? error?.message ?? error}` };
+          }
+          lookupState = result.state;
+          lookupReason = result.reason ?? "";
+          lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
+          if (result.state === "found" && socketAlive(result.socket).state === "ok") {
+            found.set(seat, { socket: result.socket, pid: result.pid, identity });
+            socketPath = result.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
+          } else if (result.state === "found") {
+            lookupState = "unreachable"; lookupReason = "sessions_file_socket_missing";
+            lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
+          }
+        } else {
+          // A socket found earlier that no longer answers: reachable by nobody.
+          lookupState = before.state === "found" ? "unreachable" : before.state;
+          lookupReason = before.state === "found" ? "sessions_file_socket_missing" : before.reason;
+        }
+      }
+    }
+    if (socketCheck.reason === "messaging_socket_missing") {
+      if (lookupState === "ended") {
+        seatEnded(team, agent);
+        saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "session_ended" }, now);
+        return;
+      }
+      if (lookupState === "unreachable") seatUnreachable(team, agent, "down", lookupReason);
+      else if (lookupState === "unknown") seatUnreachable(team, agent, "degraded", lookupReason || "sessions_source_unknown");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
       return;
     }
@@ -216,8 +322,9 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: socketCheck.reason ?? "messaging_socket_unreadable" }, now);
       return;
     }
+    seatReachable(team, agent);
     if (!snapshot.unread || stopped) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
+      saveSeat(db, { seat, messagingSocket: socketPath, state: "addressable", reason: source }, now);
       return;
     }
 
@@ -234,7 +341,7 @@ export function createClaudeCodeQueueChannel({
     const nonce = newNonce();
     let id;
     try {
-      id = createSendAttempt(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: null, upTo: snapshot.upTo, nonce, triedModes: [mode], expectedOpGen }, now);
+      id = createSendAttempt(db, { seat, messagingSocket: socketPath, transcriptPath, transcriptPos: null, upTo: snapshot.upTo, nonce, triedModes: [mode], expectedOpGen }, now);
     } catch (error) {
       if (error.message !== "daemon_intent_changed") throw error;
       return;
@@ -242,7 +349,7 @@ export function createClaudeCodeQueueChannel({
 
     let result;
     try {
-      result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
+      result = await send({ socketPath, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     } catch (error) {
       result = { state: "failed", reason: `send_error:${error?.code ?? error?.message ?? String(error)}` };
     }
@@ -259,7 +366,7 @@ export function createClaudeCodeQueueChannel({
     // existing confirmed row; neither inbox reads nor transcript evidence gate
     // later nudges for unread messages beyond that cursor.
     setQueueState(db, id, "confirmed");
-    saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
+    saveSeat(db, { seat, messagingSocket: socketPath, state: "addressable", reason: source }, now);
   }
 
   // A team whose roster entry is unusable is skipped alone. Its reason is kept

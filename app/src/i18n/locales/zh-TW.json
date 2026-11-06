@@ -43,7 +43,9 @@
       "titleRunning": "已在執行中 — 點選以切換至該面板",
       "titleSpawn": "在 PTY 面板中啟動",
       "noTypes": "—",
-      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。"
+      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。",
+      "addonBadge": "附加元件",
+      "titleAddon": "這是附加元件，不是代理。請在設定的 Add-ons 分頁中管理。"
     },
     "user": {
       "title": "{{team}} 的 app-user",
@@ -317,13 +319,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "以成員身分加入你選擇的團隊",
+      "messagesSend": "向該團隊的成員傳送訊息",
+      "agentsSpawn": "在該團隊中啟動代理"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "團隊成員：{{scope}}",
+      "send": "傳送訊息：{{scope}}",
+      "spawn": "啟動代理：{{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -340,7 +348,8 @@
       "can": "可以",
       "allowed": "已允許",
       "nothingYet": "尚無",
-      "installedOn": "安裝於 {{date}}"
+      "installedOn": "安裝於 {{date}}",
+      "powersWant": "{{title}} 想在團隊 {{team}} 中執行以下操作："
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -410,10 +419,14 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "它不能做的事",
+      "neverTitle": "附加元件本身不能做的事",
       "source_other": "來自 {{repo}} · {{sha}} · 新增 {{count}} 個面板",
       "sourceUpdate_other": "來自 {{repo}} · {{from}} → {{to}} · {{count}} 個面板",
-      "panes": "將新增：{{names}}"
+      "panes": "將新增：{{names}}",
+      "agentsTitle": "它與之交談或由它啟動的代理",
+      "agentsBody": "代理使用它們自己的權限運作，不受此附加元件的限制：在它們自身設定允許的範圍內，可以寫入和刪除檔案、讀取其他資料夾並使用網路。",
+      "agentsMode": "它啟動的代理使用此權限模式：agmsg 預設值，或你在 spawn_options.yaml 中為該 CLI 設定的值。",
+      "agentsFolder": "它們的工作資料夾是 ~/agmsg-agents/<name>，或你授予此附加元件的資料夾中的某個資料夾。"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -479,6 +492,38 @@
     "intro": "附加元件會為應用程式新增面板。它們只能讀取你允許的內容，你可以隨時在這裡收回。",
     "group": {
       "problems_other": "{{count}} 個問題"
+    },
+    "agents": {
+      "title": "附加元件建立的成員和代理",
+      "refresh": "重新整理",
+      "none": "沒有附加元件加入團隊或啟動代理。",
+      "kind": {
+        "member": "成員",
+        "agent": "代理"
+      },
+      "state": {
+        "claimed": "正在加入",
+        "joined": "已加入",
+        "opening": "正在啟動",
+        "running": "執行中",
+        "failed": "失敗",
+        "orphaned": "可能仍在執行",
+        "unknown": "可能已啟動"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "應用程式停止後它仍在執行。在你選擇之前，agmsg 不會再啟動另一個副本。",
+      "unknownHelp": "啟動時應用程式停止了，不知道它是否在執行。在你選擇之前，agmsg 不會再啟動另一個副本。",
+      "openNew": "開啟新的",
+      "leave": "保持原狀",
+      "open": "開啟"
+    },
+    "trust": {
+      "label": "在 Claude Code 中信任 ~/agmsg-agents,這樣它啟動的 agent 不會停在「Do you trust this folder?」",
+      "note": "這只會向 Claude Code 的設定寫入一項設定:該資料夾的信任標記。其他內容不會改變。",
+      "trusted": "~/agmsg-agents 在 Claude Code 中已被信任。",
+      "notFound": "找不到 Claude Code 的設定,因此無法設定。如果 agent 停在「Do you trust this folder?」,請在它的 pane 中按 Enter。",
+      "readFailed": "無法讀取 Claude Code 的設定：{{error}} 代理可能會停在「Do you trust this folder?」；請在其窗格中按 Enter。",
+      "failed": "無法信任 ~/agmsg-agents:{{error}}"
     }
   }
 }

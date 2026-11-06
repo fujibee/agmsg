@@ -23,6 +23,11 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): no test here is about agent-pid
+  # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
+  # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
+  # agent process too.
+  export AGMSG_AGENT_PID=""
   TEST_LIFETIME_PIDS=""
   export SKILL_DIR="$TEST_SKILL_DIR"
   export RUN_DIR="$SKILL_DIR/run"; mkdir -p "$RUN_DIR"
@@ -289,6 +294,31 @@ run_launcher() {
   [ ! -f "$CAPTURE" ]
   [ ! -f "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY" ]
   [ "$(grep -c 'has no socket path' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+}
+
+@test "launcher: a bridge log over the size limit is moved aside before the next bridge starts" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES=1000
+  head -c 5000 /dev/zero | tr '\0' 'x' > "$RUN_DIR/codex-bridge.team.alice.log"
+  run_launcher
+  [ -f "$CAPTURE" ]
+  [ -f "$RUN_DIR/codex-bridge.team.alice.log.1" ]
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log.1")" -ge 5000 ]
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log" 2>/dev/null || echo 0)" -lt 1000 ]
+}
+
+@test "launcher: a bridge log that cannot be moved aside is reported with the cause, and the bridge still starts" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES=1000
+  head -c 5000 /dev/zero | tr '\0' 'x' > "$RUN_DIR/codex-bridge.team.alice.log"
+  # A mv that fails only for the rotation.
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/sh\ncase "$*" in *.log.1*) echo "mv: simulated I/O failure" >&2; exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$BATS_TEST_TMPDIR/shim/mv"
+  chmod +x "$BATS_TEST_TMPDIR/shim/mv"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" run_launcher
+  [ -f "$CAPTURE" ]
+  grep -q 'could not be moved aside (mv: simulated I/O failure)' "$RUN_DIR/codex-bridge.team.alice.log"
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log")" -ge 5000 ]
 }
 
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {

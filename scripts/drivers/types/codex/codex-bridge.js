@@ -196,7 +196,10 @@ function writeErr(text) {
 }
 
 function logLine(...args) {
-  const line = `${LOG_PREFIX}${require("util").format(...args)}\n`;
+  // The time is in the record: nothing else in this file says when a line was
+  // written, and a log that cannot be dated cannot show how often something
+  // happens.
+  const line = `${LOG_PREFIX}${new Date().toISOString()} ${require("util").format(...args)}\n`;
   // The leading newline is the whole point: without it this diagnostic would
   // continue whatever half-line a delta or a child chunk left open.
   writeErr(atLineStart ? line : `\n${line}`);
@@ -1675,9 +1678,10 @@ class CodexBridge {
 
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
-    // Same funnel: a delta is partial by name, so the flag it leaves behind is
-    // what stops the next diagnostic from joining it into one line (#784).
-    writeErr(params.delta);
+    // The agent's streamed words are not written to this log. They went to
+    // stderr, so every turn's whole reply was copied into the seat's bridge
+    // log, which then grew without bound (14 MB for one seat); the reply
+    // already lives in the conversation. Only the activity counts: see below.
     // Watchdog re-arm on this activity is handled generically by
     // client.onThreadActivity (see run()), covering every notification type,
     // not just this one.

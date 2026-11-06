@@ -566,3 +566,132 @@ test('one unusable team is skipped alone: the other teams are still notified and
   assert.equal(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats.some((row) => JSON.parse(row.seat)[0] === 'broken' && JSON.parse(row.seat)[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
   await restarted.stop();
 });
+
+// --- #1910: a live seat whose recorded socket is gone ---
+
+function missingSocketFixture(t, lookup, socketAlive = null) {
+  const calls = { sets: [], clears: [], sends: [], lookups: 0 };
+  const { db, state } = channelFixture(t);
+  state.record = { messaging_token: 'tok-1' };
+  state.minutes = 0;
+  const options = {
+    ...state.options,
+    now: () => Date.UTC(2026, 9, 14) + state.minutes * 60_000,
+    socketAlive: socketAlive ?? ((p) => (p === state.socket ? { state: 'unreadable', reason: 'messaging_socket_missing' } : { state: 'ok' })),
+    lookupSession: async (args) => { calls.lookups += 1; calls.args = args; return lookup(state); },
+    alive: () => true,
+    send: async (args) => { calls.sends.push(args); return { state: 'sent' }; },
+    downSet: (key, st, reason, recovery) => { calls.sets.push({ key, st, reason, recovery }); return true; },
+    downClear: (key) => { calls.clears.push(key); return true; },
+  };
+  return { db, state, calls, channel: createClaudeCodeQueueChannel(options) };
+}
+
+test('a missing recorded socket is replaced by the live process socket of the same session, token kept', async (t) => {
+  const { db, channel, calls } = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  await channel.pollOnce();
+  assert.equal(calls.sends.length, 1);
+  assert.equal(calls.sends[0].socketPath, '/tmp/cc-socks/9.sock');
+  assert.equal(calls.sends[0].token, 'tok-1');
+  assert.equal(calls.args.sessionId, 'sess-1');
+  const seat = db.prepare('SELECT state, reason, messaging_socket FROM beta_claude_seat').get();
+  assert.deepEqual({ ...seat }, { state: 'addressable', reason: 'socket_from_sessions_file', messaging_socket: '/tmp/cc-socks/9.sock' });
+  assert.equal(calls.sets.length, 0);
+});
+
+test('the sessions file is not read again while the found socket still answers', async (t) => {
+  const { state, channel, calls } = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  await channel.pollOnce();
+  state.sequence += 1;
+  await channel.pollOnce();
+  assert.equal(calls.lookups, 1);
+  assert.equal(calls.sends.length, 2);
+});
+
+test('a live session that cannot be reached gets a down record after 10 minutes, not before', async (t) => {
+  const f = missingSocketFixture(t, () => ({ state: 'unknown', reason: 'sessions_dir_unreadable' }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 0);
+  f.state.minutes = 9; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 0);
+  f.state.minutes = 10; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'degraded');
+  assert.match(f.calls.sets[0].key, /^agmsgd\.seat\.test-alice-[0-9a-f]{8}$/);
+  assert.match(f.calls.sets[0].reason, /stored but not delivered/);
+  assert.equal(f.db.prepare('SELECT state FROM beta_claude_seat').get().state, 'unaddressable');
+});
+
+test('a process that is alive but whose socket is gone is down; an ended session is no record and clears one', async (t) => {
+  const down = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }), () => ({ state: 'unreadable', reason: 'messaging_socket_missing' }));
+  await down.channel.pollOnce();
+  down.state.minutes = 10; await down.channel.pollOnce();
+  assert.equal(down.calls.sets.length, 1);
+  assert.equal(down.calls.sets[0].st, 'down');
+  const gone = missingSocketFixture(t, () => ({ state: 'ended' }));
+  gone.state.minutes = 0; await gone.channel.pollOnce();
+  gone.state.minutes = 30; await gone.channel.pollOnce();
+  assert.equal(gone.calls.sets.length, 0);
+  assert.ok(gone.calls.clears.length >= 1);
+  assert.equal(gone.db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'session_ended');
+});
+
+test('a seat that answers again clears its record', async (t) => {
+  let mode = 'unknown';
+  const f = missingSocketFixture(t, () => (mode === 'unknown' ? { state: 'unknown', reason: 'x' } : { state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  mode = 'found';
+  f.state.minutes = 13; await f.channel.pollOnce();
+  assert.ok(f.calls.clears.length >= 1);
+  assert.equal(f.db.prepare('SELECT state FROM beta_claude_seat').get().state, 'addressable');
+});
+
+test('a found socket that stops answering is down after 10 minutes without waiting for the next lookup', async (t) => {
+  let up = true;
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }),
+    (p) => (p === '/tmp/cc-socks/9.sock' && up ? { state: 'ok' } : { state: 'unreadable', reason: 'messaging_socket_missing' }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.length, 1);
+  up = false;
+  f.state.minutes = 0.5; await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'down');
+});
+
+test('a new session on the same seat starts from a fresh lookup, even inside the throttle minute', async (t) => {
+  const f = missingSocketFixture(t, (state) => (state.session === 'sess-1'
+    ? { state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }
+    : { state: 'found', socket: '/tmp/cc-socks/10.sock', pid: 10 }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.at(-1).socketPath, '/tmp/cc-socks/9.sock');
+  f.state.session = 'sess-2';
+  f.state.sequence += 1;
+  f.state.minutes = 0.2; await f.channel.pollOnce();
+  assert.equal(f.calls.lookups, 2);
+  assert.equal(f.calls.args.sessionId, 'sess-2');
+  assert.equal(f.calls.sends.at(-1).socketPath, '/tmp/cc-socks/10.sock');
+});
+
+test('a clear that failed is tried again on the next healthy poll', async (t) => {
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  let results = [false, true];
+  const clears = [];
+  const channel = createClaudeCodeQueueChannel({
+    ...f.state.options,
+    now: () => Date.UTC(2026, 9, 14),
+    socketAlive: () => ({ state: 'ok' }),
+    send: async () => ({ state: 'sent' }),
+    downSet: () => true,
+    downClear: (key) => { clears.push(key); return results.shift() ?? true; },
+  });
+  await channel.pollOnce();
+  f.state.sequence += 1;
+  await channel.pollOnce();
+  f.state.sequence += 1;
+  await channel.pollOnce();
+  assert.equal(clears.length, 2, 'false then true: two calls, then no more');
+  await channel.stop();
+});

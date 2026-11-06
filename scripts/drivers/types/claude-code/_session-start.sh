@@ -96,7 +96,10 @@ agmsg_session_start() {
   local bare_sid my_instance pair_team="" pair_agent=""
   bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
   my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
-  [ -n "$bare_sid" ] || exit 0
+  if [ -z "$bare_sid" ]; then
+    echo "AGMSG delivery: this session's id was not given to the hook, so its messaging destination was not recorded and agmsgd cannot deliver to it. Next: run /agmsg actas <name>."
+    exit 0
+  fi
   # An instance id without a process id cannot claim the seat's lock; that is
   # reported below, once the seat is known, rather than skipped silently.
   local pid_unresolved=0
