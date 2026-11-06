@@ -392,9 +392,9 @@ export function insertAsNewLeaf(node: SplitNode, newPaneId: string): SplitNode {
 }
 
 /**
- * Opens an agent that an add-on pane asked for beside that pane: the first one to its right, the rest in a column
- * under each other, ordered by `order` (smaller is higher; none = after the others), whatever order they arrive in.
- * `siblings` are the asker's agents already in this tree, in the order they opened.
+ * Where an agent an add-on pane asked for goes. The first one opens to the right of the asking pane; later ones
+ * form a column there, ordered by `order` (smaller is higher), whatever the arrival order. An agent with no `order`
+ * sorts after every ordered one (and after the unordered ones that came before it).
  */
 export function placeAskedAgent(
   node: SplitNode,
@@ -405,13 +405,28 @@ export function placeAskedAgent(
 ): SplitNode {
   const here = siblings.filter((s) => contains(node, s.id));
   if (here.length === 0) return insertBeside(node, askerPaneId, "right", newPaneId);
-  if (order !== undefined) {
-    const below = here.filter((s) => s.order !== undefined && s.order > order).sort((a, b) => a.order! - b.order!)[0];
-    if (below) return insertBeside(node, below.id, "top", newPaneId);
-  }
-  const placed = here.filter((s) => s.order !== undefined && (order === undefined || s.order <= order));
-  const last = order === undefined ? here[here.length - 1] : (placed.sort((a, b) => a.order! - b.order!).pop() ?? here[here.length - 1]);
-  return insertBeside(node, last.id, "bottom", newPaneId);
+  const key = (o?: number) => o ?? Infinity;
+  const sorted = here.map((s, i) => ({ ...s, i })).sort((a, b) => (key(a.order) === key(b.order) ? 0 : key(a.order) < key(b.order) ? -1 : 1) || a.i - b.i);
+  const after = sorted.find((s) => key(s.order) > key(order));
+  if (after) return insertBeside(node, after.id, "top", newPaneId);
+  return insertBeside(node, sorted[sorted.length - 1].id, "bottom", newPaneId);
+}
+
+/**
+ * Remembers, synchronously, which agents were placed beside which asking pane, so that two agents whose spawns finish
+ * before the next render both see each other: the decision reads this record, never a rendered snapshot. `place`
+ * returns the update to apply to the window's tree; React applies those in the order they were queued, each to the
+ * latest tree.
+ */
+export function createAskedPlacer() {
+  const placed = new Map<number, { id: string; order?: number }[]>();
+  return {
+    place(askerKey: number, askerPaneId: string, newPaneId: string, order?: number): (root: SplitNode) => SplitNode {
+      const siblings = [...(placed.get(askerKey) ?? [])];
+      placed.set(askerKey, [...siblings, { id: newPaneId, order }]);
+      return (root) => placeAskedAgent(root, askerPaneId, siblings, newPaneId, order);
+    },
+  };
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   insertBeside,
   leaves,
   minRatioForPx,
+  createAskedPlacer,
   placeAskedAgent,
   presetTree,
   renameLeaf,
@@ -711,5 +712,69 @@ describe("placeAskedAgent", () => {
     const b = placeAskedAgent(a, "chess", [{ id: "a" }], "b");
     const c = placeAskedAgent(b, "chess", [{ id: "a" }, { id: "b" }], "c");
     expect(column(c)).toEqual(["a", "b", "c"]);
+  });
+
+  it("puts an ordered agent above the unordered ones already there, and an unordered one after the ordered", () => {
+    const open = (ids: Array<[string, number | undefined]>) => {
+      let n: SplitNode = chess;
+      const done: { id: string; order?: number }[] = [];
+      for (const [id, order] of ids) {
+        n = placeAskedAgent(n, "chess", done, id, order);
+        done.push({ id, order });
+      }
+      return n;
+    };
+    expect(column(open([["free", undefined], ["first", 0]]))).toEqual(["first", "free"]);
+    expect(column(open([["free", undefined], ["second", 1], ["first", 0]]))).toEqual(["first", "second", "free"]);
+    expect(column(open([["second", 1], ["free", undefined], ["first", 0]]))).toEqual(["first", "second", "free"]);
+    expect(column(open([["first", 0], ["free", undefined], ["second", 1]]))).toEqual(["first", "second", "free"]);
+    expect(column(open([["free-a", undefined], ["free-b", undefined], ["first", 0]]))).toEqual(["first", "free-a", "free-b"]);
+  });
+});
+
+describe("createAskedPlacer", () => {
+  const chess: SplitNode = { kind: "leaf", paneId: "chess" };
+  const rects = (n: SplitNode) => computeRects(n);
+  const column = (n: SplitNode) => leaves(n).filter((id) => id !== "chess").sort((a, b) => rects(n).get(a)!.top - rects(n).get(b)!.top);
+
+  // Two spawns finish in one batch: both decide before either update is applied, then React applies the queued
+  // updates in order, each to the latest tree.
+  const bothBeforeTheNextRender = (first: [string, number], second: [string, number]) => {
+    const placer = createAskedPlacer();
+    const a = placer.place(7, "chess", first[0], first[1]);
+    const b = placer.place(7, "chess", second[0], second[1]);
+    return b(a(chess));
+  };
+
+  it("seats black above white, chess on the left, whichever completion comes first", () => {
+    for (const tree of [bothBeforeTheNextRender(["black", 0], ["white", 1]), bothBeforeTheNextRender(["white", 1], ["black", 0])]) {
+      expect(column(tree)).toEqual(["black", "white"]);
+      const r = rects(tree);
+      expect(r.get("chess")).toMatchObject({ left: 0, width: 50, height: 100 });
+      expect(r.get("black")!.left).toBe(50);
+      expect(r.get("white")!.left).toBe(50);
+      expect(r.get("black")!.width).toBe(50);
+    }
+  });
+
+  it("gives each asking pane its own column: an agent of the second asker does not stack under the first one's", () => {
+    const two = split("col", 0.5, leaf("chess1"), leaf("chess2"));
+    const placer = createAskedPlacer();
+    const a = placer.place(1, "chess1", "a-black", 0);
+    const b = placer.place(2, "chess2", "b-black", 0);
+    const tree = b(a(two));
+    const r = rects(tree);
+    expect(r.get("b-black")!.left).toBeGreaterThan(r.get("chess2")!.left);
+    expect(r.get("a-black")!.left).toBeGreaterThan(r.get("chess1")!.left);
+    expect(r.get("a-black")!.left).toBeLessThan(r.get("chess2")!.left);
+  });
+
+  it("ignores a recorded agent whose pane has since gone from the tree", () => {
+    const placer = createAskedPlacer();
+    placer.place(7, "chess", "gone", 0);
+    const next = placer.place(7, "chess", "white", 1);
+    const tree = next(chess);
+    expect(leaves(tree)).toEqual(["chess", "white"]);
+    expect(rects(tree).get("white")!.width).toBe(50);
   });
 });

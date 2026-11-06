@@ -49,7 +49,7 @@ import {
   insertAsNewLeaf,
   insertBeside,
   leaves,
-  placeAskedAgent,
+  createAskedPlacer,
   presetTree,
   renameLeaf,
   sameZone,
@@ -93,9 +93,6 @@ export type Pane = {
   native: boolean;
   /** The journal entry of an agent an add-on started: the backend learns the process from it. */
   agentKey?: string;
-  /** For an add-on's agent: the host id of the add-on pane that asked for it and its place in their column. */
-  askedBy?: number;
-  order?: number;
   /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
    *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
    *  the shell instead of a new tab" behavior below: it has to be an
@@ -814,6 +811,7 @@ export default function App() {
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
   const deliveryCache = useRef(new Map<string, boolean>());
+  const askedPlacer = useRef(createAskedPlacer());
   const feedRef = useRef<HTMLDivElement>(null);
   // Set right before prepending an older history page, so the scroll-to-
   // bottom effect below skips that render (loadOlderMessages restores the
@@ -1387,8 +1385,6 @@ export default function App() {
             cwd: m.project || undefined,
             native: monitors,
             agentKey: fromAddon?.key,
-            askedBy: fromAddon?.pane,
-            order: fromAddon?.order,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       setPanes((prev) => [...prev, pane]);
@@ -1396,8 +1392,10 @@ export default function App() {
       const asker = fromAddon?.pane !== undefined ? panesRef.current.find((p) => p.kind === "addon" && p.hostId === fromAddon.pane) : undefined;
       const askerWin = asker ? windowsRef.current.find((w) => leaves(w.root).includes(asker.id)) : undefined;
       if (asker && askerWin) {
-        const siblings = panesRef.current.filter((p) => p.askedBy === fromAddon!.pane).map((p) => ({ id: p.id, order: p.order }));
-        setWindows((prev) => prev.map((w) => (w.id === askerWin.id ? { ...w, root: placeAskedAgent(w.root, asker.id, siblings, id, fromAddon!.order) } : w)));
+        // The record of who sits beside which asker is kept here, not read from the rendered panes: two spawns that
+        // finish before the next render must see each other.
+        const apply = askedPlacer.current.place(fromAddon!.pane!, asker.id, id, fromAddon!.order);
+        setWindows((prev) => prev.map((w) => (w.id === askerWin.id ? { ...w, root: apply(w.root) } : w)));
         setActive(askerWin.id);
       } else if (targetWindowId) {
         setWindows((prev) =>
