@@ -262,7 +262,7 @@ demote() {
   printf '%s\n' "$FAKE_HOME/.agents/skills/elsewhere" > "$ST/.owner"
   run inst --update
   [ "$status" -eq 0 ]
-  grep -qF -- "$ST belongs to $FAKE_HOME/.agents/skills/elsewhere" <<<"$output"
+  grep -qF -- "belongs to $FAKE_HOME/.agents/skills/elsewhere" <<<"$output"
   [ "$(cat "$ST/.owner")" = "$FAKE_HOME/.agents/skills/elsewhere" ]
 }
 
@@ -272,4 +272,93 @@ demote() {
   grep -qF -- "'config' cannot be an install name" <<<"$output"
   [ ! -e "$FAKE_HOME/.agents/skills/config" ]
   [ ! -e "$FAKE_HOME/.agmsg/config" ]
+}
+
+@test "uninstalling a copy (cp -R keeps the links) removes its links only and leaves the original's state and run alone" {
+  inst
+  mkdir -p "$ST/teams/t"
+  printf 'keep\n' > "$ST/teams/t/owner-data"
+  printf 'keep\n' > "$ST/run/original-run-file"
+  command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
+  run env HOME="$FAKE_HOME" bash "$FAKE_HOME/.agents/skills/agmsg-copy/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "linked into the state of $SK; detached" <<<"$output"
+  [ -f "$ST/teams/t/owner-data" ]
+  [ -f "$ST/run/original-run-file" ]
+  [ -d "$ST/db" ]
+  [ -L "$SK/db" ]
+}
+
+@test "uninstalling a copy with --keep-data leaves the original's state alone too" {
+  inst
+  printf 'keep\n' > "$ST/.trash/backup"
+  command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
+  run env HOME="$FAKE_HOME" bash "$FAKE_HOME/.agents/skills/agmsg-copy/uninstall.sh" --yes --keep-data
+  [ "$status" -eq 0 ]
+  [ -f "$ST/.trash/backup" ]
+}
+
+@test "updating a copy neither stops the original's agmsgd nor rewrites the original's marker or owner" {
+  inst
+  command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
+  local before_marker before_owner
+  before_marker="$(<"$SK/.agmsg")"
+  before_owner="$(<"$ST/.owner")"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd agmsg-copy
+  [ "$status" -eq 0 ]
+  grep -qF -- "belongs to $SK" <<<"$output"
+  grep -qF -- "agmsgd and sync engines are not stopped or restarted" <<<"$output"
+  [ "$(<"$SK/.agmsg")" = "$before_marker" ]
+  [ "$(<"$ST/.owner")" = "$before_owner" ]
+  [ ! -e "$FAKE_HOME/.agmsg/agmsg-copy" ]
+}
+
+@test "an unfinished install operation on record: the update refuses and nothing was moved" {
+  inst
+  demote
+  printf '{}\n' > "$SK/run/install-op-incomplete.json"
+  run inst --update
+  [ "$status" -ne 0 ]
+  grep -qF -- "incomplete-operation record blocks this install" <<<"$output"
+  [ -d "$SK/run" ] && [ ! -L "$SK/run" ]
+  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+  [ -z "$(ls -A "$ST" 2>/dev/null)" ]
+}
+
+@test "a sync engine that cannot be stopped keeps the state where it is, visibly, and the engine is started again" {
+  inst
+  demote
+  cat > "$SK/scripts/remote.sh" <<'EOS'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "status --json") echo '{"local_team":"t1","engine_state":"running"}' ;;
+  "sync stop") exit 1 ;;
+  "sync restart") echo "$3" >> "$(dirname "$0")/../restarted.txt" ;;
+esac
+EOS
+  run inst --update
+  grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
+  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+  [ -z "$(ls -A "$ST" 2>/dev/null)" ]
+  [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = in-place ]
+}
+
+@test "while another operation holds the install lock the update moves nothing; it moves once the lock is released" {
+  inst
+  demote
+  mkdir -p "$SK/run"
+  : > "$SK/run/install-op.lock.db"
+  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
+  local holder=$!
+  sleep 1
+  inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
+  local updater=$!
+  sleep 4
+  # still waiting for the lock: the state is where it was
+  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+  [ -z "$(ls -A "$ST" 2>/dev/null)" ]
+  wait "$holder" || true
+  wait "$updater"
+  [ -L "$SK/db" ]
+  [ "$(readlink "$SK/db")" = "$ST/db" ]
 }
