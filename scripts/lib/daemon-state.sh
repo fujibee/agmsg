@@ -8,6 +8,10 @@ _AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/down-notice.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shquote.sh"
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
@@ -170,6 +174,39 @@ agmsg_daemon_recovery_text() {
   printf ' Unread messages are preserved. If agmsg is not found, use "%s/scripts/agmsg" daemon start (replace start with disable or enable as needed).\n' "$_AGMSG_DAEMON_ROOT"
 }
 
+# down_notice_clear's own rm is unconditional (-f, so harmless either way),
+# but calling it on every ready/off observation would cost one exec per
+# call even when there was never a record to clear. Skip it when the file
+# plainly is not there.
+_agmsg_down_notice_clear_if_present() {
+  local dir
+  dir="$(_down_notice_dir 2>/dev/null)" || return 0
+  [ -n "$dir" ] && [ -f "$dir/$1.json" ] || return 0
+  # A notice is diagnostic, not load-bearing: an I/O failure clearing it
+  # (rc 1, per the shared contract) must never fail or abort the caller.
+  down_notice_clear "$1" || :
+}
+
+# ONE detached, best-effort retry of `agmsg daemon start`, scoped to the
+# exact op_gen read at this instant (never a stale one from an earlier
+# observation) via --only-if-op-gen -- the same guard cmd_start already
+# uses, so a stop/disable that happens during the wait is honored rather
+# than undone. AGMSG_DAEMON_SELF_HEAL=1 is exported into the child so
+# anything IT calls (including its own on-failure
+# `agmsg_daemon_warn_if_stopped always`) never spawns a second one:
+# self-healing never re-triggers itself, by construction, not just
+# because of where this call site sits.
+_agmsg_daemon_self_heal() {
+  [ "${AGMSG_DAEMON_SELF_HEAL:-0}" != 1 ] || return 0
+  [ -f "$_AGMSG_DAEMON_ROOT/scripts/daemon.sh" ] || return 0
+  local gen
+  gen="$(sqlite3 -readonly "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT op_gen FROM daemon_intent;' 2>/dev/null || true)"
+  case "$gen" in ''|*[!0-9]*) return 0 ;; esac
+  AGMSG_DAEMON_SELF_HEAL=1 bash "$_AGMSG_DAEMON_ROOT/scripts/daemon.sh" start --only-if-op-gen "$gen" \
+    </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
 agmsg_daemon_warn_if_stopped() {
   # Keep health state local without forking a shell that inherits caller FDs.
   local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
@@ -197,9 +234,32 @@ agmsg_daemon_warn_if_stopped() {
     [ "$((now - last))" -ge 600 ] || return 0
   fi
   agmsg_daemon_read_state
-  [ "$AGMSGD_DESIRED" = on ] && [ "$AGMSGD_HEALTH" != ready ] || return 0
+  # Clear the record only on a POSITIVE observation -- confirmed ready, or
+  # confirmed never-enabled/explicitly off. "unknown" (no install.db, a
+  # SQLite read failure, anything agmsg_daemon_read_state could not
+  # determine) is "cannot tell", never grounds to erase an existing
+  # record someone else is relying on (review finding: an unreadable
+  # install.db was silently treated as "recovered").
+  if [ "$AGMSGD_HEALTH" = ready ] || [ "$AGMSGD_DESIRED" = off ]; then
+    _agmsg_down_notice_clear_if_present agmsgd
+    return 0
+  fi
+  [ "$AGMSGD_DESIRED" = on ] || return 0
   # Not being able to look is not a stop: say nothing on ordinary commands.
   [ "$AGMSGD_HEALTH" != unchecked ] || [ "${1:-}" = always ] || return 0
+  # Record it (doctor / status / session-start show this) whenever the
+  # state is unambiguously "stopped" -- not for "unchecked"/"unverifiable",
+  # which are "cannot tell", not "down" (#1821, #1872's own distinction).
+  # A recovery command naming THIS install's own agmsg wrapper: the bare
+  # word "agmsg" would name whichever install owns that name on PATH, not
+  # necessarily this one -- a --cmd side install's own copy is the one
+  # that must actually recover it (same reasoning as #1927). Quoted with
+  # agmsg_shq (single quotes), NOT %q: down_notice_set's own text
+  # sanitizer turns every backslash into a slash (review round 3), which
+  # corrupts a %q backslash-escaped space rather than preserving it, and
+  # this recorded command is meant to actually be run, not just read.
+  [ "$AGMSGD_HEALTH" != stopped ] || down_notice_set agmsgd down "$AGMSGD_REASON" \
+    "$(agmsg_shq "$_AGMSG_DAEMON_ROOT/scripts/agmsg") daemon start" || :
   if [ "${1:-}" = always ]; then
     agmsg_daemon_recovery_text >&2
     return 0
@@ -215,6 +275,13 @@ agmsg_daemon_warn_if_stopped() {
     printf '%s\n' "$now" > "$slot/at" || return 0
     mv "$slot/at" "$marker" || return 0
     agmsg_daemon_recovery_text >&2
+    # The one guaranteed retry beyond install.sh's own single restart
+    # attempt (decision 11-04, S01/S14, scope ruling): bounded by this
+    # same 600s claim, so ordinary traffic triggers it at most once per
+    # window. Only for a CONFIRMED stopped daemon -- unchecked/unverifiable
+    # never reach here (the "unchecked" skip above already excluded them,
+    # and this whole branch is guarded by AGMSGD_HEALTH=stopped below).
+    [ "$AGMSGD_HEALTH" != stopped ] || _agmsg_daemon_self_heal
   fi
   # The claimed window remains as an empty directory. Only past windows are
   # removed; none of them can grant a fresh claim in the current window.

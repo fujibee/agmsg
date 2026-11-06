@@ -759,6 +759,147 @@ _pid_gone_harness() {   # <kill message>
   [ "$owner_state" = "ready" ]
 }
 
+@test "install: --update clears a down_notice left by an earlier failed restart once the daemon comes back (decision 11-04, S01/S14)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
+  # Simulate a down_notice left behind by an earlier failed restart attempt.
+  ( . "$SK/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$SK/run/down/agmsgd.json" ]
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  # Stop before any assertion below can fail, same ordering the existing
+  # "starts an agmsgd that was turned on again" test above uses -- a
+  # failed assertion must not leave a real background daemon running
+  # past this test.
+  bash "$SK/scripts/daemon.sh" stop || true
+  [ ! -f "$SK/run/down/agmsgd.json" ]
+}
+
+@test "install: --update records a down_notice when its one restart attempt fails, instead of only a terminal line (decision 11-04, S01/S14)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
+  # AGMSG_NODE is authoritative over both the recorded node_path and
+  # whatever real Node is on PATH (agmsg_resolve_node's own documented
+  # behavior), so this makes every candidate _resolve_node tries fail and
+  # the installer's single restart attempt fails too -- exactly the
+  # S01/S14 gap: the daemon stays down and, before this fix, that was
+  # reported ONLY as a line in this run's own stderr.
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '/no/such/node';"
+  HOME="$FAKE_HOME" AGMSG_NODE=/no/such/node run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+  [ "${output#*did not start after the update}" != "$output" ]
+  [ -f "$SK/run/down/agmsgd.json" ]
+  grep -q '"component":"agmsgd"' "$SK/run/down/agmsgd.json"
+  grep -q '"state":"down"' "$SK/run/down/agmsgd.json"
+  grep -q 'agmsg daemon start' "$SK/run/down/agmsgd.json"
+}
+
+_install_fns() {
+  local fns="$BATS_TEST_TMPDIR/install-fns.sh"
+  awk '/^# --- Defaults ---/ {exit} {print}' "$REPO_ROOT/install.sh" > "$fns"
+  printf '%s' "$fns"
+}
+
+@test "agmsg_install_restart_daemon: a restart that hits lock contention is retried once; op_gen is reused unchanged (decision 11-04, S01/S14 scope ruling)" {
+  local fns fake="$FAKE_HOME/fake-skill"
+  mkdir -p "$fake/run" "$fake/scripts"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',7); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+tries_file="$fake/tries"
+n=0
+[ -f "\$tries_file" ] && n="\$(cat "\$tries_file")"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$tries_file"
+printf '%s\n' "\$*" >> "$fake/argv-log"
+if [ "\$n" = 1 ]; then
+  echo "agmsg daemon: could not acquire the install operation lock (another agmsg install or daemon command holds it). Nothing was changed; try again in a moment." >&2
+  exit 1
+fi
+echo "agmsg daemon start: running"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$fake/tries")" = 2 ]
+  grep -qx 'start --only-if-op-gen 7' "$fake/argv-log"
+  [ "$(sort -u "$fake/argv-log" | wc -l | tr -d ' ')" = 1 ]
+  [ "${output#*trying once more}" != "$output" ]
+  [ ! -f "$fake/run/down/agmsgd.json" ]
+}
+
+@test "agmsg_install_restart_daemon: a permanent failure (no usable Node) is NOT retried" {
+  local fns fake="$FAKE_HOME/fake-skill2"
+  mkdir -p "$fake/run" "$fake/scripts"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',3); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+tries_file="$fake/tries"
+n=0
+[ -f "\$tries_file" ] && n="\$(cat "\$tries_file")"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$tries_file"
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$(cat "$fake/tries")" = 1 ]
+}
+
+@test "agmsg_install_restart_daemon: a guarded skip (desired/op_gen changed while waiting) exits 0 but is NOT treated as confirmed running, so an existing down_notice is left in place" {
+  local fns fake="$FAKE_HOME/fake-skill3"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',9); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  ( . "$fake/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$fake/run/down/agmsgd.json" ]
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+# cmd_start's own guarded-skip path (scripts/daemon.sh): desired/op_gen
+# moved on between this read and the guarded UPDATE, so it exits 0
+# having started nothing.
+echo "agmsg daemon start: agmsgd was turned off or changed while waiting; left as it is now"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+}
+
+@test "agmsg_install_restart_daemon: a recovery command for an install path containing a space tokenizes and resolves correctly (review round 3)" {
+  local fns fake="$FAKE_HOME/side install"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',5); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  # An owned mock standing in for the real scripts/agmsg wrapper -- never a
+  # real install -- so the persisted recovery command can actually be run
+  # and its tokenization checked, not just inspected as text.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$fake" > "$fake/scripts/agmsg"
+  chmod +x "$fake/scripts/agmsg"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(( . "$fake/scripts/lib/down-notice.sh" && down_notice_list ) | awk -F'\t' '{print $5}')"
+  # Quoted (single quotes), not the bare path -- a bare path with a space
+  # is not a valid command to eval at all (the point of this test).
+  [ "$recovery" = "'$fake/scripts/agmsg' daemon start" ]
+  eval "$recovery"
+  [ "$(cat "$fake/agmsg-argv-log")" = "2:daemon start" ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.

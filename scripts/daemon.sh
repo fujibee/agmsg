@@ -694,6 +694,7 @@ cmd_start() {
   running_node="$(_resolve_node 2>/dev/null || true)"
   if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
+    _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status
     return 0
@@ -757,6 +758,7 @@ cmd_start() {
   done
   if [ "$ready_rc" = 0 ]; then
     echo "agmsg daemon start: running"
+    _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status
   else

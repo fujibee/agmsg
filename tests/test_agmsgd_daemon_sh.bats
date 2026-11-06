@@ -11,6 +11,14 @@ setup() {
 }
 
 teardown() {
+  # Unconditional cleanup: several tests in this file start a real resident
+  # agmsgd and make several fallible assertions before their own explicit
+  # `stop`. A failed assertion mid-test would otherwise skip that `stop` and
+  # leak a live process into the next test. Run first, before the
+  # plist-removal safety net below, and tolerate "nothing to stop".
+  if [ -n "${TEST_SKILL_DIR:-}" ] && [ -n "${DAEMON:-}" ]; then
+    bash "$DAEMON" stop >/dev/null 2>&1 || true
+  fi
   # Safety net: recompute this test's own unit id/plist path the same way
   # daemon.sh does and remove that exact, deterministic file -- never a
   # glob or a freshly-recomputed variable standing in for "whatever is
@@ -221,6 +229,37 @@ _assert_start_result() {
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
+@test "self-heal: a confirmed-stopped, enabled daemon gets one detached start attempt that becomes ready and clears its own down_notice (decision 11-04, S01/S14 scope ruling)" {
+  _seed_install_db
+  _write_completion_record
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on'; DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','executor missing',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped'
+  [ "$status" -eq 0 ]
+  # Not asserted here: the detached self-heal child can already have
+  # started, become ready, and cleared the notice by the time this line
+  # runs, so a single immediate check for the notice's presence is racy.
+  # The state=ready poll below, and the notice-cleared poll after it, are
+  # what this test actually needs to confirm.
+  local tries=0 state
+  while [ "$tries" -lt 50 ]; do
+    state="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    [ "$state" = ready ] && break
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  [ "$state" = ready ]
+  # cmd_start's own clear (in the self-heal's spawned process) runs a
+  # moment AFTER daemon_owner.state flips to ready, not atomically with
+  # it -- wait for it rather than racing a single immediate check.
+  tries=0
+  while [ "$tries" -lt 25 ] && [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]; do
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+}
+
 @test "daemon.sh status: reports running while the real daemon is up" {
   _seed_install_db
   _write_completion_record
@@ -249,8 +288,21 @@ _assert_start_result() {
   _run_with_deadline 15 bash "$DAEMON" start
   _assert_start_result 'running'
 
+  ( . "$SCRIPTS/lib/down-notice.sh" 2>/dev/null; down_notice_set agmsgd down stale stale )
   _run_with_deadline 10 bash "$DAEMON" start
   _assert_start_result 'already running'
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh start: a fresh start that becomes ready clears a stale down_notice (review round 1 NEEDS FIX)" {
+  _seed_install_db
+  _write_completion_record
+  ( . "$SCRIPTS/lib/down-notice.sh" 2>/dev/null; down_notice_set agmsgd down stale stale )
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
