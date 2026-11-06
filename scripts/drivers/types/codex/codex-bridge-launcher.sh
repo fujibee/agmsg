@@ -757,6 +757,39 @@ bridge_quick_deaths=0
 bridge_backoff_until=0
 bridge_last_delay=0
 bridge_down_key="$(down_notice_key bridge "$bridge_key" 2>/dev/null || true)"
+# The down notice is a wish the loop keeps trying to make true, separate from the
+# one-time log line and the backoff clock: bridge_notice_reason non-empty means
+# "set this", bridge_notice_clear=1 means "remove it". A write that fails stays
+# wished and is tried again every BRIDGE_NOTICE_RETRY_SECS, with the error kept
+# in the seat's bridge log (once per failing spell).
+BRIDGE_NOTICE_RETRY_SECS="${AGMSG_CODEX_BRIDGE_NOTICE_RETRY_SECS:-30}"
+bridge_notice_reason=""
+bridge_notice_clear=0
+bridge_notice_next_try=0
+bridge_notice_err_logged=0
+bridge_notice_flush() {
+  local err
+  [ -n "$bridge_down_key" ] || return 0
+  [ "$bridge_notice_clear" = 1 ] || [ -n "$bridge_notice_reason" ] || return 0
+  [ "$SECONDS" -ge "$bridge_notice_next_try" ] || return 0
+  if [ -n "$bridge_notice_reason" ]; then
+    if err="$(down_notice_set "$bridge_down_key" down "$bridge_notice_reason" \
+        "$SKILL_DIR/scripts/delivery.sh status codex $PROJECT" 2>&1)"; then
+      bridge_notice_reason=""; bridge_notice_err_logged=0; return 0
+    fi
+  else
+    if err="$(down_notice_clear "$bridge_down_key" 2>&1)"; then
+      bridge_notice_clear=0; bridge_notice_err_logged=0; return 0
+    fi
+  fi
+  bridge_notice_next_try=$((SECONDS + BRIDGE_NOTICE_RETRY_SECS))
+  if [ "$bridge_notice_err_logged" = 0 ]; then
+    bridge_notice_err_logged=1
+    printf '[%s] codex-bridge-launcher: could not update the down notice for %s (%s); trying again every %ss\n' \
+      "$$" "$bridge_key" "${err:-no message}" "$BRIDGE_NOTICE_RETRY_SECS" >>"$log" 2>/dev/null || true
+  fi
+  return 0
+}
 
 # Called once per bridge death, just before this loop would launch again.
 bridge_note_death() {
@@ -766,8 +799,8 @@ bridge_note_death() {
   bridge_death_counted="$bridge_launch_at"
   lived=$((SECONDS - bridge_launch_at))
   if [ "$lived" -ge "$BRIDGE_STABLE_SECS" ]; then
-    if [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] && [ -n "$bridge_down_key" ]; then
-      down_notice_clear "$bridge_down_key" 2>/dev/null || true
+    if [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ]; then
+      bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
     fi
     bridge_quick_deaths=0
     bridge_backoff_until=0
@@ -779,27 +812,31 @@ bridge_note_death() {
   delay=$((BRIDGE_BACKOFF_FIRST * (1 << (bridge_quick_deaths - BRIDGE_BACKOFF_AFTER > 6 ? 6 : bridge_quick_deaths - BRIDGE_BACKOFF_AFTER))))
   [ "$delay" -le "$BRIDGE_BACKOFF_MAX" ] || delay="$BRIDGE_BACKOFF_MAX"
   bridge_backoff_until=$((SECONDS + delay))
-  # Said when the backoff starts and each time its delay grows, not on every
-  # death at the ceiling.
-  [ "$delay" -ne "$bridge_last_delay" ] || return 0
-  bridge_last_delay="$delay"
   # Who refused it, when the bridge said so: the last watch refusal in its log.
   holder="$(tail -n 40 "$log" 2>/dev/null | grep -F 'not serving these pairs' | tail -n 1 | cut -c1-300 || true)"
+  # The notice is refreshed with every death so its count and holder stay true.
+  bridge_notice_reason="the Codex bridge for $bridge_key keeps ending right after it starts (${bridge_quick_deaths} times); retrying every ${delay}s${holder:+; $holder}"
+  bridge_notice_clear=0
+  bridge_notice_next_try=0
+  # The log line is said when the backoff starts and each time its delay grows,
+  # not on every death at the ceiling.
+  [ "$delay" -ne "$bridge_last_delay" ] || return 0
+  bridge_last_delay="$delay"
   printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row; retrying in %ss (backing off to at most %ss, it keeps trying)%s\n' \
     "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$delay" "$BRIDGE_BACKOFF_MAX" "${holder:+; last refusal: $holder}" >>"$log" 2>/dev/null || true
-  if [ -n "$bridge_down_key" ]; then
-    down_notice_set "$bridge_down_key" down \
-      "the Codex bridge for $bridge_key keeps ending right after it starts (${bridge_quick_deaths} times); retrying every ${delay}s${holder:+; $holder}" \
-      "$SKILL_DIR/scripts/delivery.sh status codex $PROJECT" 2>/dev/null || true
-  fi
 }
 
-# A bridge that has now lived long enough ends the backoff and the notice
-# without waiting for it to die.
+# A bridge that is still running after BRIDGE_STABLE_SECS ends the backoff and
+# the notice without waiting for it to die. Only the bridge this loop launched
+# and that is alive now counts: one that already died is a death (the next
+# launch attempt counts it) and the long wait that follows must not be read as
+# recovery.
 bridge_note_stable() {
   [ -n "$bridge_launch_at" ] && [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || return 0
+  [ "$bridge_death_counted" != "$bridge_launch_at" ] || return 0
   [ $((SECONDS - bridge_launch_at)) -ge "$BRIDGE_STABLE_SECS" ] || return 0
-  if [ -n "$bridge_down_key" ]; then down_notice_clear "$bridge_down_key" 2>/dev/null || true; fi
+  _agmsg_pid_alive_local "${launched_pid:-}" || return 0
+  bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
   bridge_quick_deaths=0
   bridge_backoff_until=0
   bridge_last_delay=0
@@ -808,6 +845,7 @@ bridge_note_stable() {
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
   bridge_note_stable
+  bridge_notice_flush
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.
