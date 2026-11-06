@@ -114,6 +114,34 @@ describe("agmsg-addon-check", () => {
     expect(r.output).toContain("No app add-on here (no app-panes/ folder). See https://github.com/fujibee/agmsg-addon-sample");
   });
 
+  it("accepts locales and default, and only warns about a listed file that is missing", () => {
+    const root = scaffold();
+    edit(root, "app-panes/demo/addon.conf", "protocol = 1\n", "protocol = 1\nlocales = en, ja\ndefault = en\n");
+    fs.mkdirSync(path.join(root, "app-panes/demo/web/locales"), { recursive: true });
+    fs.writeFileSync(path.join(root, "app-panes/demo/web/locales/en.json"), "{}\n");
+    commitAll(root, "i18n");
+    const r = run(root);
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('"locales" lists ja but app-panes/demo/web/locales/ja.json is missing.');
+    expect(r.output).not.toContain("error:");
+  });
+
+  it("only warns about a malformed or repeated language tag, and about a default that is not listed", () => {
+    const root = scaffold();
+    edit(root, "app-panes/demo/addon.conf", "protocol = 1\n", "protocol = 1\nlocales = en, japanese!, en\ndefault = ja\n");
+    commitAll(root, "i18n");
+    const r = run(root);
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain("error:");
+    expect(r.output).toContain('"japanese!" is not a language tag like en or pt-BR; ignored.');
+    expect(r.output).toContain('"en" is listed twice; ignored.');
+    expect(r.output).toContain('"ja" is not in "locales".');
+  });
+
+  it("passes an add-on with no locales line, as before", () => {
+    expect(run(scaffold()).status).toBe(0);
+  });
+
   it("refuses an unknown permission instead of ignoring it", () => {
     const root = scaffold();
     edit(root, "app-panes/demo/addon.conf", "permissions = messages:read\n", "permissions = messages:read, files:write\n");

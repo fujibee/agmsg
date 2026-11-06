@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { PaneRelay, PushEvent } from "./paneRelay";
@@ -27,6 +28,11 @@ export function AddonFrame(props: {
   const ref = useRef<HTMLIFrameElement>(null);
   const relayRef = useRef<PaneRelay | null>(null);
   const { paneInstance, declaresMessages } = props;
+  // The app's language, told to the add-on at each load and again when it changes (never read from the add-on).
+  const { i18n } = useTranslation();
+  const lang = i18n.resolvedLanguage ?? i18n.language ?? "en";
+  const langRef = useRef(lang);
+  langRef.current = lang;
   // The callback lives in a ref: a new identity must not rebuild the relay (a rebuilt relay gets no port without a new load).
   const onRefusedRef = useRef(props.onRefused);
   onRefusedRef.current = props.onRefused;
@@ -37,6 +43,7 @@ export function AddonFrame(props: {
     const { relay, dispose } = startFrameRelay({
       paneInstance,
       wantsFeed: declaresMessages,
+      getLocale: () => langRef.current,
       invoke: (cmd, args) => invoke(cmd, args),
       listen: (event, handler) => listen<PushEvent>(event, handler),
       frameWindow: () => ref.current?.contentWindow ?? null,
@@ -49,6 +56,10 @@ export function AddonFrame(props: {
       relayRef.current = null;
     };
   }, [paneInstance, declaresMessages]);
+
+  useEffect(() => {
+    relayRef.current?.onLocaleChange(lang);
+  }, [lang]);
 
   return (
     <iframe

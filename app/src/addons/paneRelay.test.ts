@@ -16,7 +16,7 @@ function fakePort(): PortLike & { sent: unknown[]; closed: boolean } {
   return p;
 }
 
-function setup(opts: { wantsFeed?: boolean; handler?: (cmd: string, args: Record<string, unknown>) => unknown } = {}) {
+function setup(opts: { wantsFeed?: boolean; locale?: () => string; handler?: (cmd: string, args: Record<string, unknown>) => unknown } = {}) {
   const calls: [string, Record<string, unknown>][] = [];
   const ports: ReturnType<typeof fakePort>[] = [];
   const posted: { msg: unknown; target: string; transfer: unknown[] }[] = [];
@@ -37,6 +37,7 @@ function setup(opts: { wantsFeed?: boolean; handler?: (cmd: string, args: Record
     id: 7,
     invoke,
     wantsFeed: opts.wantsFeed ?? true,
+    getLocale: opts.locale,
     frameWindow: () => ({ postMessage: (msg, target, transfer) => void posted.push({ msg, target, transfer }) }),
     newChannel: (): ChannelLike => {
       const port1 = fakePort();
@@ -277,5 +278,64 @@ describe("pane relay: pushes while init is being fetched", () => {
     await s.relay.onFrameLoad();
     s.relay.onPush({ pane: 7, generation: 1, event: msg("x") });
     expect(s.ports[0].sent).toEqual([msg("x")]);
+  });
+});
+
+describe("pane relay: the app's language", () => {
+  const loc = (l: string) => ({ agmsg: 1, type: "locale", locale: l });
+
+  it("is the first thing a pane without messages gets, and the only one", async () => {
+    const s = setup({ wantsFeed: false, locale: () => "ja" });
+    await s.relay.onFrameLoad();
+    expect(s.ports[0].sent).toEqual([loc("ja")]);
+    expect(s.calls.map((c) => c[0])).not.toContain("addon_feed_init");
+  });
+
+  it("comes before init for a pane with messages", async () => {
+    const s = setup({ locale: () => "pt-BR" });
+    await s.relay.onFrameLoad();
+    expect(s.ports[0].sent).toEqual([loc("pt-BR"), { agmsg: 1, type: "init" }, { agmsg: 1, type: "message", n: 1 }]);
+  });
+
+  it("reads the current language at each load, not once", async () => {
+    let l = "en";
+    const s = setup({ wantsFeed: false, locale: () => l });
+    await s.relay.onFrameLoad();
+    l = "de";
+    await s.relay.onFrameLoad();
+    expect(s.ports[0].sent).toEqual([loc("en")]);
+    expect(s.ports[1].sent).toEqual([loc("de")]);
+  });
+
+  it("a language change posts one event to the open port, carrying only the tag", async () => {
+    const s = setup({ wantsFeed: false, locale: () => "en" });
+    await s.relay.onFrameLoad();
+    s.relay.onLocaleChange("ko");
+    expect(s.ports[0].sent).toEqual([loc("en"), loc("ko")]);
+    expect(Object.keys(s.ports[0].sent[1] as object).sort()).toEqual(["agmsg", "locale", "type"]);
+  });
+
+  it("a change with no open port, or after closePort, sends nothing and does not throw", async () => {
+    const s = setup({ wantsFeed: false, locale: () => "en" });
+    s.relay.onLocaleChange("ja");
+    await s.relay.onFrameLoad();
+    s.relay.closePort();
+    s.relay.onLocaleChange("fr");
+    expect(s.ports[0].sent).toEqual([loc("en")]);
+  });
+
+  it("a change goes only to the current port, not to a replaced one", async () => {
+    const s = setup({ wantsFeed: false, locale: () => "en" });
+    await s.relay.onFrameLoad();
+    await s.relay.onFrameLoad();
+    s.relay.onLocaleChange("es");
+    expect(s.ports[0].sent).toEqual([loc("en")]);
+    expect(s.ports[1].sent).toEqual([loc("en"), loc("es")]);
+  });
+
+  it("without a language source nothing extra is sent (older callers are unchanged)", async () => {
+    const s = setup({ wantsFeed: false });
+    await s.relay.onFrameLoad();
+    expect(s.ports[0].sent).toEqual([]);
   });
 });
