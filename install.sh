@@ -51,6 +51,9 @@ agmsg_load_renderable_skill_types
 # so the two cannot silently disagree about which files exist again.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+# Where an install keeps its run/, db/, teams/ (outside the watched skills dir).
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/state-root.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/stale-outcome-files.sh"
 # Warning when an update adds a built-in that a trusted plugin already replaces.
@@ -245,6 +248,55 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   rm -f "$skill/run/agmsgd-updating"
 }
 
+# Moves an install's run/ db/ teams/ ext-tools/ .trash/ out of the skills
+# directory (scripts/lib/state-root.sh) and links them back. Codex watches
+# ~/.agents/skills and rescans every skill about every 10 seconds while agmsg
+# writes under it; writes through a symlinked directory are not reported.
+#
+# Called before the install operation begins. Whatever uses the files is stopped
+# for the move and brought back by the existing update steps (sync engines:
+# `sync restart` below; agmsgd: agmsg_install_stop_daemon here and
+# agmsg_install_restart_daemon at the end). When the state
+# cannot be moved, nothing is touched, one line names the install and the
+# reason, and the install keeps working where it is.
+#   $1 skill dir   $2 newline-separated teams with a running sync engine
+agmsg_install_move_state() {
+  local skill="$1" teams="$2" root name part moved_any=false need=false team
+  name="${skill##*/}"
+  root="$(agmsg_state_root "$skill" "$AGENTS_DIR")"
+  for part in $AGMSG_STATE_PARTS; do
+    [ -L "$skill/$part" ] || need=true
+    if [ -d "$skill/$part" ] && [ ! -L "$skill/$part" ]; then moved_any=true; fi
+  done
+  if [ "$need" = false ]; then
+    # Already linked: only record who owns the root and where it is.
+    agmsg_state_adopt "$skill" "$root" || true
+    [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+    return 0
+  fi
+  if ! agmsg_state_preflight "$skill" "$root"; then
+    echo "  ! state of '$name' is not moved; it keeps working in place (Codex rescans its skills on writes there)" >&2
+    [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+    return 0
+  fi
+  if [ "$moved_any" = true ]; then
+    echo "  ~ moving the state of '$name' to $root (a link stays in $skill)"
+    # Same stop the update uses before replacing scripts: the intent stays on, so
+    # the update's own restart at the end brings agmsgd back.
+    agmsg_install_stop_daemon "$skill"
+    while IFS= read -r team; do
+      [ -n "$team" ] || continue
+      bash "$skill/scripts/remote.sh" sync stop "$team" >/dev/null 2>&1 \
+        || echo "  ! could not stop the sync engine for '$team' before moving its state" >&2
+    done <<< "$teams"
+  fi
+  if ! agmsg_state_link "$skill" "$root"; then
+    echo "  ! the state of '$name' was only partly moved; fix the lines above, then run the update again" >&2
+  fi
+  [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+  return 0
+}
+
 agmsg_install_restart_guidance() {
   echo '  Next: finish your current work, then close and reopen each running agent.'
   echo '    Resume the same conversation and run your messaging skill with actas <existing-agent-name> to refresh its destination.'
@@ -396,10 +448,14 @@ agmsg_prune_removed_scripts() {
 # it -- a .trash/ nested under scripts/ would have its OWN prior contents
 # picked up by the very next prune as "not shipped".
 agmsg_reset_trash() {
+  local dir="$1"
   agmsg_install_op_require || return 1
-  rm -rf "$1"
+  # .trash may be a link to the state kept outside the skills directory: empty
+  # what it points at and keep the link.
+  if [ -L "$dir" ]; then dir="$(readlink "$dir")"; fi
+  rm -rf "$dir"
   agmsg_install_op_require || return 1
-  mkdir -p "$1"
+  mkdir -p "$dir"
   agmsg_install_op_require
 }
 
@@ -677,7 +733,7 @@ agmsg_install_write_version() {
 }
 
 agmsg_install_touch_marker_and_write_version() {
-  touch "$SKILL_DIR/.agmsg" || return 1
+  agmsg_state_marker_write "$SKILL_DIR" || return 1
   agmsg_install_write_version
 }
 
@@ -1042,11 +1098,12 @@ if [ "$UPDATE_ONLY" = true ]; then
   fi
   SKILL_NAME="$(basename "$SKILL_DIR")"
   CMD_NAME="$SKILL_NAME"
+  if agmsg_state_name_reserved "$CMD_NAME"; then
+    echo "  ! '$CMD_NAME' cannot be an install name: $(agmsg_state_base)/$CMD_NAME is shared by every install. Rename or remove $SKILL_DIR." >&2
+    exit 1
+  fi
   echo "  Updating $SKILL_NAME..."
   INSTALLED_VERSION="$(agmsg_source_version)"
-  agmsg_install_operation_begin || exit 1
-  agmsg_install_stop_daemon "$SKILL_DIR"
-  agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
   # #963: a sync engine that is running when the write below starts either
   # survives on the code it already loaded (silent -- `remote.sh status` still
   # reports it as running, and nothing about the new scripts takes effect) or
@@ -1076,6 +1133,11 @@ $_agmsg_running_team"
     done < <("$SKILL_DIR/scripts/remote.sh" status --json 2>/dev/null || true)
   fi
   unset _agmsg_status_line _agmsg_running_team
+  # Before the operation record exists: it lives in run/, which moves.
+  agmsg_install_move_state "$SKILL_DIR" "$AGMSG_RUNNING_TEAMS"
+  agmsg_install_operation_begin || exit 1
+  agmsg_install_stop_daemon "$SKILL_DIR"
+  agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
   # Captured before the auto-detect below can fill AGENT_TYPE in for other
   # reasons: an EXPLICIT --agent-type is what #1449's rule below cares about,
   # not whatever AGENT_TYPE ends up holding once auto-detected too.
@@ -1253,7 +1315,7 @@ $_agmsg_running_team"
     # -print0 and `read -d ''` because the path is arbitrary UTF-8. A newline
     # cannot appear in a team name (validate.sh rejects control characters), but
     # nothing here needs to rely on that.
-    find "$SKILL_DIR/teams" -mindepth 2 -maxdepth 2 -name config.json -type f \
+    find -H "$SKILL_DIR/teams" -mindepth 2 -maxdepth 2 -name config.json -type f \
       \( -perm -g+w -o -perm -o+w \) -print0 2>/dev/null |
       while IFS= read -r -d '' agmsg_binding; do
         if chmod go-w "$agmsg_binding" 2>/dev/null; then
@@ -1380,8 +1442,14 @@ fi
 
 # --- Apply defaults ---
 CMD_NAME="${CMD_NAME:-agmsg}"
+if agmsg_state_name_reserved "$CMD_NAME"; then
+  echo "  ! '$CMD_NAME' cannot be an install name: $(agmsg_state_base)/$CMD_NAME is shared by every install. Pick another --cmd." >&2
+  exit 1
+fi
 SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 INSTALLED_VERSION="$(agmsg_source_version)"
+mkdir -p "$SKILL_DIR" || exit 1
+agmsg_install_move_state "$SKILL_DIR" ""
 agmsg_install_operation_begin || exit 1
 agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
 

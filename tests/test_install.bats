@@ -29,6 +29,15 @@ setup() {
   WATCHED_PIDS=""
 }
 
+# The real directory the state of an install lives in (Codex writable_roots name
+# real paths: a sandbox checks where a write resolves to). $1 = optional part,
+# $2 = install name.
+state_path() {
+  local d="$FAKE_HOME/.agmsg/${2:-agmsg}"
+  d="$(cd -P "$d" 2>/dev/null && pwd -P)" || d="$FAKE_HOME/.agmsg/${2:-agmsg}"
+  printf '%s%s\n' "$d" "${1:+/$1}"
+}
+
 # Register <pid> for teardown, together with a substring that MUST appear in
 # its cmdline (read fresh from the real ps, below) before teardown may signal
 # it. Call this immediately after the pid becomes known -- before any
@@ -160,7 +169,13 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
   [ -n "$src" ] && [ -d "$src/.agents/skills/$cmd" ] || return 1
   cp -Rp "$src/." "$FAKE_HOME/" || return 1
   esc="$(printf '%s' "$src" | sed 's/[][\.*^$|]/\\&/g')"
-  for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path"; do
+  # The state parts are links to <template>/.agmsg/<cmd>/<part>; point them at the copy.
+  for f in run db teams ext-tools .trash; do
+    [ -L "$FAKE_HOME/.agents/skills/$cmd/$f" ] || continue
+    ln -sfn "$FAKE_HOME/.agmsg/$cmd/$f" "$FAKE_HOME/.agents/skills/$cmd/$f" || return 1
+  done
+  for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path" \
+           ".agents/skills/$cmd/.agmsg" ".agmsg/$cmd/.owner"; do
     [ -f "$FAKE_HOME/$f" ] || continue
     # cat into the existing file keeps its mode (the launcher is 0711).
     sed "s|$esc|$FAKE_HOME|g" "$FAKE_HOME/$f" > "$BATS_TEST_TMPDIR/restore-rewrite" || return 1
@@ -619,10 +634,10 @@ _pid_gone_harness() {   # <kill message>
   [ -f "$proj_cmd_second" ]
   grep -qF "$SK/" "$settings"
   grep -qF "$sk_second/" "$settings"
-  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
-  refute grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
-  grep -qF "$SK/" "$codex_home2/config.toml"
-  grep -qF "$sk_second/" "$codex_home2/config.toml"
+  refute grep -qF "/.agmsg/agmsg/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "/.agmsg/agmsg-second/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "/.agmsg/agmsg/" "$codex_home2/config.toml"
+  grep -qF "/.agmsg/agmsg-second/" "$codex_home2/config.toml"
   [ -f "$opencode_first" ]
   [ -f "$opencode_second" ]
   [ -f "$hermes_first" ]
@@ -647,8 +662,8 @@ _pid_gone_harness() {   # <kill message>
   [ ! -f "$cmd_first" ]
   [ ! -f "$proj_cmd_first" ]
   refute grep -qF "$SK/" "$settings"
-  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
-  refute grep -qF "$SK/" "$codex_home2/config.toml"
+  refute grep -qF "/.agmsg/agmsg/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "/.agmsg/agmsg/" "$codex_home2/config.toml"
   [ ! -e "$opencode_first" ]
   [ ! -e "$hermes_first" ]
   [ ! -e "$grok_first" ]
@@ -660,8 +675,8 @@ _pid_gone_harness() {   # <kill message>
   [ -f "$cmd_second" ]
   [ -f "$proj_cmd_second" ]
   grep -qF "$sk_second/" "$settings"
-  refute grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
-  grep -qF "$sk_second/" "$codex_home2/config.toml"
+  refute grep -qF "/.agmsg/agmsg-second/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "/.agmsg/agmsg-second/" "$codex_home2/config.toml"
   [ -f "$opencode_second" ]
   [ -f "$hermes_second" ]
   [ -f "$grok_second" ]
@@ -688,8 +703,8 @@ _pid_gone_harness() {   # <kill message>
   printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third-second
   local sk_third_second="$FAKE_HOME/.agents/skills/third-second"
-  grep -qF "$sk_third_second/" "$FAKE_HOME/.codex/config.toml"
-  refute grep -qF "$sk_third/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "/.agmsg/$(basename "$sk_third_second")/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "/.agmsg/$(basename "$sk_third")/" "$FAKE_HOME/.codex/config.toml"
 
   # install.sh's own codex-config step makes its own .bak when it added
   # third-second's entry above -- clear it too, so the check below is only
@@ -1558,21 +1573,21 @@ EOF
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
-  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path teams)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/.codex/config.toml"
   # A sandboxed Codex seat runs an ext-tool member's `setup` (secret and
   # save) too, which writes under ext-tools/ the same way the bridge writes
   # under db/teams/run — measured directly against a real seat
   # (`codex exec -s workspace-write`) before this entry existed:
   # `mkdir: .../ext-tools/<team>: Operation not permitted`.
-  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path ext-tools)" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install/update/uninstall: CODEX_HOME isolates the default Codex config (#1718)" {
   source "$REPO_ROOT/scripts/lib/codex-config.sh"
   local native_root
-  native_root="$(agmsg_codex_native_path "$SK")"
+  native_root="$(agmsg_codex_native_path "$(state_path)")"
   local profile_home="$FAKE_HOME/.codex_profiles/work"
   mkdir -p "$FAKE_HOME/.codex" "$profile_home"
   printf 'model = "default-sentinel"\n' > "$FAKE_HOME/.codex/config.toml"
@@ -1637,7 +1652,7 @@ EOF
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
 
-  grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install: fills an existing EMPTY Codex writable_roots without corrupting TOML" {
@@ -1652,9 +1667,9 @@ EOF
   # The empty-array path used to emit `[, "..."]` — a leading comma, which is
   # invalid TOML and broke the user's Codex config.
   refute grep -Eq '\[[[:space:]]*,' "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path teams)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/.codex/config.toml"
 
   # Parse end-to-end when a TOML reader is available, to prove validity.
   if command -v python3 >/dev/null 2>&1; then
@@ -1686,9 +1701,9 @@ EOF
   # The link survives: `mv` would have replaced it with a plain file (#747).
   [ -L "$FAKE_HOME/.codex/config.toml" ]
   # The edit reached the link's target, not a detached copy at the link path.
-  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
-  grep -q "$SK/teams" "$FAKE_HOME/dotfiles/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path teams)" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/dotfiles/config.toml"
   # The pre-existing entry is kept.
   grep -q "/some/existing/path" "$FAKE_HOME/dotfiles/config.toml"
 }
@@ -1705,8 +1720,8 @@ EOF
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
   [ -L "$FAKE_HOME/.codex/config.toml" ]
-  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/dotfiles/config.toml"
 }
 
 @test "install: an ordinary Codex config.toml is replaced atomically, not truncated in place (#747 control)" {
@@ -1725,7 +1740,7 @@ EOF
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
   [ ! -L "$FAKE_HOME/.codex/config.toml" ]
-  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/.codex/config.toml"
   grep -q "/some/existing/path" "$FAKE_HOME/.codex/config.toml"
   local ino_after; ino_after="$(ls -i "$FAKE_HOME/.codex/config.toml" | awk '{print $1}')"
   [ "$ino_after" != "$ino_before" ]

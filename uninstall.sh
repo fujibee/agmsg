@@ -494,14 +494,39 @@ _uninstall_one() {
     break
   done
 
+  # --- State kept outside the skills directory ---
+  # install.sh links run/ db/ teams/ ext-tools/ .trash/ to <state base>/<name>/
+  # (scripts/lib/state-root.sh). The links go with the skill directory below;
+  # the data they point at is removed here, by the same rules: with --keep-data
+  # only the backup copies in .trash go, otherwise everything but the install
+  # operation lock database.
+  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target
+  for _state_part in db teams ext-tools .trash run; do
+    if [ -L "$SKILL_DIR/$_state_part" ]; then
+      _state_target="$(readlink "$SKILL_DIR/$_state_part")"
+      case "$_state_target" in
+        /*/"$_state_part") STATE_PARENT="${_state_target%/*}" ;;
+      esac
+    fi
+  done
+  unset _state_part _state_target
+  # The Codex entries carry the resolved spelling of that path (/private/var
+  # for /var on macOS); read before the directory goes.
+  if [ -n "$STATE_PARENT" ]; then
+    STATE_PARENT_REAL="$(cd -P "$STATE_PARENT" 2>/dev/null && pwd -P)" || STATE_PARENT_REAL=""
+  fi
+
   # --- Remove the skill directory ---
   if [ "$KEEP_DATA" = true ]; then
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
     _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
+    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/.trash" ]; then
+      _uninstall_checked_rm -rf "$STATE_PARENT/.trash" || return 1
+    fi
     _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" "$SKILL_DIR/CHANGELOG.md" || return 1
     echo "  - removed scripts, templates, SKILL.md, CHANGELOG.md"
-    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
+    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/${STATE_PARENT:+ (kept in $STATE_PARENT)}"
     REMOVED=true
   else
     echo ""
@@ -537,6 +562,15 @@ _uninstall_one() {
         fi
       done
       unset _entry _run_entry
+      if [ -n "$STATE_PARENT" ]; then
+        local _state_dir
+        for _state_dir in db teams ext-tools .trash; do
+          [ -d "$STATE_PARENT/$_state_dir" ] || continue
+          _uninstall_checked_rm -rf "$STATE_PARENT/$_state_dir" || return 1
+        done
+        unset _state_dir
+        echo "  - removed the state kept in $STATE_PARENT"
+      fi
       _uninstall_operation_require || return 1
       rmdir "$SKILL_DIR" 2>/dev/null || true
       echo "  - removed $SKILL_DIR (kept run/install-op.lock.db and the active operation record)"
@@ -549,6 +583,12 @@ _uninstall_one() {
   local _codex_cfg
   while IFS= read -r _codex_cfg; do
     _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR" || return 1
+    if [ -n "$STATE_PARENT" ]; then
+      _uninstall_clean_codex_config "$_codex_cfg" "$STATE_PARENT" || return 1
+      if [ -n "$STATE_PARENT_REAL" ] && [ "$STATE_PARENT_REAL" != "$STATE_PARENT" ]; then
+        _uninstall_clean_codex_config "$_codex_cfg" "$STATE_PARENT_REAL" || return 1
+      fi
+    fi
   done < <(agmsg_codex_config_paths)
 
   # --- Remove OpenCode, Hermes, and Grok Build skill files ---
