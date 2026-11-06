@@ -274,6 +274,45 @@ run_launcher() {
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
+@test "launcher: a bridge that keeps ending at once is retried with a backoff, says so once, and leaves a down notice" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=2 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=2 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  sleep 32 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$!
+  sleep 28
+  local launches; launches="$(grep -c . "$CAPTURE")"
+  # With the backoff after one quick death, starts are at least 2 s apart and
+  # keep coming.
+  [ "$launches" -ge 4 ]
+  [ "$launches" -le 10 ]
+  # Said once, not once per death at the ceiling.
+  [ "$(grep -c 'retrying in 2s' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+  grep -q 'ended within 60s, 1 times in a row; retrying in 2s' "$RUN_DIR/codex-bridge.team.alice.log"
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q '"state":"down"' "$notice"
+  grep -q 'delivery.sh status codex' "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: the down notice and the backoff end once a bridge stays up" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  # The third start stays up; the first two end at once.
+  sed -i.bak 's|^exit 0$|[ "$(grep -c . "$CAPTURE")" -lt 3 ] \|\| sleep 30\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=1 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=1 AGMSG_CODEX_BRIDGE_STABLE_SECS=3
+  sleep 40 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
+  for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 || break; sleep 0.2; done
+  refute ls "$RUN_DIR"/down/bridge.*
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3

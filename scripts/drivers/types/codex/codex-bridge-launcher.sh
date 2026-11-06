@@ -87,6 +87,8 @@ TAB="$(printf '\t')"
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
 # shellcheck source=../../../lib/resolve-project.sh
 source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+# shellcheck source=../../../lib/down-notice.sh
+source "$SCRIPT_DIR/../../../lib/down-notice.sh"
 # Canonicalize once so the record's project (stored from the codex actas flow's
 # cwd) compares equal to this launcher's project even across a symlinked path.
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
@@ -740,8 +742,72 @@ retire_recorded_bridge() {
   kill "$old_pid" 2>/dev/null || true
 }
 
+# A bridge that dies within BRIDGE_STABLE_SECS of being started is a quick
+# death. BRIDGE_BACKOFF_AFTER (three) in a row put this seat's relaunches on a backoff: 5 s, doubling
+# to a 300 s ceiling. It never gives up, and the first bridge that lives
+# BRIDGE_STABLE_SECS ends the backoff. Clocked by $SECONDS (this process), so
+# the bookkeeping starts no process.
+BRIDGE_STABLE_SECS="${AGMSG_CODEX_BRIDGE_STABLE_SECS:-60}"
+BRIDGE_BACKOFF_AFTER="${AGMSG_CODEX_BRIDGE_BACKOFF_AFTER:-3}"
+BRIDGE_BACKOFF_FIRST="${AGMSG_CODEX_BRIDGE_BACKOFF_FIRST:-5}"
+BRIDGE_BACKOFF_MAX="${AGMSG_CODEX_BRIDGE_BACKOFF_MAX:-300}"
+bridge_launch_at=""
+bridge_death_counted=""
+bridge_quick_deaths=0
+bridge_backoff_until=0
+bridge_last_delay=0
+bridge_down_key="$(down_notice_key bridge "$bridge_key" 2>/dev/null || true)"
+
+# Called once per bridge death, just before this loop would launch again.
+bridge_note_death() {
+  local lived delay holder
+  [ -n "$bridge_launch_at" ] || return 0
+  [ "$bridge_death_counted" != "$bridge_launch_at" ] || return 0
+  bridge_death_counted="$bridge_launch_at"
+  lived=$((SECONDS - bridge_launch_at))
+  if [ "$lived" -ge "$BRIDGE_STABLE_SECS" ]; then
+    if [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] && [ -n "$bridge_down_key" ]; then
+      down_notice_clear "$bridge_down_key" 2>/dev/null || true
+    fi
+    bridge_quick_deaths=0
+    bridge_backoff_until=0
+    bridge_last_delay=0
+    return 0
+  fi
+  bridge_quick_deaths=$((bridge_quick_deaths + 1))
+  [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || return 0
+  delay=$((BRIDGE_BACKOFF_FIRST * (1 << (bridge_quick_deaths - BRIDGE_BACKOFF_AFTER > 6 ? 6 : bridge_quick_deaths - BRIDGE_BACKOFF_AFTER))))
+  [ "$delay" -le "$BRIDGE_BACKOFF_MAX" ] || delay="$BRIDGE_BACKOFF_MAX"
+  bridge_backoff_until=$((SECONDS + delay))
+  # Said when the backoff starts and each time its delay grows, not on every
+  # death at the ceiling.
+  [ "$delay" -ne "$bridge_last_delay" ] || return 0
+  bridge_last_delay="$delay"
+  # Who refused it, when the bridge said so: the last watch refusal in its log.
+  holder="$(tail -n 40 "$log" 2>/dev/null | grep -F 'not serving these pairs' | tail -n 1 | cut -c1-300 || true)"
+  printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row; retrying in %ss (backing off to at most %ss, it keeps trying)%s\n' \
+    "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$delay" "$BRIDGE_BACKOFF_MAX" "${holder:+; last refusal: $holder}" >>"$log" 2>/dev/null || true
+  if [ -n "$bridge_down_key" ]; then
+    down_notice_set "$bridge_down_key" down \
+      "the Codex bridge for $bridge_key keeps ending right after it starts (${bridge_quick_deaths} times); retrying every ${delay}s${holder:+; $holder}" \
+      "$SKILL_DIR/scripts/delivery.sh status codex $PROJECT" 2>/dev/null || true
+  fi
+}
+
+# A bridge that has now lived long enough ends the backoff and the notice
+# without waiting for it to die.
+bridge_note_stable() {
+  [ -n "$bridge_launch_at" ] && [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || return 0
+  [ $((SECONDS - bridge_launch_at)) -ge "$BRIDGE_STABLE_SECS" ] || return 0
+  if [ -n "$bridge_down_key" ]; then down_notice_clear "$bridge_down_key" 2>/dev/null || true; fi
+  bridge_quick_deaths=0
+  bridge_backoff_until=0
+  bridge_last_delay=0
+}
+
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
+  bridge_note_stable
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.
@@ -869,6 +935,15 @@ EOF
     fi
   fi
 
+  # A bridge that keeps ending at once is not started again in a tight loop.
+  # Before the spawn-rate reservation below: a tick that only waits out the
+  # backoff must not leave a reservation behind.
+  bridge_note_death
+  if [ "$SECONDS" -lt "$bridge_backoff_until" ]; then
+    poll_sleep
+    continue
+  fi
+
   # Bound the spawn rate first (a rate-limited tick changes nothing), then reap
   # any orphan for this exact (project, role) so exactly one bridge remains. If a
   # reaped bridge will not exit, do not spawn beside it this tick.
@@ -925,6 +1000,7 @@ EOF
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
   printf '%s\n' "$launched_pid" > "$pidfile"
+  bridge_launch_at=$SECONDS
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     # A custom bridge is foregrounded by the test harness, so a plain wait
     # would hide a role change until the bridge exits on its own. Poll the
