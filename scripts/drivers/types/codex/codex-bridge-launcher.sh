@@ -722,6 +722,35 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
+# The seat's bridge log keeps the last ~1 MiB and one older generation. Checked
+# when a bridge is about to be started, which is also when its writer is not
+# running; one `wc` per start.
+BRIDGE_LOG_MAX_BYTES="${AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES:-1048576}"
+rotate_bridge_log() {
+  local size err
+  [ -f "$log" ] || return 0
+  if ! size="$(wc -c < "$log" 2>&1)"; then
+    _bridge_log_note "could not measure its size ($size)"
+    return 0
+  fi
+  size="${size//[[:space:]]/}"
+  case "$size" in
+    ''|*[!0-9]*) _bridge_log_note "its size could not be read (got '$size')"; return 0 ;;
+  esac
+  [ "$size" -gt "$BRIDGE_LOG_MAX_BYTES" ] || return 0
+  if ! err="$(mv -f "$log" "$log.1" 2>&1)"; then
+    _bridge_log_note "could not be moved aside (${err:-no message})"
+  fi
+  return 0
+}
+# A rotation that cannot happen is said once per start, in the log itself (or on
+# stderr when the log cannot be written); the bridge is started either way.
+_bridge_log_note() {
+  local line
+  line="$(printf '[%s] codex-bridge-launcher: the bridge log for %s %s; it keeps growing until this is fixed' "$$" "$bridge_key" "$1")"
+  printf '%s\n' "$line" >>"$log" 2>/dev/null || printf '%s\n' "$line" >&2 || true
+}
+
 # Retire this role's bridge only when its lease proves the pid is the bridge
 # previously launched for this exact project and pair. A numeric pid alone is
 # not enough: after a quick exit it may already name an unrelated process.
@@ -1047,6 +1076,7 @@ EOF
   fi
   # Committed to spawning now: clear the stale records immediately before writing
   # the new ones, so no gate can bail out between the wipe and the rewrite.
+  rotate_bridge_log
   rm -f "$pidfile" "$appserver_file" "$thread_file"
   bridge_owner_args=(--owner "$rec_owner")
 
