@@ -8,8 +8,9 @@ import { AddonsSettings, openNowRef, type InstalledNotice } from "./AddonsSettin
 import type { Catalog } from "./catalog";
 import { collectSavedGrants } from "./collectGrants";
 import { closeIfStill, useBusy } from "../busy";
+import { AddonAgents } from "./AddonAgents";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
-import { createLiveSource, toCommandError, type Outcome } from "./source";
+import { createLiveSource, toCommandError, type MemberState, type Outcome } from "./source";
 import type { AddonPaneRef, FetchProgress, Grant, InstallError, StagedInstall } from "./types";
 
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
@@ -32,6 +33,9 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const [grants, setGrants] = useState<Grant[]>([]);
   const [grantsError, setGrantsError] = useState<string | null>(null);
   const grantsSeq = useRef(0);
+  // The members and agents add-ons made: read when this opens and on Refresh or after a choice, never on a timer.
+  const [entries, setEntries] = useState<MemberState[]>([]);
+  const [left, setLeft] = useState<ReadonlySet<string>>(new Set());
   const [openRequests, setOpenRequests] = useOpenRequestsSetting();
   // Everything a click starts and Rust answers later: its button shows it until the answer, success or not.
   const { busy, run } = useBusy();
@@ -153,6 +157,15 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
     catalog.reload();
   };
 
+  const loadEntries = useCallback(async () => {
+    const r = await source.membersState();
+    if (r.ok) setEntries(r.value);
+    else setNotice({ kind: "error", text: r.error.message });
+  }, []);
+  useEffect(() => {
+    void loadEntries();
+  }, [loadEntries]);
+
   if (!catalog.ready) return null;
   return (
     <>
@@ -189,6 +202,21 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
           const ref = openNowRef(n);
           if (ref) props.onOpenPane?.(ref);
         }}
+      />
+      <AddonAgents
+        t={tt}
+        entries={entries}
+        left={left}
+        busy={busy}
+        onRefresh={() => void run("agents", loadEntries)}
+        onLeave={(key) => setLeft((s) => new Set(s).add(key))}
+        onOpen={(key) =>
+          void run(`agent:${key}`, async () => {
+            const r = await source.agentReopen(key);
+            if (!r.ok) setNotice({ kind: "error", text: r.error.message });
+            await loadEntries();
+          })
+        }
       />
       {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
       {staged && <ConfirmInstallDialog t={tt} staged={staged} busy={busy.has("confirm")} onCancel={cancelConfirm} onInstall={() => void run("confirm", confirm)} />}

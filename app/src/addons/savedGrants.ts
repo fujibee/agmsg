@@ -22,6 +22,35 @@ export function pickSavedTeam(saved: Saved[], team: string): string | undefined 
   return saved.find((g) => g.permission === "messages:read" && g.scope === team)?.scope;
 }
 
+/** Which team powers were remembered for exactly this team. */
+export function pickSavedPowers(saved: Saved[], team: string): { join: boolean; send: boolean; spawn: boolean } {
+  const has = (p: string) => saved.some((g) => g.permission === p && g.scope === team);
+  return { join: has("team:join"), send: has("messages:send"), spawn: has("agents:spawn") };
+}
+
+type PowerSource = {
+  grantTeam(id: number, team: string): Promise<{ ok: boolean }>;
+  setPower(id: number, power: "team:join" | "messages:send" | "agents:spawn", on: boolean): Promise<{ ok: boolean }>;
+};
+
+/**
+ * A reopened pane declares `powers`. If every one was remembered for exactly this team, grant the team and set each
+ * power again (Rust re-checks them as if new) so the card is not asked twice; anything missing, or any failure, asks.
+ */
+export async function replaySavedPowers(
+  source: PowerSource,
+  paneId: number,
+  team: string,
+  powers: ("team:join" | "messages:send" | "agents:spawn")[],
+  saved: Saved[],
+): Promise<boolean> {
+  const have = pickSavedPowers(saved, team);
+  if (!powers.every((p) => (p === "team:join" ? have.join : p === "messages:send" ? have.send : have.spawn))) return false;
+  if (!(await source.grantTeam(paneId, team)).ok) return false;
+  for (const p of powers) if (!(await source.setPower(paneId, p, true)).ok) return false;
+  return true;
+}
+
 /** The saved folder grant for exactly this real path (a folder picked from the menu; a saved parent does not count). */
 export function pickSavedFolder(saved: Saved[], real: string): string | undefined {
   const want = trimSlash(real);

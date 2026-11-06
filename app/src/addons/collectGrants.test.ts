@@ -24,3 +24,17 @@ describe("collectSavedGrants (the live loader)", () => {
     expect(r.grants.length).toBeGreaterThan(0);
   });
 });
+
+describe("collectSavedGrants with team powers", () => {
+  it("lists the remembered team powers and ignores unknown permissions", async () => {
+    const rows = [
+      { permission: "team:join", scope: "t1", grantedAt: "g" },
+      { permission: "messages:send", scope: "t1", grantedAt: "g" },
+      { permission: "agents:spawn", scope: "t1", grantedAt: "g" },
+      { permission: "git:read", scope: "t1", grantedAt: "g" },
+    ];
+    const r = await collectSavedGrants([mockSnapshot.addons[0]], async () => ({ ok: true, value: rows }));
+    expect(r.grants.map((g) => g.permission)).toEqual(["team:join", "messages:send", "agents:spawn"]);
+  });
+});
+

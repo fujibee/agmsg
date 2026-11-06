@@ -14,6 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
+import { isAddonMember } from "./addons/addonMember";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
 import { NewMenu, type NewMenuVariant } from "./NewMenu";
@@ -48,6 +49,7 @@ import {
   insertAsNewLeaf,
   insertBeside,
   leaves,
+  createAskedPlacer,
   presetTree,
   renameLeaf,
   sameZone,
@@ -100,6 +102,8 @@ export type Pane = {
   /** An add-on pane (no PTY): rendered by AddonPaneHost instead of TerminalPane. */
   kind?: "addon";
   addon?: AddonPaneRef;
+  /** The host's id for this add-on pane, once it has one (what an agent's open request names as its asker). */
+  hostId?: number;
 };
 // A tab. Holds one or more panes, arranged as a binary split tree (see
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
@@ -807,6 +811,7 @@ export default function App() {
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
   const deliveryCache = useRef(new Map<string, boolean>());
+  const askedPlacer = useRef(createAskedPlacer());
   const feedRef = useRef<HTMLDivElement>(null);
   // Set right before prepending an older history page, so the scroll-to-
   // bottom effect below skips that render (loadOlderMessages restores the
@@ -1314,7 +1319,7 @@ export default function App() {
   const spawnMember = useCallback(
     // targetWindowId: spawn straight into an existing tab as an extra
     // side-by-side pane, instead of opening a new tab (the default).
-    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string }) => {
+    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string; pane?: number; order?: number }) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -1383,7 +1388,16 @@ export default function App() {
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       setPanes((prev) => [...prev, pane]);
-      if (targetWindowId) {
+      // An agent an add-on pane asked for opens beside that pane, in its tab; with no such pane open, in a tab of its own.
+      const asker = fromAddon?.pane !== undefined ? panesRef.current.find((p) => p.kind === "addon" && p.hostId === fromAddon.pane) : undefined;
+      const askerWin = asker ? windowsRef.current.find((w) => leaves(w.root).includes(asker.id)) : undefined;
+      if (asker && askerWin) {
+        // The record of who sits beside which asker is kept here, not read from the rendered panes: two spawns that
+        // finish before the next render must see each other.
+        const apply = askedPlacer.current.place(fromAddon!.pane!, asker.id, id, fromAddon!.order);
+        setWindows((prev) => prev.map((w) => (w.id === askerWin.id ? { ...w, root: apply(w.root) } : w)));
+        setActive(askerWin.id);
+      } else if (targetWindowId) {
         setWindows((prev) =>
           prev.map((w) => (w.id === targetWindowId ? { ...w, root: insertAsNewLeaf(w.root, id) } : w)),
         );
@@ -1402,8 +1416,8 @@ export default function App() {
   const spawnMemberRef = useRef(spawnMember);
   spawnMemberRef.current = spawnMember;
   useEffect(() => {
-    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null }>("addon-agent-open", (e) => {
-      const { key, team: agentTeam, name, type: agentType, project, model } = e.payload;
+    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null; pane: number | null; order: number | null }>("addon-agent-open", (e) => {
+      const { key, team: agentTeam, name, type: agentType, project, model, pane, order } = e.payload;
       const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
       // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
       const open = panesRef.current.find((p) => p.label === name);
@@ -1413,7 +1427,7 @@ export default function App() {
       }
       // The member as the backend just joined it (name, type, folder): agmsg is not asked for the member list again.
       const m: Member = { name, types: [agentType], project };
-      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined }).catch((err) => fail(String(err)));
+      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined, pane: pane ?? undefined, order: order ?? undefined }).catch((err) => fail(String(err)));
     });
     return () => void p.then((unlisten) => unlisten());
   }, []);
@@ -2630,6 +2644,7 @@ export default function App() {
                       ),
                   );
                   const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
+                  const addonMember = isAddonMember(m);
                   return (
                     <li
                       key={m.name}
@@ -2664,11 +2679,16 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m, spawnTargetWindowId(windows, active, team))}
+                        onClick={() => {
+                          // An add-on is not an agent: there is no CLI to start for it.
+                          if (!addonMember) spawnMember(m, spawnTargetWindowId(windows, active, team));
+                        }}
                         title={
-                          pane
-                            ? t("sidebar.member.titleRunning")
-                            : t("sidebar.member.titleSpawn")
+                          addonMember
+                            ? t("sidebar.member.titleAddon")
+                            : pane
+                              ? t("sidebar.member.titleRunning")
+                              : t("sidebar.member.titleSpawn")
                         }
                       >
                         <span className="member-name">{m.name}</span>
@@ -2678,7 +2698,11 @@ export default function App() {
                           </span>
                         )}
                         <span className="member-types">
-                          {m.types.join(", ") || t("sidebar.member.noTypes")}
+                          {addonMember ? (
+                            <span className="member-addon-badge">{t("sidebar.member.addonBadge")}</span>
+                          ) : (
+                            m.types.join(", ") || t("sidebar.member.noTypes")
+                          )}
                         </span>
                       </button>
                     </li>
@@ -2947,6 +2971,7 @@ export default function App() {
                       addons={catalog.addons}
                       onClose={() => setModal({ kind: "closePane", paneId: p.id })}
                       onOpenSettings={() => setModal({ kind: "settings" })}
+                      onHostId={(hostId) => setPanes((prev) => (prev.some((x) => x.id === p.id && x.hostId !== hostId) ? prev.map((x) => (x.id === p.id ? { ...x, hostId } : x)) : prev))}
                     />
                   ) : (
                   <TerminalPane

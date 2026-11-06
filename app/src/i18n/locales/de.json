@@ -43,7 +43,9 @@
       "titleRunning": "läuft bereits — klicken zum Fokussieren",
       "titleSpawn": "in einem PTY-Bereich starten",
       "noTypes": "—",
-      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen."
+      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen.",
+      "addonBadge": "Add-on",
+      "titleAddon": "Ein Add-on, kein Agent. Verwaltung in den Einstellungen unter Add-ons."
     },
     "user": {
       "title": "app-user in {{team}}",
@@ -317,13 +319,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "Als Mitglied dem von dir gewählten Team beitreten",
+      "messagesSend": "Nachrichten an Mitglieder dieses Teams senden",
+      "agentsSpawn": "Agenten in diesem Team starten"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "Mitglied im Team: {{scope}}",
+      "send": "Sendet Nachrichten: {{scope}}",
+      "spawn": "Startet Agenten: {{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -340,7 +348,8 @@
       "can": "Kann",
       "allowed": "Erlaubt",
       "nothingYet": "noch nichts",
-      "installedOn": "installiert am {{date}}"
+      "installedOn": "installiert am {{date}}",
+      "powersWant": "{{title}} möchte im Team {{team}} Folgendes tun:"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -410,12 +419,16 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "Was es nicht kann",
+      "neverTitle": "Was das Add-on selbst nicht kann",
       "source_one": "von {{repo}} · {{sha}} · fügt {{count}} Pane hinzu",
       "source_other": "von {{repo}} · {{sha}} · fügt {{count}} Panes hinzu",
       "sourceUpdate_one": "von {{repo}} · {{from}} → {{to}} · {{count}} Pane",
       "sourceUpdate_other": "von {{repo}} · {{from}} → {{to}} · {{count}} Panes",
-      "panes": "Fügt hinzu: {{names}}"
+      "panes": "Fügt hinzu: {{names}}",
+      "agentsTitle": "Agenten, mit denen es spricht oder die es startet",
+      "agentsBody": "Sie arbeiten mit ihren eigenen Berechtigungen. Die Einschränkungen dieses Add-ons gelten für sie nicht: Sie können Dateien schreiben und löschen, andere Ordner lesen und das Netzwerk nutzen, soweit ihre eigenen Einstellungen es erlauben.",
+      "agentsMode": "Gestartete Agenten nutzen diesen Berechtigungsmodus: den agmsg-Standard oder deine Einstellung in spawn_options.yaml für diese CLI.",
+      "agentsFolder": "Ihr Arbeitsordner ist ~/agmsg-agents/<name> oder ein Ordner innerhalb eines Ordners, den du diesem Add-on gegeben hast."
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -482,6 +495,38 @@
     "group": {
       "problems_one": "{{count}} Problem",
       "problems_other": "{{count}} Probleme"
+    },
+    "agents": {
+      "title": "Mitglieder und Agenten von Add-ons",
+      "refresh": "Aktualisieren",
+      "none": "Kein Add-on ist einem Team beigetreten oder hat einen Agenten gestartet.",
+      "kind": {
+        "member": "Mitglied",
+        "agent": "Agent"
+      },
+      "state": {
+        "claimed": "tritt bei",
+        "joined": "beigetreten",
+        "opening": "startet",
+        "running": "läuft",
+        "failed": "fehlgeschlagen",
+        "orphaned": "läuft möglicherweise noch",
+        "unknown": "wurde möglicherweise gestartet"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "Er lief nach dem Beenden der App weiter. agmsg startet keine weitere Kopie, bis du entscheidest.",
+      "unknownHelp": "Die App wurde beim Start beendet; es ist unbekannt, ob er läuft. agmsg startet keine weitere Kopie, bis du entscheidest.",
+      "openNew": "Neu öffnen",
+      "leave": "Belassen",
+      "open": "Öffnen"
+    },
+    "trust": {
+      "label": "~/agmsg-agents in Claude Code als vertrauenswürdig markieren, damit die gestarteten Agents nicht bei „Do you trust this folder?“ hängen bleiben",
+      "note": "Das schreibt eine einzige Einstellung in die Konfiguration von Claude Code: das Vertrauens-Flag für diesen Ordner. Sonst ändert sich nichts.",
+      "trusted": "~/agmsg-agents ist in Claude Code bereits als vertrauenswürdig markiert.",
+      "notFound": "Die Konfiguration von Claude Code wurde nicht gefunden, daher lässt sich nichts setzen. Bleiben die Agents bei „Do you trust this folder?“ stehen, drücken Sie in ihrem Pane die Eingabetaste.",
+      "readFailed": "Die Konfiguration von Claude Code konnte nicht gelesen werden: {{error}} Die Agenten bleiben evtl. bei \"Do you trust this folder?\" stehen; drücke Enter in ihrem Pane.",
+      "failed": "~/agmsg-agents konnte nicht als vertrauenswürdig markiert werden: {{error}}"
     }
   }
 }
