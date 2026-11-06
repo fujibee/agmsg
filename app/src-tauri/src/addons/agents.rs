@@ -693,7 +693,7 @@ impl Manager {
             return Err(BrokerError::new("not_available", format!("{} joined the team but its terminal did not open: {why}", e.name)));
         }
         // The window answers through `pty_started` or `open_failed`. No entry stays `opening` after this returns:
-        // silence means the process may still start, so the entry is `unknown` and the user decides (koit Q7); a
+        // silence means the process may still start, so the entry is `unknown` and the user decides; a
         // late `pty_started` moves it to `running`.
         let waited = std::time::Instant::now();
         let deadline = waited + self.open_wait;
