@@ -91,13 +91,21 @@ agmsg_state_preflight() {   # <skill dir> <state root>
   if ! mkdir -p "$root" 2>/dev/null || [ ! -w "$root" ]; then
     _agmsg_state_refuse "$name" "$skill" "cannot create or write $root"; return 1
   fi
-  probe="$root/.link-probe.$$"
-  rm -f "$probe" 2>/dev/null
-  if ! ln -s "$root" "$probe" 2>/dev/null || [ ! -L "$probe" ]; then
-    rm -rf "$probe" 2>/dev/null
+  # A directory made here by mktemp, holding one file and a link to it: nothing
+  # that already exists is touched, and only what this call made is removed (a
+  # Windows ln that copies leaves a plain file in place of the link, so no
+  # recursive removal is needed).
+  probe="$(mktemp -d "$root/.link-probe.XXXXXX" 2>/dev/null)" || {
+    _agmsg_state_refuse "$name" "$skill" "cannot create or write $root"; return 1
+  }
+  : > "$probe/target"
+  if ! ln -s target "$probe/link" 2>/dev/null || [ ! -L "$probe/link" ]; then
+    command rm -f "$probe/target" "$probe/link"
+    rmdir "$probe" 2>/dev/null
     _agmsg_state_refuse "$name" "$skill" "symbolic links cannot be created in $root"; return 1
   fi
-  rm -f "$probe" 2>/dev/null
+  command rm -f "$probe/target" "$probe/link"
+  rmdir "$probe" 2>/dev/null
   if [ "$(_agmsg_state_dev "$skill")" != "$(_agmsg_state_dev "$root")" ]; then
     _agmsg_state_refuse "$name" "$skill" "$root is on another filesystem, so the move would not be a rename"; return 1
   fi
@@ -151,17 +159,22 @@ agmsg_state_link() {   # <skill dir> <state root>
     else
       mkdir -p "$dest" 2>/dev/null || { echo "agmsg: could not create $dest" >&2; failed=1; continue; }
     fi
-    if ! ln -s "$dest" "$src" 2>/dev/null; then
+    if [ -d "$src" ] || ! ln -s "$dest" "$src" 2>/dev/null; then
       # A running script created the old path again between the move and the
       # link: fold what it made into the moved directory, then link.
       if [ -d "$src" ] && [ ! -L "$src" ]; then
         ( shopt -s dotglob nullglob; for f in "$src"/*; do mv -n "$f" "$dest/" 2>/dev/null; done )
         rmdir "$src" 2>/dev/null
       fi
-      if ! ln -s "$dest" "$src" 2>/dev/null; then
-        echo "agmsg: moved $src to $dest but could not link it back; run: ln -s $dest $src" >&2
+      if [ -d "$src" ] || ! ln -s "$dest" "$src" 2>/dev/null; then
+        echo "agmsg: moved $src to $dest but could not link it back (something else created $src); remove it, then run: ln -s $dest $src" >&2
         failed=1
       fi
+    fi
+    # Published means the path now IS the link to the moved directory.
+    if [ "$(readlink "$src" 2>/dev/null)" != "$dest" ]; then
+      [ "$failed" = 1 ] || echo "agmsg: $src does not link to $dest after the move" >&2
+      failed=1
     fi
   done
   if [ "$failed" = 0 ]; then
@@ -207,4 +220,28 @@ agmsg_state_adopt() {   # <skill dir> <state root>
     fi
   fi
   printf '%s\n' "$skill" > "$root/.owner"
+}
+
+# A copy made with cp -R keeps the links, so they name the ORIGINAL's state. Each
+# part linked into a root that belongs to another existing install becomes an
+# empty real directory in this one; the other install's state is not read,
+# written or removed. 0 = nothing wrong or done; 1 = could not detach.
+agmsg_state_detach_foreign() {   # <skill dir>
+  local skill="${1%/}" part target parent owner
+  for part in $AGMSG_STATE_PARTS; do
+    [ -L "$skill/$part" ] || continue
+    target="$(readlink "$skill/$part")"
+    case "$target" in /*/"$part") parent="${target%/*}" ;; *) continue ;; esac
+    if [ -f "$parent/.owner" ]; then
+      owner="$(<"$parent/.owner")"
+    else
+      owner="$(agmsg_state_marker_get "$skill" skill)"
+    fi
+    if [ -n "$owner" ] && [ "${owner%/}" != "$skill" ] && [ -d "$owner" ] \
+       && [ "$(cd -P "$owner" 2>/dev/null && pwd -P)" != "$(cd -P "$skill" 2>/dev/null && pwd -P)" ]; then
+      command rm -f "$skill/$part" && mkdir -p "$skill/$part" || return 1
+      echo "  ~ $skill/$part was linked into the state of $owner; this install now has its own (that state is left as it is)"
+    fi
+  done
+  return 0
 }

@@ -59,6 +59,11 @@ else
   # shellcheck disable=SC1090
   . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
 fi
+# The state-root helpers (an older recovery helper does not carry them).
+if ! declare -F agmsg_state_detach_foreign >/dev/null 2>&1 && [ -r "$SCRIPT_DIR/scripts/lib/state-root.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/state-root.sh"
+fi
 
 AUTO_YES=false
 KEEP_DATA=false
@@ -218,33 +223,10 @@ _uninstall_clean_codex_config() {
 # writable_roots entries -- everything except the machine-wide shared
 # pieces, which the caller handles once, separately (_uninstall_shared_pieces
 # below). Sets the global REMOVED=true on any change.
-# A copy of an install (cp -R keeps the links) points at the ORIGINAL's state.
-# Before this uninstall takes any lock or writes any record, a copy is detached:
-# its links become empty real directories, so nothing of the original's db, teams,
-# run or .trash is read, written or removed from here.
-_uninstall_detach_foreign_state() {   # <skill dir>
-  local skill="${1%/}" part target parent owner
-  for part in db teams ext-tools .trash run; do
-    [ -L "$skill/$part" ] || continue
-    target="$(readlink "$skill/$part")"
-    case "$target" in /*/"$part") parent="${target%/*}" ;; *) continue ;; esac
-    if [ -f "$parent/.owner" ]; then
-      owner="$(<"$parent/.owner")"
-    else
-      owner="$(sed -n 's/^skill=//p' "$skill/.agmsg" 2>/dev/null | head -n 1)"
-    fi
-    if [ -n "$owner" ] && [ "${owner%/}" != "$skill" ] && [ -d "$owner" ] \
-       && [ "$(cd -P "$owner" 2>/dev/null && pwd -P)" != "$(cd -P "$skill" 2>/dev/null && pwd -P)" ]; then
-      command rm -f "$skill/$part" && mkdir -p "$skill/$part" || return 1
-      echo "  ~ $skill/$part linked into the state of $owner; detached (that state is left as it is)"
-    fi
-  done
-  return 0
-}
-
 _uninstall_one() {
   local SKILL_DIR="$1"
-  _uninstall_detach_foreign_state "$SKILL_DIR" || return 1
+  # A copy of an install points at the ORIGINAL's state: detach it before any lock or record.
+  agmsg_state_detach_foreign "$SKILL_DIR" || return 1
   local SKILL_NAME; SKILL_NAME="$(basename "$SKILL_DIR")"
 
   # Operation lock (agmsgd beta): held for the whole of this function,

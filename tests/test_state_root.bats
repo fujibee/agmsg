@@ -282,7 +282,7 @@ demote() {
   command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
   run env HOME="$FAKE_HOME" bash "$FAKE_HOME/.agents/skills/agmsg-copy/uninstall.sh" --yes
   [ "$status" -eq 0 ]
-  grep -qF -- "linked into the state of $SK; detached" <<<"$output"
+  grep -qF -- "was linked into the state of $SK; this install now has its own" <<<"$output"
   [ -f "$ST/teams/t/owner-data" ]
   [ -f "$ST/run/original-run-file" ]
   [ -d "$ST/db" ]
@@ -298,19 +298,64 @@ demote() {
   [ -f "$ST/.trash/backup" ]
 }
 
-@test "updating a copy neither stops the original's agmsgd nor rewrites the original's marker or owner" {
+@test "updating a copy gives it its own state and leaves the original's backups, marker, owner and links alone" {
   inst
+  printf 'keep\n' > "$ST/.trash/original-backup"
+  printf 'keep\n' > "$ST/run/original-run-file"
   command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
   local before_marker before_owner
   before_marker="$(<"$SK/.agmsg")"
   before_owner="$(<"$ST/.owner")"
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd agmsg-copy
   [ "$status" -eq 0 ]
-  grep -qF -- "belongs to $SK" <<<"$output"
-  grep -qF -- "agmsgd and sync engines are not stopped or restarted" <<<"$output"
+  grep -qF -- "was linked into the state of $SK; this install now has its own" <<<"$output"
   [ "$(<"$SK/.agmsg")" = "$before_marker" ]
   [ "$(<"$ST/.owner")" = "$before_owner" ]
-  [ ! -e "$FAKE_HOME/.agmsg/agmsg-copy" ]
+  [ -f "$ST/.trash/original-backup" ]
+  [ -f "$ST/run/original-run-file" ]
+  [ "$(readlink "$SK/run")" = "$ST/run" ]
+  [ "$(readlink "$FAKE_HOME/.agents/skills/agmsg-copy/run")" = "$FAKE_HOME/.agmsg/agmsg-copy/run" ]
+  [ "$(<"$FAKE_HOME/.agmsg/agmsg-copy/.owner")" = "$FAKE_HOME/.agents/skills/agmsg-copy" ]
+}
+
+@test "a contender arriving while run/ is absent mid-move waits and never makes a second lock database" {
+  inst
+  sleep 30 &
+  local mover=$!
+  mkdir "$SK/.state-moving"
+  printf '%s\n' "$mover" > "$SK/.state-moving/pid"
+  command mv "$SK/run" "$FAKE_HOME/run.parked"
+  command rm "$FAKE_HOME/run.parked/.gone" 2>/dev/null || true
+  (
+    . "$REPO_ROOT/scripts/lib/install-op-lock.sh"
+    agmsg_install_op_lock "$SK/run/install-op.lock.db" 20000 && echo acquired > "$BATS_TEST_TMPDIR/contender.out"
+  ) &
+  local contender=$!
+  sleep 2
+  # run/ is still absent: the contender did not create it or open a lock there
+  [ ! -e "$SK/run" ]
+  [ ! -e "$BATS_TEST_TMPDIR/contender.out" ]
+  command mv "$FAKE_HOME/run.parked" "$ST/run.back"
+  command rmdir "$ST/run" 2>/dev/null || true
+  command mv "$ST/run.back" "$ST/run"
+  ln -s "$ST/run" "$SK/run"
+  command rm "$SK/.state-moving/pid"
+  command rmdir "$SK/.state-moving"
+  wait "$contender"
+  [ "$(<"$BATS_TEST_TMPDIR/contender.out")" = acquired ]
+  kill "$mover" 2>/dev/null || true
+}
+
+@test "agmsgd state: unreadable is unknown, no table or no file is confirmed not running" {
+  eval "$(sed -n '/^agmsg_install_daemon_active() {/,/^}/p' "$REPO_ROOT/install.sh")"
+  mkdir -p "$BATS_TEST_TMPDIR/s/run"
+  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s" && return 1 || [ "$?" -eq 1 ]
+  sqlite3 "$BATS_TEST_TMPDIR/s/run/install.db" "CREATE TABLE other(x);"
+  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s" && return 1 || [ "$?" -eq 1 ]
+  sqlite3 "$BATS_TEST_TMPDIR/s/run/install.db" "CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('ready');"
+  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s"
+  printf 'this is not a database\n' > "$BATS_TEST_TMPDIR/s/run/install.db"
+  agmsg_install_daemon_active "$BATS_TEST_TMPDIR/s" && return 1 || [ "$?" -eq 2 ]
 }
 
 @test "an unfinished install operation on record: the update refuses and nothing was moved" {
@@ -361,4 +406,13 @@ EOS
   wait "$updater"
   [ -L "$SK/db" ]
   [ "$(readlink "$SK/db")" = "$ST/db" ]
+}
+
+@test "the move marker is gone after a move and after a refused move" {
+  inst
+  demote
+  run inst --update
+  [ "$status" -eq 0 ]
+  [ ! -e "$SK/.state-moving" ]
+  [ -L "$SK/run" ]
 }

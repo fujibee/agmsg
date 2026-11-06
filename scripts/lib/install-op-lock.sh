@@ -66,7 +66,7 @@ trap '' PIPE
 # "the write didn't fail"), 1 on any failure (busy past timeout_ms, the
 # sqlite3 coprocess could not be started, or its output didn't confirm).
 # Leaves no fd/process/tmpdir behind on failure.
-agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
+_agmsg_install_op_lock_once() {   # <lock_db_path> [timeout_ms, default 30000]
   local db="$1" timeout_ms="${2:-30000}"
   local dir="" in_fifo="" out_fifo="" line read_timeout read_fd write_fd coproc_prefix read_rc
   AGMSG_INSTALL_OP_LOCK_FAILURE_REASON=""
@@ -158,6 +158,44 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
     return 1
   fi
   return 0
+}
+
+# While an install moves its state out of the skills directory, run/ (and the lock
+# database in it) is briefly absent at its old path. The mover creates
+# <install>/.state-moving (with its pid) for exactly that time; a contender waits
+# for it to go before it opens the lock, and looks again after it has the lock, so
+# it never ends up holding a second lock database made at the old path. A marker
+# whose process is gone is removed.
+agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
+  local db="$1" timeout_ms="${2:-30000}" skill="" moving pid waited=0 left
+  case "$db" in */run/install-op.lock.db) skill="${db%/run/install-op.lock.db}" ;; esac
+  if [ -z "$skill" ]; then
+    _agmsg_install_op_lock_once "$db" "$timeout_ms"
+    return
+  fi
+  moving="$skill/.state-moving"
+  while :; do
+    while [ -d "$moving" ]; do
+      pid=""
+      [ ! -f "$moving/pid" ] || pid="$(<"$moving/pid")" 2>/dev/null || pid=""
+      if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$moving/pid"
+        rmdir "$moving" 2>/dev/null
+        continue
+      fi
+      if [ "$waited" -ge "$timeout_ms" ]; then
+        _agmsg_install_op_lock_set_failure "the state of this install is being moved ($moving exists)"
+        return 1
+      fi
+      sleep 0.2
+      waited=$((waited + 200))
+    done
+    left=$((timeout_ms - waited))
+    [ "$left" -ge 1000 ] || left=1000
+    _agmsg_install_op_lock_once "$db" "$left" || return 1
+    [ -d "$moving" ] || return 0
+    agmsg_install_op_unlock
+  done
 }
 
 # Preserve a short, shell-escaped first response so a caller can explain which

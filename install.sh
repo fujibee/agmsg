@@ -175,7 +175,6 @@ agmsg_install_pid_gone() {   # <pid>
 # what to do. Reads the installed (old) install.db only; uses no installed
 # script.
 agmsg_install_stop_daemon() {   # <skill_dir>
-  [ -z "${AGMSG_STATE_FOREIGN:-}" ] || return 0
   local skill="$1" db="$1/run/install.db" state socket node pid bound deadline
   [ -f "$db" ] || return 0
   state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
@@ -227,7 +226,6 @@ agmsg_install_stop_daemon() {   # <skill_dir>
 }
 
 agmsg_install_restart_daemon() {   # <skill_dir>
-  [ -z "${AGMSG_STATE_FOREIGN:-}" ] || return 0
   local skill="$1" db="$1/run/install.db" intent op_gen state waited=0
   [ -f "$db" ] || return 0
   # The intent as the update saw it; the start below only goes ahead if it is
@@ -262,42 +260,22 @@ agmsg_install_restart_daemon() {   # <skill_dir>
 # cannot be moved, nothing is touched, one line names the install and the
 # reason, and the install keeps working where it is.
 #   $1 skill dir   $2 newline-separated teams with a running sync engine
-# The same question agmsg_install_stop_daemon asks of the recorded owner: 0 while
-# agmsgd is (still) starting, ready or stopping.
+# The same question agmsg_install_stop_daemon asks of the recorded owner:
+# 0 = agmsgd is (still) starting, ready or stopping; 1 = confirmed not running
+# (no record, or no daemon table in an install older than agmsgd); 2 = unknown
+# (the record cannot be read).
 agmsg_install_daemon_active() {   # <skill_dir>
-  local db="$1/run/install.db" state
+  local db="$1/run/install.db" has state
   [ -f "$db" ] || return 1
-  state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+  has="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT count(*) FROM sqlite_master WHERE name='daemon_owner';" 2>/dev/null)" || return 2
+  case "${has%$'\r'}" in 0) return 1 ;; 1) ;; *) return 2 ;; esac
+  state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null)" || return 2
   case "${state%$'\r'}" in ready|starting|stopping) return 0 ;; esac
   return 1
 }
 
-# A copy made with cp -R keeps the links, so they name the ORIGINAL's state. Sets
-# AGMSG_STATE_FOREIGN to that install; nothing is changed. Runs before the
-# operation lock, because everything after it works inside run/.
-AGMSG_STATE_FOREIGN=""
-agmsg_install_state_foreign_check() {   # <skill_dir>
-  local skill="${1%/}" part linked parent owner
-  AGMSG_STATE_FOREIGN=""
-  for part in $AGMSG_STATE_PARTS; do
-    [ -L "$skill/$part" ] || continue
-    linked="$(readlink "$skill/$part")"
-    case "$linked" in /*/"$part") parent="${linked%/*}" ;; *) continue ;; esac
-    [ -f "$parent/.owner" ] || continue
-    owner="$(<"$parent/.owner")"
-    if [ -n "$owner" ] && [ "${owner%/}" != "$skill" ] && [ -d "$owner" ] \
-       && [ "$(cd -P "$owner" 2>/dev/null && pwd -P)" != "$(cd -P "$skill" 2>/dev/null && pwd -P)" ]; then
-      AGMSG_STATE_FOREIGN="$owner"
-      echo "  ! the state '${skill##*/}' links to ($parent) belongs to $owner; it is not touched from here, and agmsgd and sync engines are not stopped or restarted" >&2
-      return 0
-    fi
-  done
-  return 0
-}
-
 agmsg_install_move_state() {
   local skill="$1" teams="$2" root name part moved_any=false need=false team
-  [ -z "$AGMSG_STATE_FOREIGN" ] || return 0
   name="${skill##*/}"
   root="$(agmsg_state_root "$skill" "$AGENTS_DIR")"
   for part in $AGMSG_STATE_PARTS; do
@@ -328,8 +306,12 @@ agmsg_install_move_state() {
     # started again and the state stays where it is.
     local stopped="" stop_failed=""
     agmsg_install_stop_daemon "$skill"
-    if agmsg_install_daemon_active "$skill"; then
+    local active=0
+    agmsg_install_daemon_active "$skill" || active=$?
+    if [ "$active" = 0 ]; then
       stop_failed="agmsgd did not confirm that it stopped"
+    elif [ "$active" = 2 ]; then
+      stop_failed="the state of agmsgd in $skill/run/install.db cannot be read"
     else
       while IFS= read -r team; do
         [ -n "$team" ] || continue
@@ -356,7 +338,19 @@ $team"
       return 0
     fi
   fi
-  if ! agmsg_state_link "$skill" "$root"; then
+  # While run/ is renamed and linked, a contender for the install lock must wait
+  # (agmsg_install_op_lock honors this marker) instead of making a lock database
+  # at the old path.
+  local movemark="$skill/.state-moving" link_ok=false
+  if mkdir "$movemark" 2>/dev/null; then
+    printf '%s\n' "$$" > "$movemark/pid"
+    agmsg_state_link "$skill" "$root" && link_ok=true
+    rm -f "$movemark/pid"
+    rmdir "$movemark" 2>/dev/null || true
+  else
+    echo "  ! $movemark exists: another move of this state is in progress" >&2
+  fi
+  if [ "$link_ok" != true ]; then
     echo "  ! the state of '$name' was only partly moved; fix the lines above, then run the update again" >&2
   fi
   [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
@@ -544,7 +538,7 @@ agmsg_install_write_recovery_helper() {
   agmsg_install_op_require || return 1
   temp="$(mktemp "$SKILL_DIR/run/.install-op-recovery.XXXXXX")" || return 1
   if ! cat "$SCRIPT_DIR/scripts/lib/codex-config.sh" "$SCRIPT_DIR/scripts/lib/sqlpath.sh" \
-      "$SCRIPT_DIR/scripts/lib/sqlite-output.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" > "$temp"; then
+      "$SCRIPT_DIR/scripts/lib/sqlite-output.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" "$SCRIPT_DIR/scripts/lib/state-root.sh" > "$temp"; then
     rm -f "$temp"
     return 1
   fi
@@ -565,7 +559,6 @@ agmsg_install_operation_begin() {
   local lock_db="$SKILL_DIR/run/install-op.lock.db"
   local install_db="$SKILL_DIR/run/install.db"
 
-  mkdir -p "$SKILL_DIR/run"
   if ! agmsg_install_op_lock "$lock_db"; then
     echo "  ! could not take the install operation lock: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
     return 1
@@ -1181,6 +1174,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   # Restarting after the rewrite (further down) covers BOTH outcomes:
   # a survivor is stopped and replaced, and a crasher is simply started fresh
   # since its pidfile already reads as stale by then.
+  # A copy made with cp -R still links to the ORIGINAL's state: give it its own
+  # (empty) parts before anything is read, locked or written through those links.
+  agmsg_state_detach_foreign "$SKILL_DIR" || exit 1
   AGMSG_RUNNING_TEAMS=""
   if [ -x "$SKILL_DIR/scripts/remote.sh" ]; then
     while IFS= read -r _agmsg_status_line; do
@@ -1199,8 +1195,6 @@ $_agmsg_running_team"
     done < <("$SKILL_DIR/scripts/remote.sh" status --json 2>/dev/null || true)
   fi
   unset _agmsg_status_line _agmsg_running_team
-  agmsg_install_state_foreign_check "$SKILL_DIR"
-  [ -z "$AGMSG_STATE_FOREIGN" ] || AGMSG_RUNNING_TEAMS=""
   # The lock is taken first and held through the move: the lock database moves
   # with run/ by rename, so it is the same file at both paths and a second
   # install, update or uninstall waits (or refuses on the unfinished record)
