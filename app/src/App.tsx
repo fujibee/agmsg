@@ -303,6 +303,34 @@ type Modal =
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
 export const APP_USER_TYPE = "agmsg-app";
+// The type an add-on's own member joins with (it reads through the broker, not a terminal).
+export const ADDON_MEMBER_TYPE = "app-addon";
+
+// A member with no terminal by design: the app's own user and add-on members. A message for one is not a missed
+// notice, so it is not logged as one.
+export function hasNoTerminalByDesign(types: ReadonlyArray<string>): boolean {
+  return types.includes(APP_USER_TYPE) || types.includes(ADDON_MEMBER_TYPE);
+}
+
+// Member types per team, fetched when a message finds no pane. A name not in the cached list is looked for again
+// at most every MEMBER_TYPES_TTL_MS, so a stream of messages for one unknown name costs one lookup per interval.
+export const MEMBER_TYPES_TTL_MS = 30_000;
+export type MemberTypesCache = Map<string, { at: number; types: Map<string, string[]> }>;
+
+export async function typesOfMember(
+  cache: MemberTypesCache,
+  team: string,
+  name: string,
+  now: number,
+  fetchMembers: (team: string) => Promise<ReadonlyArray<{ name: string; types: string[] }>>,
+): Promise<string[] | undefined> {
+  const hit = cache.get(team);
+  if (hit?.types.has(name)) return hit.types.get(name);
+  if (hit && now - hit.at < MEMBER_TYPES_TTL_MS) return undefined;
+  const ms = await fetchMembers(team);
+  cache.set(team, { at: now, types: new Map(ms.map((m) => [m.name, m.types])) });
+  return cache.get(team)?.types.get(name);
+}
 // Team-room history page size — the initial load, and each scroll-up "load more".
 const ROOM_PAGE_SIZE = 30;
 // Persists which team was selected across restarts. Window/pane state is
@@ -574,6 +602,7 @@ export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
+  const memberTypesRef = useRef<MemberTypesCache>(new Map());
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
@@ -1208,7 +1237,15 @@ export default function App() {
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
-      if (!pane) appLog(`notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}`);
+      if (!pane) {
+        const msg = e.payload;
+        typesOfMember(memberTypesRef.current, msg.team, msg.to, Date.now(), (t) => invoke<Member[]>("agmsg_members", { team: t }))
+          .catch(() => undefined)
+          .then((types) => {
+            if (types && hasNoTerminalByDesign(types)) return;
+            appLog(`notice not typed: message ${msg.from} -> ${msg.to} in ${msg.team}: ${why}`);
+          });
+      }
       if (feed) setMessages((prev) => appendIfNew(prev, e.payload));
       if (pane && !firstSight(noticedRef.current, pane.id, e.payload.id)) {
         appLog(`notice not typed: message ${e.payload.id} was already typed into ${pane.id}`);

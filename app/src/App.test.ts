@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -8,6 +8,9 @@ import {
   firstSight,
   mergeById,
   routeMessage,
+  hasNoTerminalByDesign,
+  typesOfMember,
+  MEMBER_TYPES_TTL_MS,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -557,5 +560,37 @@ describe("renameTeamKey", () => {
     const prevTeamRefAfterFix = "new-team";
     byTeam = { ...byTeam, [prevTeamRefAfterFix]: "w-1" };
     expect(Object.keys(byTeam)).toEqual(["new-team"]);
+  });
+});
+
+describe("members with no terminal by design", () => {
+  it("recognises the app user and add-on members, not terminal agents", () => {
+    expect(hasNoTerminalByDesign(["agmsg-app"])).toBe(true);
+    expect(hasNoTerminalByDesign(["app-addon"])).toBe(true);
+    expect(hasNoTerminalByDesign(["claude"])).toBe(false);
+    expect(hasNoTerminalByDesign([])).toBe(false);
+  });
+
+  it("looks a team up once, then answers from the cache", async () => {
+    const cache = new Map();
+    const fetchMembers = vi.fn(async () => [
+      { name: "chess", types: ["app-addon"] },
+      { name: "you", types: ["agmsg-app"] },
+      { name: "white", types: ["claude"] },
+    ]);
+    expect(await typesOfMember(cache, "t", "chess", 0, fetchMembers)).toEqual(["app-addon"]);
+    expect(await typesOfMember(cache, "t", "you", 1, fetchMembers)).toEqual(["agmsg-app"]);
+    expect(await typesOfMember(cache, "t", "white", 2, fetchMembers)).toEqual(["claude"]);
+    expect(fetchMembers).toHaveBeenCalledTimes(1);
+  });
+
+  it("looks again for an unknown name only after the interval", async () => {
+    const cache = new Map();
+    const fetchMembers = vi.fn(async () => [{ name: "white", types: ["claude"] }]);
+    expect(await typesOfMember(cache, "t", "ghost", 0, fetchMembers)).toBeUndefined();
+    expect(await typesOfMember(cache, "t", "ghost", MEMBER_TYPES_TTL_MS - 1, fetchMembers)).toBeUndefined();
+    expect(fetchMembers).toHaveBeenCalledTimes(1);
+    await typesOfMember(cache, "t", "ghost", MEMBER_TYPES_TTL_MS, fetchMembers);
+    expect(fetchMembers).toHaveBeenCalledTimes(2);
   });
 });
