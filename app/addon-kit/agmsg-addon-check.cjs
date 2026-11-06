@@ -126,16 +126,22 @@ function checkConf(confPath, rel) {
       if (!OPENS.has(o)) out.errors.push(at('opens') + ': unknown "' + o + '" (path or url).');
     }
   }
-  const locales = values.locales ? list(values.locales.value) : [];
-  locales.forEach((t, i) => {
-    if (!LANG_TAG.test(t)) out.errors.push(at('locales') + ': "' + t + '" is not a language tag like en or pt-BR.');
-    else if (locales.slice(0, i).some((o) => o.toLowerCase() === t.toLowerCase())) out.errors.push(at('locales') + ': "' + t + '" is listed twice.');
-  });
-  const defaultLocale = (values.default && values.default.value) || 'en';
-  if (values.default) {
-    if (!LANG_TAG.test(defaultLocale)) out.errors.push(at('default') + ': "' + defaultLocale + '" is not a language tag like en or pt-BR.');
-    else if (locales.length && !locales.some((l) => l.toLowerCase() === defaultLocale.toLowerCase())) {
-      out.warnings.push(at('default') + ': "' + defaultLocale + '" is not in "locales".');
+  // Advisory, so a problem is a warning and the entry is dropped; it never makes the app refuse the add-on.
+  const locales = [];
+  for (const t of values.locales ? list(values.locales.value) : []) {
+    if (!LANG_TAG.test(t)) out.warnings.push(at('locales') + ': "' + t + '" is not a language tag like en or pt-BR; ignored.');
+    else if (locales.some((o) => o.toLowerCase() === t.toLowerCase())) out.warnings.push(at('locales') + ': "' + t + '" is listed twice; ignored.');
+    else locales.push(t);
+  }
+  let defaultLocale = 'en';
+  if (values.default && values.default.value) {
+    if (!LANG_TAG.test(values.default.value)) {
+      out.warnings.push(at('default') + ': "' + values.default.value + '" is not a language tag like en or pt-BR; "en" is used.');
+    } else {
+      defaultLocale = values.default.value;
+      if (locales.length && !locales.some((l) => l.toLowerCase() === defaultLocale.toLowerCase())) {
+        out.warnings.push(at('default') + ': "' + defaultLocale + '" is not in "locales".');
+      }
     }
   }
   out.conf = {

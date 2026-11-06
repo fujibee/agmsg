@@ -126,13 +126,15 @@ describe("agmsg-addon-check", () => {
     expect(r.output).not.toContain("error:");
   });
 
-  it("refuses a malformed or repeated language tag, and warns when default is not listed", () => {
+  it("only warns about a malformed or repeated language tag, and about a default that is not listed", () => {
     const root = scaffold();
     edit(root, "app-panes/demo/addon.conf", "protocol = 1\n", "protocol = 1\nlocales = en, japanese!, en\ndefault = ja\n");
+    commitAll(root, "i18n");
     const r = run(root);
-    expect(r.status).toBe(1);
-    expect(r.output).toContain('"japanese!" is not a language tag like en or pt-BR.');
-    expect(r.output).toContain('"en" is listed twice.');
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain("error:");
+    expect(r.output).toContain('"japanese!" is not a language tag like en or pt-BR; ignored.');
+    expect(r.output).toContain('"en" is listed twice; ignored.');
     expect(r.output).toContain('"ja" is not in "locales".');
   });
 

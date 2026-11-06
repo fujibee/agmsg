@@ -194,20 +194,27 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
             }
         }
     }
-    let locales = val("locales").map(list).unwrap_or_default();
-    for (i, t) in locales.iter().enumerate() {
-        if !is_lang_tag(t) {
-            errors.push(format!("{}: \"{t}\" is not a language tag like en or pt-BR.", at("locales")));
-        } else if locales[..i].iter().any(|o| o.eq_ignore_ascii_case(t)) {
-            errors.push(format!("{}: \"{t}\" is listed twice.", at("locales")));
+    // `locales` and `default` are advisory: a bad entry is dropped with a warning, never an error, so they can
+    // never make an add-on refuse to install. The add-on still gets the app's language either way.
+    let mut locales: Vec<String> = Vec::new();
+    for t in val("locales").map(list).unwrap_or_default() {
+        if !is_lang_tag(&t) {
+            warnings.push(format!("{}: \"{t}\" is not a language tag like en or pt-BR; ignored.", at("locales")));
+        } else if locales.iter().any(|o| o.eq_ignore_ascii_case(&t)) {
+            warnings.push(format!("{}: \"{t}\" is listed twice; ignored.", at("locales")));
+        } else {
+            locales.push(t);
         }
     }
-    let default_locale = val("default").filter(|d| !d.is_empty()).unwrap_or("en").to_string();
-    if values.contains_key("default") {
-        if !is_lang_tag(&default_locale) {
-            errors.push(format!("{}: \"{default_locale}\" is not a language tag like en or pt-BR.", at("default")));
-        } else if !locales.is_empty() && !locales.iter().any(|l| l.eq_ignore_ascii_case(&default_locale)) {
-            warnings.push(format!("{}: \"{default_locale}\" is not in \"locales\".", at("default")));
+    let mut default_locale = "en".to_string();
+    if let Some(d) = val("default").filter(|d| !d.is_empty()) {
+        if !is_lang_tag(d) {
+            warnings.push(format!("{}: \"{d}\" is not a language tag like en or pt-BR; \"en\" is used.", at("default")));
+        } else {
+            default_locale = d.to_string();
+            if !locales.is_empty() && !locales.iter().any(|l| l.eq_ignore_ascii_case(d)) {
+                warnings.push(format!("{}: \"{d}\" is not in \"locales\".", at("default")));
+            }
         }
     }
     if let Some(e) = val("entry") {
@@ -351,17 +358,23 @@ mod tests {
     }
 
     #[test]
-    fn locales_and_default_are_advisory_but_checked_for_shape() {
+    fn locales_and_default_are_advisory_and_never_refuse() {
         let c = ok("title=T\nprotocol=1\nlocales=en, ja, zh-CN\ndefault=ja\n");
         assert_eq!(c.locales, vec!["en", "ja", "zh-CN"]);
         assert_eq!(c.default_locale, "ja");
         let none = ok("title=T\nprotocol=1\n");
         assert!(none.locales.is_empty() && none.default_locale == "en");
-        assert!(errs("title=T\nprotocol=1\nlocales=en, japanese!\n").iter().any(|e| e.contains("\"japanese!\" is not a language tag")));
-        assert!(errs("title=T\nprotocol=1\nlocales=en, EN\n").iter().any(|e| e.contains("\"EN\" is listed twice")));
-        assert!(errs("title=T\nprotocol=1\ndefault=x\n").iter().any(|e| e.contains("\"x\" is not a language tag")));
-        let r = parse("title=T\nprotocol=1\nlocales=en\ndefault=ja\n", "c");
+        // A bad or repeated tag is dropped with a warning; the conf still parses.
+        let r = parse("title=T\nprotocol=1\nlocales=en, japanese!, EN, ja\ndefault=x\n", "c");
         assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let c = r.conf.expect("still installs");
+        assert_eq!(c.locales, vec!["en", "ja"]);
+        assert_eq!(c.default_locale, "en");
+        assert!(r.warnings.iter().any(|w| w.contains("\"japanese!\" is not a language tag") && w.contains("ignored")), "{:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.contains("\"EN\" is listed twice")), "{:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.contains("\"x\" is not a language tag") && w.contains("\"en\" is used")), "{:?}", r.warnings);
+        let r = parse("title=T\nprotocol=1\nlocales=en\ndefault=ja\n", "c");
+        assert!(r.errors.is_empty() && r.conf.is_some());
         assert!(r.warnings.iter().any(|w| w.contains("\"ja\" is not in \"locales\"")), "{:?}", r.warnings);
     }
 

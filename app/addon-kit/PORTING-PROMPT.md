@@ -95,7 +95,7 @@ The app tells every add-on its language, so an add-on can follow the app. Nothin
   app.onLocaleChange(load);
   ```
 
-- In `addon.conf`, `locales = en, ja` lists the tags you ship and `default = en` names the one used when none matches (`en` if omitted). Both are optional and advisory: the app never refuses an add-on over them, and an add-on works the same without them. `agmsg-addon-check` checks that each tag is shaped like a language tag, is not repeated, and warns when a listed `web/locales/<tag>.json` is missing or `default` is not listed.
+- In `addon.conf`, `locales = en, ja` lists the tags you ship and `default = en` names the one used when none matches (`en` if omitted). Both are optional and advisory: the app never refuses an add-on over them, and an add-on works the same without them. `agmsg-addon-check` warns (never errors) when a tag is not shaped like a language tag or is repeated, when a listed `web/locales/<tag>.json` is missing, or when `default` is not listed; the app ignores a bad entry the same way and still installs the add-on.
 - Only the tag is sent. It costs no process and one small message per open pane per language change.
 
 ## Do not
