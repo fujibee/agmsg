@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::denylist::Denylist;
-use super::panes::{Authorized, BrokerError};
+use super::panes::{Authorized, BrokerError, PaneId};
 
 type Res = Result<Value, BrokerError>;
 
@@ -167,6 +167,10 @@ pub struct OpenPane {
     /// The member's working folder, as joined: the window does not ask agmsg for it again.
     pub project: String,
     pub model: Option<String>,
+    /// The add-on pane that asked, so the window can open the terminal beside it (None for a member).
+    pub pane: Option<PaneId>,
+    /// Where this agent sits among the ones the same pane started (smaller is higher up); None = after the others.
+    pub order: Option<u32>,
 }
 
 /// The real thing: agmsg's scripts, the process table, the window.
@@ -284,6 +288,13 @@ pub enum Kind {
     Agent,
 }
 
+/// The pane an agent was asked for from, and its place in the column that pane's agents form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    pub pane: PaneId,
+    pub order: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub key: String,
@@ -301,6 +312,9 @@ pub struct Entry {
     pub project: String,
     pub claim: String,
     pub model: Option<String>,
+    /// Where the terminal opens (see `Place`); entries written before this field existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<Place>,
     pub state: State,
     pub pid: Option<u32>,
     pub start: Option<String>,
@@ -496,7 +510,7 @@ impl Manager {
         let project_s = project.to_string_lossy().into_owned();
         let key = format!("m-{claim}");
         self.update(|es| {
-            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, state: State::Claimed, pid: None, start: None, reason: None })
+            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, place: None, state: State::Claimed, pid: None, start: None, reason: None })
         })?;
         // The lock covers the name decision and the claim. join.sh runs outside it: it takes core's own registry
         // lock for its read-modify-write of the team config, and the names are already distinct.
@@ -583,6 +597,13 @@ impl Manager {
             }
             Some(_) => return Err(BrokerError::new("bad_args", "`model` must be a string")),
         };
+        let order = match args.get("order") {
+            None | Some(Value::Null) => None,
+            Some(v) => match v.as_u64() {
+                Some(n) if n < 100 => Some(n as u32),
+                _ => return Err(BrokerError::new("bad_args", "`order` must be a whole number from 0 to 99")),
+            },
+        };
         let folder_arg = match args.get("folder") {
             None | Some(Value::Null) => None,
             Some(Value::String(f)) => Some(f.clone()),
@@ -614,7 +635,7 @@ impl Manager {
         let claim = random_id();
         let key = format!("a-{claim}");
         self.update(|es| {
-            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), state: State::Claimed, pid: None, start: None, reason: None })
+            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), place: Some(Place { pane: a.id, order }), state: State::Claimed, pid: None, start: None, reason: None })
         })?;
         // The lock covers the name decision and the journal claim. join.sh runs outside it (core's registry lock
         // serialises the config writes themselves); the check after it is per name.
@@ -686,14 +707,14 @@ impl Manager {
                 None => return Err(BrokerError::new("not_available", "the entry is gone")),
             }
         }
-        let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone() };
+        let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone(), pane: e.place.as_ref().map(|p| p.pane), order: e.place.as_ref().and_then(|p| p.order) };
         if let Err(why) = phase("spawn: emit open", || self.world.open_pane(&req)) {
             // the member stays joined and recorded; the add-on may ask again
             self.set_state(key, State::Joined, Some(why.clone()))?;
             return Err(BrokerError::new("not_available", format!("{} joined the team but its terminal did not open: {why}", e.name)));
         }
         // The window answers through `pty_started` or `open_failed`. No entry stays `opening` after this returns:
-        // silence means the process may still start, so the entry is `unknown` and the user decides (koit Q7); a
+        // silence means the process may still start, so the entry is `unknown` and the user decides; a
         // late `pty_started` moves it to `running`.
         let waited = std::time::Instant::now();
         let deadline = waited + self.open_wait;
@@ -1173,6 +1194,18 @@ mod tests {
     }
 
     #[test]
+    fn the_window_is_told_which_pane_asked_and_where_the_agent_sits() {
+        let f = fx(all_powers());
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "black", "order": 0})).unwrap();
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap();
+        let opened = f.world.opened.lock().unwrap().clone();
+        assert_eq!(opened.iter().map(|o| (o.name.as_str(), o.pane, o.order)).collect::<Vec<_>>(), vec![("black", Some(f.id), Some(0)), ("white", Some(f.id), None)]);
+        for bad in [json!(-1), json!(100), json!("1"), json!(1.5)] {
+            assert_eq!(code(call(&f, "agents.spawn", json!({"type": "claude-code", "name": "x", "order": bad}))), "bad_args", "{bad}");
+        }
+    }
+
+    #[test]
     fn spawn_joins_records_and_opens_a_pane_with_server_owned_fields() {
         let f = fx(all_powers());
         let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white", "model": "opus", "team": "other", "cmd": "rm", "args": ["-rf"], "permission_mode": "bypass"})).unwrap();
@@ -1290,7 +1323,7 @@ mod tests {
     // ---- recovery -------------------------------------------------------------------
 
     fn entry(state: State, kind: Kind) -> Entry {
-        Entry { key: "k1".into(), addon: "o/chess".into(), team_id: "id-t".into(), team: "t".into(), kind, requested: "w".into(), name: "w".into(), agent_type: "claude-code".into(), project: "/p".into(), claim: "c".into(), model: None, state, pid: None, start: None, reason: None }
+        Entry { key: "k1".into(), addon: "o/chess".into(), team_id: "id-t".into(), team: "t".into(), kind, requested: "w".into(), name: "w".into(), agent_type: "claude-code".into(), project: "/p".into(), claim: "c".into(), model: None, place: None, state, pid: None, start: None, reason: None }
     }
 
     fn with_entries(f: &Fx, es: Vec<Entry>) -> Manager {

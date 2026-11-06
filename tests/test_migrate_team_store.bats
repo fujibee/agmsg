@@ -9,6 +9,11 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): no test here is about agent-pid
+  # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
+  # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
+  # agent process too.
+  export AGMSG_AGENT_PID=""
   SHARED="$TEST_SKILL_DIR/db/messages.db"
   export SKILL_DIR="$TEST_SKILL_DIR"
   bash "$SCRIPTS/join.sh" alpha ann claude-code /tmp/alpha-ann >/dev/null

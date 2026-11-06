@@ -1,6 +1,6 @@
 import type { GrantChip, PaneState } from "./types";
 import type { Translate } from "./model";
-import { GrantCard, type GrantChoice } from "./GrantCard";
+import { GrantCard, type GrantChoice, type TrustOption } from "./GrantCard";
 import { FailureCard, type FailureAction } from "./FailureCard";
 import { LoadingView } from "../busy";
 
@@ -24,6 +24,7 @@ export function AddonPane(props: {
   pending?: boolean;
   /** Which choice of the grant card is running (it shows the spinner; the others are only disabled). */
   pendingChoice?: GrantChoice;
+  trust?: TrustOption;
   /** Header badge for a developer pane, e.g. the folder. */
   devFolder?: string;
   /** A refusal the broker just returned, shown briefly in the header. */
@@ -42,7 +43,7 @@ export function AddonPane(props: {
   return (
     <div className="addon-pane">
       <div className="addon-pane-body">
-        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} pending={props.pending} pendingChoice={props.pendingChoice} onChoose={props.onGrant} />}
+        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} pending={props.pending} pendingChoice={props.pendingChoice} trust={props.trust} onChoose={props.onGrant} />}
         {state.kind === "failure" && (
           <FailureCard t={t} title={props.title} failure={state.failure} onAction={props.onFailure} />
         )}
