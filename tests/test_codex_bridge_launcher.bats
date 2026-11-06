@@ -279,57 +279,60 @@ run_launcher() {
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
-@test "launcher: a bridge that keeps ending at once is retried with a backoff, says so once, and leaves a down notice" {
+@test "launcher: a bridge that keeps ending at once is given up on after the window, with one line and a down record" {
   put_record team alice rec-thread-1 "$PROJ" codex
-  export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=2 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=2 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
-  sleep 32 3>&- & local p=$!
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=6 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  printf 'agmsg watch: not serving these pairs (held by another session, or unverified): team\talice\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sleep 60 3>&- & local p=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
-  local launcher=$!
-  sleep 28
-  local launches; launches="$(grep -c . "$CAPTURE")"
-  # With the backoff after one quick death, starts are at least 2 s apart and
-  # keep coming.
-  [ "$launches" -ge 4 ]
-  [ "$launches" -le 10 ]
-  # Said once, not once per death at the ceiling.
-  [ "$(grep -c 'retrying in 2s' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
-  grep -q 'ended within 60s, 1 times in a row; retrying in 2s' "$RUN_DIR/codex-bridge.team.alice.log"
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
   local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
   [ -n "$notice" ]
   grep -q '"state":"down"' "$notice"
+  grep -q 'no longer being started' "$notice"
+  grep -q 'not serving these pairs' "$notice"
   grep -q 'delivery.sh status codex' "$notice"
+  grep -q 'restart this seat' "$notice"
+  [ "$(grep -c 'not starting it again' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+  # The role's launcher ended on its own and nothing starts a bridge afterwards.
+  local launches; launches="$(grep -c . "$CAPTURE")"
+  sleep 4
+  [ "$(grep -c . "$CAPTURE")" -eq "$launches" ]
   agmsg_stop_pid "$p"
-  wait "$launcher" 2>/dev/null || true
 }
 
-@test "launcher: the down notice and the backoff end once a bridge stays up" {
+@test "launcher: a bridge that stays up is never given up on, and the quick-death count starts over" {
   put_record team alice rec-thread-1 "$PROJ" codex
-  # The third start stays up; the first two end at once.
-  sed -i.bak 's|^exit 0$|[ "$(grep -c . "$CAPTURE")" -lt 3 ] \|\| sleep 30\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
-  export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=1 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=1 AGMSG_CODEX_BRIDGE_STABLE_SECS=3
-  sleep 40 3>&- & local p=$!
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
-  local launcher=$! i
-  for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
-  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
-  for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 || break; sleep 0.2; done
-  refute ls "$RUN_DIR"/down/bridge.*
-  agmsg_stop_pid "$p"
-  wait "$launcher" 2>/dev/null || true
-}
-
-@test "launcher: a short-lived bridge does not count as recovered while a long backoff runs" {
-  put_record team alice rec-thread-1 "$PROJ" codex
-  # Backoff 10 s, "stable" after 2 s: the old bridge ages past 2 s inside the wait.
-  export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=10 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=10 AGMSG_CODEX_BRIDGE_STABLE_SECS=2
+  # The second start stays up past the stable time; the first ends at once.
+  sed -i.bak 's|^exit 0$|[ "$(grep -c . "$CAPTURE")" -lt 2 ] \|\| sleep 4\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=8 AGMSG_CODEX_BRIDGE_STABLE_SECS=2
   sleep 30 3>&- & local p=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$!
+  sleep 20
+  kill -0 "$launcher"
+  refute ls "$RUN_DIR"/down/bridge.*
+  refute grep -q 'not starting it again' "$RUN_DIR/codex-bridge.team.alice.log"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: a down record that cannot be written is tried again and the error is logged once" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_NOTICE_RETRY_SECS=1
+  # A file where the notice directory belongs: every write fails.
+  : > "$RUN_DIR/down"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
   local launcher=$! i
+  for i in {1..150}; do grep -q 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log" 2>/dev/null && break; sleep 0.2; done
+  grep -q 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log"
+  # The cause goes away: the record is written on a later try and the launcher ends.
+  rm -f "$RUN_DIR/down"
   for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
   ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
-  sleep 5
-  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
-  [ "$(grep -c . "$CAPTURE")" -le 2 ]
+  [ "$(grep -c 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
   agmsg_stop_pid "$p"
   wait "$launcher" 2>/dev/null || true
 }
@@ -345,25 +348,6 @@ run_launcher() {
   local launcher=$! i
   for i in {1..100}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 || break; sleep 0.2; done
   refute ls "$RUN_DIR"/down/bridge.*
-  agmsg_stop_pid "$p"
-  wait "$launcher" 2>/dev/null || true
-}
-
-@test "launcher: a down notice that cannot be written is tried again and the error is logged once" {
-  put_record team alice rec-thread-1 "$PROJ" codex
-  export AGMSG_CODEX_BRIDGE_BACKOFF_AFTER=1 AGMSG_CODEX_BRIDGE_BACKOFF_FIRST=1 AGMSG_CODEX_BRIDGE_BACKOFF_MAX=1 AGMSG_CODEX_BRIDGE_NOTICE_RETRY_SECS=1
-  # A file where the notice directory belongs: every write fails.
-  : > "$RUN_DIR/down"
-  sleep 40 3>&- & local p=$!
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
-  local launcher=$! i
-  for i in {1..150}; do grep -q 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log" 2>/dev/null && break; sleep 0.2; done
-  grep -q 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log"
-  # The cause goes away: the wished-for notice is written on a later try.
-  rm -f "$RUN_DIR/down"
-  for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
-  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
-  [ "$(grep -c 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
   agmsg_stop_pid "$p"
   wait "$launcher" 2>/dev/null || true
 }

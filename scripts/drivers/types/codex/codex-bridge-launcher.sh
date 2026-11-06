@@ -743,22 +743,22 @@ retire_recorded_bridge() {
 }
 
 # A bridge that dies within BRIDGE_STABLE_SECS of being started is a quick
-# death. BRIDGE_BACKOFF_AFTER (three) in a row put this seat's relaunches on a backoff: 5 s, doubling
-# to a 300 s ceiling. It never gives up, and the first bridge that lives
-# BRIDGE_STABLE_SECS ends the backoff. Clocked by $SECONDS (this process), so
+# death. When this seat's bridges have only had quick deaths for
+# BRIDGE_GIVE_UP_SECS (about five minutes), the launcher stops starting bridges
+# for this seat, says so (one log line and a down record) and exits. Nothing
+# restarts it on a timer: the seat's next launcher (a restarted Codex session)
+# starts it again, and the first bridge of that launcher that stays up
+# BRIDGE_STABLE_SECS removes the record. Clocked by $SECONDS (this process), so
 # the bookkeeping starts no process.
 BRIDGE_STABLE_SECS="${AGMSG_CODEX_BRIDGE_STABLE_SECS:-60}"
-BRIDGE_BACKOFF_AFTER="${AGMSG_CODEX_BRIDGE_BACKOFF_AFTER:-3}"
-BRIDGE_BACKOFF_FIRST="${AGMSG_CODEX_BRIDGE_BACKOFF_FIRST:-5}"
-BRIDGE_BACKOFF_MAX="${AGMSG_CODEX_BRIDGE_BACKOFF_MAX:-300}"
+BRIDGE_GIVE_UP_SECS="${AGMSG_CODEX_BRIDGE_GIVE_UP_SECS:-300}"
 bridge_launch_at=""
 bridge_death_counted=""
 bridge_quick_deaths=0
-bridge_backoff_until=0
-bridge_last_delay=0
+bridge_spell_start=""
 bridge_down_key="$(down_notice_key bridge "$bridge_key" 2>/dev/null || true)"
 # The down notice is a wish the loop keeps trying to make true, separate from the
-# one-time log line and the backoff clock: bridge_notice_reason non-empty means
+# one-time log line: bridge_notice_reason non-empty means
 # "set this", bridge_notice_clear=1 means "remove it". A write that fails stays
 # wished and is tried again every BRIDGE_NOTICE_RETRY_SECS, with the error kept
 # in the seat's bridge log (once per failing spell).
@@ -794,42 +794,47 @@ bridge_notice_flush() {
 
 # Called once per bridge death, just before this loop would launch again.
 bridge_note_death() {
-  local lived delay holder
+  local lived
   [ -n "$bridge_launch_at" ] || return 0
   [ "$bridge_death_counted" != "$bridge_launch_at" ] || return 0
   bridge_death_counted="$bridge_launch_at"
   lived=$((SECONDS - bridge_launch_at))
   if [ "$lived" -ge "$BRIDGE_STABLE_SECS" ]; then
-    if [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ]; then
-      bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
-    fi
     bridge_quick_deaths=0
-    bridge_backoff_until=0
-    bridge_last_delay=0
+    bridge_spell_start=""
     return 0
   fi
   bridge_quick_deaths=$((bridge_quick_deaths + 1))
-  [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || return 0
-  bridge_stable_cleared=0
-  delay=$((BRIDGE_BACKOFF_FIRST * (1 << (bridge_quick_deaths - BRIDGE_BACKOFF_AFTER > 6 ? 6 : bridge_quick_deaths - BRIDGE_BACKOFF_AFTER))))
-  [ "$delay" -le "$BRIDGE_BACKOFF_MAX" ] || delay="$BRIDGE_BACKOFF_MAX"
-  bridge_backoff_until=$((SECONDS + delay))
-  # Who refused it, when the bridge said so: the last watch refusal in its log.
-  holder="$(tail -n 40 "$log" 2>/dev/null | grep -F 'not serving these pairs' | tail -n 1 | cut -c1-300 || true)"
-  # The notice is refreshed with every death so its count and holder stay true.
-  bridge_notice_reason="the Codex bridge for $bridge_key keeps ending right after it starts (${bridge_quick_deaths} times); retrying every ${delay}s${holder:+; $holder}"
-  bridge_notice_clear=0
-  bridge_notice_next_try=0
-  # The log line is said when the backoff starts and each time its delay grows,
-  # not on every death at the ceiling.
-  [ "$delay" -ne "$bridge_last_delay" ] || return 0
-  bridge_last_delay="$delay"
-  printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row; retrying in %ss (backing off to at most %ss, it keeps trying)%s\n' \
-    "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$delay" "$BRIDGE_BACKOFF_MAX" "${holder:+; last refusal: $holder}" >>"$log" 2>/dev/null || true
+  [ -n "$bridge_spell_start" ] || bridge_spell_start="$SECONDS"
+  [ $((SECONDS - bridge_spell_start)) -ge "$BRIDGE_GIVE_UP_SECS" ] || return 0
+  bridge_stop_retrying
 }
 
-# A bridge that is still running after BRIDGE_STABLE_SECS ends the backoff and
-# the notice without waiting for it to die. Only the bridge this loop launched
+# Says plainly that this seat's notices are not arriving and why, leaves the
+# down record doctor and session start show, and ends this launcher. A record
+# that cannot be written is tried again every BRIDGE_NOTICE_RETRY_SECS (its
+# error logged once); this is the only wait left, and it ends when the record
+# is written or the seat's session is gone.
+bridge_stop_retrying() {
+  local holder fix
+  holder="$(tail -n 60 "$log" 2>/dev/null | grep -E 'not serving these pairs|was claimed by session' | tail -n 1 | cut -c1-300 || true)"
+  fix="close the other session that holds this role, then restart this seat's Codex session (what holds it: delivery.sh status codex $PROJECT)"
+  bridge_notice_reason="the Codex bridge for $bridge_key ended right after starting ${bridge_quick_deaths} times in $((SECONDS - bridge_spell_start))s and is no longer being started, so messages are not reaching this seat${holder:+; last refusal: $holder}; $fix"
+  printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row over %ss; not starting it again, so messages are not reaching this seat%s. To fix: %s\n' \
+    "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$((SECONDS - bridge_spell_start))" "${holder:+ (last refusal: $holder)}" "$fix" >>"$log" 2>/dev/null || true
+  bridge_notice_clear=0
+  bridge_notice_next_try=0
+  while :; do
+    bridge_notice_flush
+    [ -n "$bridge_notice_reason" ] || break
+    _agmsg_pid_alive_local "$PARENT_PID" || break
+    sleep "$BRIDGE_NOTICE_RETRY_SECS"
+  done
+  exit 0
+}
+
+# A bridge that is still running after BRIDGE_STABLE_SECS ends the quick-death
+# count and removes a record without waiting for it to die. Only the bridge this loop launched
 # and that is alive now counts: one that already died is a death (the next
 # launch attempt counts it) and the long wait that follows must not be read as
 # recovery.
@@ -841,13 +846,12 @@ bridge_note_stable() {
   # Once per stable spell: the first healthy bridge of this launcher also clears
   # a record an earlier launcher left (the notice is keyed by the seat, not by
   # this process), so a restart cannot leave a false "down" behind.
-  if [ "$bridge_quick_deaths" -ge "$BRIDGE_BACKOFF_AFTER" ] || [ "$bridge_stable_cleared" = 0 ]; then
+  if [ "$bridge_stable_cleared" = 0 ]; then
     bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
   fi
   bridge_stable_cleared=1
   bridge_quick_deaths=0
-  bridge_backoff_until=0
-  bridge_last_delay=0
+  bridge_spell_start=""
 }
 
 deregistered_ticks=0
@@ -981,14 +985,9 @@ EOF
     fi
   fi
 
-  # A bridge that keeps ending at once is not started again in a tight loop.
-  # Before the spawn-rate reservation below: a tick that only waits out the
-  # backoff must not leave a reservation behind.
+  # A bridge that keeps ending at once is given up on after a few minutes
+  # (bridge_stop_retrying exits). Before the spawn-rate reservation below.
   bridge_note_death
-  if [ "$SECONDS" -lt "$bridge_backoff_until" ]; then
-    poll_sleep
-    continue
-  fi
 
   # Bound the spawn rate first (a rate-limited tick changes nothing), then reap
   # any orphan for this exact (project, role) so exactly one bridge remains. If a
