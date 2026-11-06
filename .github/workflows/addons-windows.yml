@@ -5,7 +5,7 @@ name: addons-windows
 
 on:
   push:
-    branches: [addon-win]
+    branches: [addon-win, ci-win-1912d]
 
 permissions:
   contents: read
@@ -51,4 +51,4 @@ jobs:
         working-directory: app/src-tauri
         env:
           AGMSG_REQUIRE_RESOURCES: "1"
-        run: "cargo test --lib addons:: -- --test-threads=4"
+        run: "cargo test --lib addons:: -- --test-threads=4 && cargo test --lib agent_models::tests::windows_process -- --nocapture --test-threads=1"
