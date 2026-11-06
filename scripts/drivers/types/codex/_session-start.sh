@@ -291,12 +291,18 @@ EOF
   agmsg_daemon_apply_project_choice codex "$PROJECT"
   if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
     # The bridge stays off whether or not agmsgd is up (no implicit fallback),
-    # so the line must say which it is: only a ready agmsgd delivers.
-    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
-      echo 'AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. To use the bridge instead, run: agmsg daemon disable (or choose another delivery for this project).'
-    else
-      printf 'AGMSG delivery: agmsgd is on for this project but is not running, so notices are NOT delivered to this session and no Codex bridge is started. %s To use the bridge instead, run: agmsg daemon disable (or choose another delivery for this project).\n' "$(agmsg_daemon_recovery_text)"
-    fi
+    # so the line must say which it is: only a ready agmsgd delivers. The way
+    # back names THIS install's own command, not a bare `agmsg` (which on a
+    # --cmd install would operate the default one).
+    back="To use the bridge instead, run: \"$SKILL_DIR/scripts/agmsg\" daemon disable (or choose another delivery for this project)."
+    case "${AGMSGD_HEALTH:-}" in
+      ready)
+        echo "AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. $back" ;;
+      unchecked|unverifiable)
+        printf 'AGMSG delivery: agmsgd is on for this project and no Codex bridge is started, but whether agmsgd is running could not be checked. %s %s\n' "$(agmsg_daemon_recovery_text)" "$back" ;;
+      *)
+        printf 'AGMSG delivery: agmsgd is on for this project but is not running, so notices are NOT delivered to this session and no Codex bridge is started. %s %s\n' "$(agmsg_daemon_recovery_text)" "$back" ;;
+    esac
     exit 0
   fi
 
