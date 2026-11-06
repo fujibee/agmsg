@@ -362,6 +362,26 @@ run_launcher() {
   wait "$launcher" 2>/dev/null || true
 }
 
+@test "launcher: giving up names the stamped failure line, not the watcher's detail lines after it" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  : > "$RUN_DIR/codex-bridge.team.alice.log"
+  # As the real bridge writes it: the stamped refusal naming the holder, the
+  # watcher's unstamped detail lines, then the closing line.
+  sed -i.bak 's|^exit 0$|printf "[2] 2026-11-06T00:01:00.000Z codex-bridge: watch-once failed with exit 1: agmsg watch: not serving these pairs (held by another session, or unverified): team/alice(holder-9)\\nagmsg watch:   lock=/x cc-instance=absent\\nwatch-once: no available subscription for project=/p type=codex name=* team=*\\n[2] 2026-11-06T00:01:01.000Z codex-bridge: stopping after 3 consecutive watch-once failure(s)\\n" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'team/alice(holder-9)' "$notice"
+  grep -q 'close the session that holds this role' "$notice"
+  refute grep -q 'no available subscription' "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
 @test "launcher: a bridge that stays up is never given up on, and the quick-death count starts over" {
   put_record team alice rec-thread-1 "$PROJ" codex
   # The second start stays up past the stable time; the first ends at once.

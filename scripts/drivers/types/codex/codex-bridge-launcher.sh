@@ -821,7 +821,12 @@ bridge_stop_retrying() {
   # launcher's own lines do not count, and an older refusal is not picked over a
   # newer different failure. The bridge's closing "stopping after N consecutive
   # failures" line follows every such failure and says nothing about its cause.
-  cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . | tail -n 1 | cut -c1-300 || true)"
+  cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . || true)"
+  # A failure is one stamped line ("[pid] ... codex-bridge: ...") that the
+  # watcher's own detail lines follow unstamped; the stamped line is the cause.
+  # A log with no stamped line falls back to its last line.
+  cause="$(printf '%s\n' "$cause" | { grep -E '^\[[0-9]+\] ' || true; } | tail -n 1 | cut -c1-300)"
+  [ -n "$cause" ] || cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . | tail -n 1 | cut -c1-300 || true)"
   case "$cause" in
     *'not serving these pairs'*|*'was claimed by session'*)
       lead="another session holds this role (last bridge message: $cause)"
