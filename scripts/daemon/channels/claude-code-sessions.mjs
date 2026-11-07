@@ -23,12 +23,15 @@ import { join } from "node:path";
 const MAX_FILES = 500;
 const START_TOLERANCE_MS = 2_000;
 
+// true: alive. false: ESRCH, the pid is gone. null: the check itself failed
+// (anything but ESRCH/EPERM), which says nothing about the session.
 export function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return error?.code === "EPERM";
+    if (error?.code === "ESRCH") return false;
+    return error?.code === "EPERM" ? true : null;
   }
 }
 
@@ -53,7 +56,7 @@ export function parseStart(text, zone) {
  * Returns
  *   { state: "found", socket, pid }   a live process with a socket path
  *   { state: "ended" }                the directory was read and no live process has this session
- *   { state: "unknown", reason }      could not tell: unreadable directory, files of another shape
+ *   { state: "unknown", reason }      could not tell: unreadable directory, files of another shape, a pid that could not be checked
  */
 export async function findSessionSocket({ configDir, sessionId, alive = pidAlive, startOf = psStart, platform = process.platform }) {
   if (platform === "win32") return { state: "unknown", reason: "sessions_files_not_read_on_windows" };
@@ -82,7 +85,9 @@ export async function findSessionSocket({ configDir, sessionId, alive = pidAlive
     matched += 1;
     const pid = Number(name.slice(0, -5));
     if (data.pid !== pid || typeof data.procStart !== "string" || typeof data.messagingSocketPath !== "string") { unreadable += 1; continue; }
-    if (!alive(pid)) continue;
+    const live = alive(pid);
+    if (live === null) { unreadable += 1; continue; }
+    if (!live) continue;
     const want = parseStart(data.procStart, "utc");
     const have = parseStart(await startOf(pid), "local");
     if (Number.isNaN(want) || Number.isNaN(have)) { unreadable += 1; continue; }

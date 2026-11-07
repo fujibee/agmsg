@@ -9,6 +9,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { accessSync, constants, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { logLine } from "../log.mjs";
 import { optedOutOfAgmsgd } from "./delivery-choice.mjs";
+import { createSeatBook } from "../seat-book.mjs";
 import { withImmediateTransaction } from "../db.mjs";
 import {
   listCodexRegistrations,
@@ -92,17 +93,9 @@ function latestNotifiedCursor(db, seat) {
   return row?.up_to ?? "";
 }
 
-function saveSeat(db, { seat, thread = null, codexHome = null, state, reason = "" }, now) {
+function saveSeat(book, { seat, thread = null, codexHome = null, state, reason = "" }) {
   assertPollActive();
-  withImmediateTransaction(db, () => {
-    db.prepare(`
-      INSERT INTO beta_codex_seat (seat, thread, codex_home, state, reason, checked_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(seat) DO UPDATE SET thread=COALESCE(excluded.thread, beta_codex_seat.thread),
-        codex_home=COALESCE(excluded.codex_home, beta_codex_seat.codex_home),
-        state=excluded.state, reason=excluded.reason, checked_at=excluded.checked_at
-    `).run(seat, thread, codexHome, state, reason, new Date(now()).toISOString());
-  });
+  book.set(seat, { thread, codexHome, state, reason });
 }
 
 function setQueueState(db, id, state, reason = undefined) {
@@ -345,14 +338,15 @@ export function createCodexQueueChannel({
   windowsGate = checkWindowsCodexQueueGate,
 }) {
   let stopped = false;
+  const book = createSeatBook(now);
   let rosterReasons = new Map();
   let activeController = null;
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
   const seatPoller = createSeatPoller({
-    db, installRoot, channel: 'codex', log, timeoutMs: seatDeadlineMs,
-    saveTimeout: (seat, reason) => saveSeat(db, { seat, state: 'blocked', reason }, now),
+    db, book, installRoot, channel: 'codex', log, timeoutMs: seatDeadlineMs,
+    saveTimeout: (seat, reason) => saveSeat(book, { seat, state: 'blocked', reason }),
   });
   const pendingAges = new Map();
   const homeKey = (home) => hostPlatform === "win32" ? resolve(home).toLowerCase() : resolve(home);
@@ -386,38 +380,38 @@ export function createCodexQueueChannel({
         pendingAges.delete(pending.id);
       }
       if (!registered) {
-        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" }, now);
+        saveSeat(book, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" });
         return;
       }
       // Keep an expiration visible for this poll; retry on the next one.
       if (observation.state !== "confirmed") {
-        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home,
+        saveSeat(book, { seat, thread: pending.thread, codexHome: pending.codex_home,
           state: bridge.state === "running" ? "bridged" : bridge.state === "unknown" ? "blocked" : "addressable",
-          reason: bridge.state === "unknown" ? `${bridge.reason};pending:${observation.reason}` : observation.reason }, now);
+          reason: bridge.state === "unknown" ? `${bridge.reason};pending:${observation.reason}` : observation.reason });
         return;
       }
     }
     if (!registered) return;
     if (bridge.state !== "stopped" && bridge.state !== "running") {
-      saveSeat(db, { seat, state: "blocked", reason: bridge.reason }, now);
+      saveSeat(book, { seat, state: "blocked", reason: bridge.reason });
       return;
     }
     if (bridge.state === "running") {
-      saveSeat(db, { seat, state: "bridged", reason: "bridge_running" }, now);
+      saveSeat(book, { seat, state: "bridged", reason: "bridge_running" });
       return;
     }
     const session = readSession(join(installRoot, "run"), team, agent);
     if (session.state !== "present") {
-      saveSeat(db, { seat, state: "unaddressable", reason: session.reason ?? "role_session_missing" }, now);
+      saveSeat(book, { seat, state: "unaddressable", reason: session.reason ?? "role_session_missing" });
       return;
     }
     const record = session.record;
     if (record.team !== team || record.agent !== agent) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_identity_mismatch" }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_identity_mismatch" });
       return;
     }
     if (record.type !== "codex") {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_type_mismatch" }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_type_mismatch" });
       return;
     }
     const runtime = db.prepare('SELECT codex_path, node_path FROM meta').get();
@@ -426,7 +420,7 @@ export function createCodexQueueChannel({
     if (hostPlatform === "win32") {
       const gate = windowsGate({ executable: queueExecutable, env: queueEnv });
       if (gate.state !== "ok") {
-        saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: gate.reason }, now);
+        saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: gate.reason });
         return;
       }
       queueExecutable = gate.executable;
@@ -436,47 +430,47 @@ export function createCodexQueueChannel({
       if (!statSync(queueExecutable).isFile()) throw new Error('not_file');
       accessSync(queueExecutable, constants.X_OK);
     } catch {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: 'blocked', reason: 'codex_executable_unavailable:run_agmsg_daemon_enable' }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: 'blocked', reason: 'codex_executable_unavailable:run_agmsg_daemon_enable' });
       return;
     }
     let driver;
     try {
       driver = readDriver(paths.configPath);
     } catch (error) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `storage_config_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `storage_config_unreadable:${error.message}` });
       return;
     }
     if (driver.state !== "ok") {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: driver.reason }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: driver.reason });
       return;
     }
     if (driver.driver !== "sqlite") {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "storage_driver_unsupported" }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "storage_driver_unsupported" });
       return;
     }
     const projects = registeredProjects;
     if (projects.length === 0 || !projects.some((project) => sameProject(project, record.project))) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_project_mismatch" }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_project_mismatch" });
       return;
     }
     // A project that chose something other than agmsgd gets no new notices.
     const optedOut = optedOutOfAgmsgd(installRoot, "codex", record.project);
     if (optedOut) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "unaddressable", reason: `delivery_chosen_${optedOut}` }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "unaddressable", reason: `delivery_chosen_${optedOut}` });
       return;
     }
     let storePath;
     try {
       storePath = messageStorePath({ storageDir: paths.storageDir, team, teamConfig });
     } catch (error) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_path_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_path_unreadable:${error.message}` });
       return;
     }
     let store;
     try {
       store = openStore(storePath);
     } catch (error) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_unreadable:${error.message}` });
       return;
     }
 
@@ -484,7 +478,7 @@ export function createCodexQueueChannel({
     try {
       snapshot = readSnapshot(store, team, agent, latestNotifiedCursor(db, seat));
     } catch (error) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_unreadable:${error.message}` });
       return;
     } finally {
       try { store.close(); } catch { /* keep the read result */ }
@@ -495,15 +489,15 @@ export function createCodexQueueChannel({
     // acceptance or the next unread snapshot.
     const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped" });
     if (classification.state !== "addressable") {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: classification.state, reason: classification.reason }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: classification.state, reason: classification.reason });
       return;
     }
     if (blockedCodexHomes.has(homeKey(record.codex_home))) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: "shared_codex_home_queue_pending" }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: "shared_codex_home_queue_pending" });
       return;
     }
     if (!snapshot.unread || stopped) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: bridge.reason }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: bridge.reason });
       return;
     }
 
@@ -534,7 +528,7 @@ export function createCodexQueueChannel({
     }
     recordChildResult(db, id, result);
     if (result.kind === "failed" && result.started === false) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: result.reason }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: result.reason });
       return;
     }
     // recordChildResult persisted the receipt atomically with the result. A
@@ -544,21 +538,21 @@ export function createCodexQueueChannel({
     if (child.childrenUnresolved) blockedCodexHomes.add(homeKey(record.codex_home));
     if (result.kind === "archived" || result.kind === "no_rollout") {
       const reason = result.kind === "archived" ? "thread_archived" : "codex_home_mismatch";
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason });
       return;
     }
 
     if (result.kind === "queued") {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: child.state === "expired" || child.childrenUnresolved ? child.reason : bridge.reason }, now);
+      saveSeat(book, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: child.state === "expired" || child.childrenUnresolved ? child.reason : bridge.reason });
       return;
     }
-    saveSeat(db, {
+    saveSeat(book, {
       seat,
       thread: record.thread,
       codexHome: record.codex_home,
       state: "addressable",
       reason: `queue_${result.kind}:${result.reason ?? "unknown"}`,
-    }, now);
+    });
   }
 
   // A team whose roster entry is unusable is skipped alone. Its reason is kept
@@ -569,16 +563,15 @@ export function createCodexQueueChannel({
     for (const [team, reason] of current) {
       if (rosterReasons.get(team) === reason) continue;
       log(`channel: Codex roster for team ${team} skipped (${reason})`);
-      saveSeat(db, { seat: seatKey(team, ""), state: "blocked", reason }, now);
+      saveSeat(book, { seat: seatKey(team, ""), state: "blocked", reason });
     }
-    // Compare against the stored rows, not only this process's memory: a row
-    // written before a restart must go once its team is readable again.
-    for (const { seat } of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
+    // A team-level row goes once its team is readable again.
+    for (const seat of book.keys()) {
       let parsed;
       try { parsed = JSON.parse(seat); } catch { continue; }
       if (Array.isArray(parsed) && parsed[1] === "" && !current.has(parsed[0])) {
         assertPollActive();
-        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_codex_seat WHERE seat = ?").run(seat));
+        book.delete(seat);
       }
     }
     rosterReasons = current;
@@ -613,9 +606,9 @@ export function createCodexQueueChannel({
         if (!registeredKeys.has(key)) seats.push({ team, agent, teamConfig: null, registered: false });
       }
       const knownKeys = new Set([...registeredKeys, ...pendingKeys]);
-      for (const row of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
-        if (!knownKeys.has(row.seat)) {
-          seatPoller.changeState(row.seat, () => saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now));
+      for (const key of book.keys()) {
+        if (!knownKeys.has(key)) {
+          seatPoller.changeState(key, () => saveSeat(book, { seat: key, state: "unaddressable", reason: "seat_registration_missing" }));
         }
       }
       // Sequential processing also serializes codex queue writes that share a
@@ -634,6 +627,7 @@ export function createCodexQueueChannel({
           log(`channel: Codex seat ${seat.team}/${seat.agent} could not be checked (${error.message})`);
         }
       }
+      book.pollFinished();
     })().finally(() => { if (activePoll === operation) activePoll = null; });
     activePoll = operation;
     return operation;
@@ -641,6 +635,8 @@ export function createCodexQueueChannel({
 
   return {
     name: 'codex',
+    seatKind: 'codex',
+    seats: () => book.snapshot(),
     reportTimeout: seatPoller.reportTimeout,
     pollOnce,
     async stop() {

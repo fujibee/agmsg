@@ -288,3 +288,38 @@ for (const mode of ['signal', 'control', 'timer-shutdown-error']) {
     rmSync(root, { recursive: true, force: true });
   });
 }
+
+test('a running main answers a seats request from the channels it holds, per channel kind', { timeout: 8000 }, async (t) => {
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const { createConnection } = await import('node:net');
+  const { root, manifest, manifestText } = makeInstall();
+  const script = `
+    import { main } from ${JSON.stringify(new URL('../scripts/daemon/main.mjs', import.meta.url).href)};
+    import { openInstallDb } from ${JSON.stringify(new URL('../scripts/daemon/db.mjs', import.meta.url).href)};
+    const db = openInstallDb(${JSON.stringify(join(root, 'run', 'install.db'))});
+    await main(db, { installRoot: ${JSON.stringify(root)}, manifest: ${JSON.stringify(manifest)}, manifestText: ${JSON.stringify(manifestText)}, expectedDesired: null, expectedOpGen: 0, version: 'test',
+      createChannels: () => [
+        { name: 'codex', seatKind: 'codex', seats: () => ({ polled: true, seats: [{ seat: '["t","a"]', state: 'bridged', reason: 'bridge_running' }] }), pollOnce: async () => { process.send('polling'); }, stop: async () => {} },
+        { name: 'claude-code', seatKind: 'claude_code', seats: () => ({ polled: false, seats: [] }), pollOnce: async () => {}, stop: async () => {} },
+      ] });
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, CODEX_HOME: join(root, 'profile') }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); rmSync(root, { recursive: true, force: true }); });
+  await once(child, 'message');
+  const db = openInstallDb(join(root, 'run', 'install.db'));
+  const owner = readOwner(db);
+  db.close();
+  const socket = createConnection(owner.socket);
+  let received = '';
+  socket.on('data', (chunk) => { received += chunk; });
+  await once(socket, 'connect');
+  socket.write(JSON.stringify({ type: 'hello', role: 'control', protocol: 1 }) + '\n' + JSON.stringify({ type: 'seats' }) + '\n');
+  await once(socket, 'end');
+  const answer = JSON.parse(received.trim().split('\n').find((line) => line.includes('"type":"seats"')));
+  assert.deepEqual(answer.codex, { polled: true, seats: [{ seat: '["t","a"]', state: 'bridged', reason: 'bridge_running' }] });
+  assert.deepEqual(answer.claude_code, { polled: false, seats: [] });
+  child.kill('SIGTERM');
+});

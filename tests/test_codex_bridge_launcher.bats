@@ -434,6 +434,23 @@ run_launcher() {
   wait "$launcher" 2>/dev/null || true
 }
 
+@test "launcher: a bare unix:// app-server address starts no bridge, says so once, and drops the request" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  printf 'codex\trec-thread-1\tunix://\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  sleep 6 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "unix://" "$p" >/dev/null 2>&1 3>&- || true
+  # The role child is detached; give it the time a relaunch loop would need to
+  # start the bridge more than once.
+  sleep 4
+  agmsg_stop_pid "$p"
+  wait "$p" 2>/dev/null || true
+
+  [ ! -f "$CAPTURE" ]
+  [ ! -f "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY" ]
+  [ "$(grep -c 'has no socket path' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+}
+
 @test "launcher: a bridge log over the size limit is moved aside before the next bridge starts" {
   put_record team alice rec-thread-1 "$PROJ" codex
   export AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES=1000

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
 import { ensureCodexChannelSchema } from '../scripts/daemon/channels/codex-queue-store.mjs';
+import { bootId } from '../scripts/daemon/executor.mjs';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const thread = '01a101a5-3599-7d62-a149-4c8182bcf007';
@@ -31,6 +32,41 @@ function fixture(t) {
   });
   return { root, db, config, status };
 }
+
+// A stand-in for a running agmsgd, in its own process (the status commands
+// block this one while they run): answers hello, then status, or seats with
+// the rows given, or never answers seats when `mode` is "silent". The install
+// record is set to point at it, as a running daemon's would.
+async function fakeDaemon(t, { root, db }, { codex = [], mode = 'answer' } = {}) {
+  const socket = join(root, 'run/d.sock');
+  const child = spawn(process.execPath, ['-e', `
+    const net = require('node:net');
+    const [socket, mode, rows] = process.argv.slice(1);
+    net.createServer((c) => { let b = '', n = 0;
+      c.on('data', (d) => { b += d; let i;
+        while ((i = b.indexOf('\\n')) >= 0) { const msg = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); n += 1;
+          if (msg.type === 'hello') c.write(JSON.stringify({ type: 'hello_ok' }) + '\\n');
+          else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true }) + '\\n'); c.end(); }
+          else if (msg.type === 'seats' && mode !== 'silent') {
+            c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: JSON.parse(rows) }, claude_code: { polled: true, seats: [] } }) + '\\n'); c.end(); } } });
+    }).listen(socket, () => console.log('up'));
+  `, socket, mode, JSON.stringify(codex)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => child.kill());
+  await new Promise((resolve) => child.stdout.once('data', resolve));
+  db.prepare("UPDATE daemon_owner SET state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
+  db.prepare("UPDATE daemon_intent SET desired='on'").run();
+  db.prepare("UPDATE meta SET node_path=?").run(process.execPath);
+  return child;
+}
+
+const runAsync = (root, flags = []) => new Promise((resolve, reject) => {
+  const child = spawn('bash', [join(root, 'scripts/daemon.sh'), 'status', ...flags], { env: { ...process.env, AGMSG_CONFIG: join(root, 'config.json') } });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+  child.on('error', reject);
+  child.on('close', () => resolve(out));
+});
 
 function codexStartupFixture(t, names) {
   const setup = fixture(t);
@@ -137,7 +173,23 @@ test('daemon status defaults to readable text and emits only JSON with --json', 
   assert.doesNotMatch(text, /"exitCode"|"codex_seats"/);
   const json = JSON.parse(status('--json'));
   assert.equal(json.exitCode, 0);
-  assert.equal(json.codex_seats.state, 'ok');
+  // Seat state is only in the running agmsgd's memory; with none running there
+  // is nothing to show, and it says so.
+  assert.equal(json.codex_seats.state, 'daemon_not_running');
+  assert.deepEqual(json.codex_seats.seats, []);
+});
+
+test('with agmsgd not running, status says so instead of showing an empty seat list', t => {
+  const { status } = fixture(t);
+  assert.match(status(), /agmsgd is not running; there is no seat state to show/);
+});
+
+test('with agmsgd running but silent on seats, status says it did not answer', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { mode: 'silent' });
+  const text = await runAsync(f.root);
+  assert.match(text, /agmsgd is running but did not answer in time/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
 });
 
 test('multiple project registrations produce one seat line', t => {
@@ -145,13 +197,70 @@ test('multiple project registrations produce one seat line', t => {
   assert.equal(status().split('\n').filter(line => line.startsWith('Codex test/alice:')).length, 1);
 });
 
-test('bridge display uses every registered project and does not repeat a contradictory cached verdict', t => {
-  const { db, status } = fixture(t);
-  db.prepare('INSERT INTO beta_codex_seat VALUES (?, ?, ?, ?, ?, ?)').run(JSON.stringify(['test', 'alice']), thread, '/profile', 'blocked', 'bridge_state_unknown', new Date().toISOString());
-  const text = status();
+test('a recorded Node that is gone does not turn a running agmsgd into "not running": the seat state is still fetched', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { codex: [{ seat: JSON.stringify(['test', 'alice']), thread, codex_home: '/profile', state: 'blocked', reason: 'codex_executable_unavailable:run_agmsg_daemon_enable', since: new Date().toISOString() }] });
+  f.db.prepare('UPDATE meta SET node_path=?').run(join(f.root, 'no-such-node'));
+  rmSync(join(f.root, 'run/codex-bridge.test.alice.pid'));
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex executable unavailable/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test('a seat-state helper that cannot run is reported with its real error, never as "not running"', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f);
+  rmSync(join(f.root, 'scripts/daemon/seat-query.mjs'));
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex seats: the seat state of agmsgd could not be read: .*seat-query/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test("the helper's own failure (state=unreadable then its error) is shown with that error", async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f);
+  writeFileSync(join(f.root, 'scripts/daemon/seat-query.mjs'),
+    "process.stdout.write('state=unreadable\\n'); process.stderr.write('seat-query: review-db-read-error\\n'); process.exit(0);\n");
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex seats: the seat state of agmsgd could not be read: .*review-db-read-error/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test('a helper answer with an unknown state is an error with that state named, never "not running"', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f);
+  writeFileSync(join(f.root, 'scripts/daemon/seat-query.mjs'), "process.stdout.write('state=garbled\\n');\n");
+  const text = await runAsync(f.root);
+  assert.match(text, /could not be read: unexpected seat state 'garbled'/);
+  assert.doesNotMatch(text, /agmsgd is not running/);
+});
+
+test('a running agmsgd whose process cannot be confirmed alive and that does not answer is reported as unconfirmed, not stopped', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { mode: 'silent' });
+  // An old-format boot record: a live pid cannot be told from another boot.
+  f.db.prepare("UPDATE daemon_owner SET executor_boot_id='12345'").run();
+  const text = await runAsync(f.root);
+  assert.match(text, /could not be confirmed to be running/);
+  assert.doesNotMatch(text, /agmsgd is not running; there is no seat state/);
+});
+
+test('bridge display uses every registered project and does not repeat a contradictory cached verdict', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { codex: [{ seat: JSON.stringify(['test', 'alice']), thread, codex_home: '/profile', state: 'blocked', reason: 'bridge_state_unknown', since: new Date().toISOString() }] });
+  const text = await runAsync(f.root);
   assert.match(text, /bridge process running/);
   assert.doesNotMatch(text, /bridge.*unknown|bridge could not be verified/);
 });
+
+test("the daemon's recorded reason for a seat is shown, fetched from the running agmsgd", async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, { codex: [{ seat: JSON.stringify(['test', 'alice']), thread, codex_home: '/profile', state: 'blocked', reason: 'codex_executable_unavailable:run_agmsg_daemon_enable', since: new Date().toISOString() }] });
+  rmSync(join(f.root, 'run/codex-bridge.test.alice.pid'));
+  const text = await runAsync(f.root);
+  assert.match(text, /Codex executable unavailable/);
+});
+
 
 test('old destinations are counted by default and available with --all after current seats', t => {
   const { root, db, config, status } = fixture(t);

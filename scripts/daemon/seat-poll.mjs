@@ -3,14 +3,14 @@
 import { assertPollActive, pollSignal, withDeadline, SEAT_DEADLINE_MS, PollDeadlineError } from './poll-deadline.mjs';
 import { deliveryEvent, recordPollTimeout } from './log.mjs';
 
-export function createSeatPoller({ db, installRoot, channel, saveTimeout, log, timeoutMs = SEAT_DEADLINE_MS }) {
+export function createSeatPoller({ db, book, installRoot, channel, saveTimeout, log, timeoutMs = SEAT_DEADLINE_MS }) {
   const prefix = channel === 'codex' ? 'beta_codex' : 'beta_claude';
   let current;
   let cancelled = false;
   const lifetime = new AbortController();
   const emit = (event, seat, reason, extra = {}) => deliveryEvent(log, { event, channel, seat, reason, ...extra });
   function snapshot(seat, before) {
-    const state = db.prepare(`SELECT state, reason FROM ${prefix}_seat WHERE seat=?`).get(seat);
+    const state = book.get(seat);
     if (before) return {
       state,
       rows: db.prepare(`SELECT * FROM ${prefix}_queue WHERE seat=? AND (id>? OR id=?)`).all(seat, before.lastId, before.rows[0]?.id ?? -1),
@@ -42,9 +42,9 @@ export function createSeatPoller({ db, installRoot, channel, saveTimeout, log, t
     }
   }
   function changeState(seat, work) {
-    const before = db.prepare(`SELECT state, reason FROM ${prefix}_seat WHERE seat=?`).get(seat);
+    const before = book.get(seat);
     work();
-    const after = db.prepare(`SELECT state, reason FROM ${prefix}_seat WHERE seat=?`).get(seat);
+    const after = book.get(seat);
     if (after && (before?.state !== after.state || before?.reason !== after.reason)) emit('seat_state', seat, after.reason, { state: after.state });
   }
   function reportTimeout(reason) {
