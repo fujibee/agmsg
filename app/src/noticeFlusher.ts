@@ -15,11 +15,16 @@ export type FlusherDeps = {
   // The notice path says what it did with a notice (typed, held past a cap, dropped, failed) in one line.
   log: (line: string) => void;
   onInjectFailed: (paneId: string, attempt: number, reason: string) => void;
+  // Notices were typed into the pane (the Enter was written): the ids of the messages they were about, and when.
+  onTyped?: (paneId: string, ids: string[], at: number) => void;
 };
 
 // Retry delay after consecutive failures: doubles from RETRY_BASE_MS up to RETRY_MAX_MS. It never gives up while
 // the pane is open, and closing the pane drops the notices, which ends the retries.
 export const RETRY_BASE_MS = 1000;
+// The host takes at most this many ids in one report and drops a larger one whole, so a long batch is reported in
+// pieces, all with the time the notices were typed.
+export const MAX_REPORT_IDS = 50;
 export const RETRY_MAX_MS = 30_000;
 
 // Feeds app-typed notices into panes: a new pane's first notices wait for its first idle; each pane gets one line
@@ -66,6 +71,9 @@ export function createNoticeFlusher(deps: FlusherDeps) {
           delete failures[id];
           const late = sent.filter((n) => n.late).length;
           if (late > 0) deps.onWithoutReadySignal(late);
+          const typed = sent.map((n) => n.id).filter((x): x is string => x !== undefined);
+          const at = deps.now();
+          for (let i = 0; i < typed.length; i += MAX_REPORT_IDS) deps.onTyped?.(id, typed.slice(i, i + MAX_REPORT_IDS), at);
           deps.setTimer(() => {
             busy.delete(id);
             flush();
@@ -89,9 +97,9 @@ export function createNoticeFlusher(deps: FlusherDeps) {
   return {
     flush,
     // A notice for `paneId` arrived.
-    notice(paneId: string, text: string) {
+    notice(paneId: string, text: string, id?: string) {
       deps.log(`notice for ${paneId} held (released=${released.has(paneId)}, state=${states[paneId] ?? "none"})`);
-      setQueues(hold(queues, paneId, text, deps.now()));
+      setQueues(hold(queues, paneId, text, deps.now(), id));
       if (!released.has(paneId)) {
         deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);
         deps.setTimer(flush, STARTUP_WAIT_MS + 100);
