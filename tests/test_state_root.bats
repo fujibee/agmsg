@@ -19,12 +19,14 @@ setup() {
 teardown() {
   # A test that pauses an update at the writer pid-publish gate or holds a lock
   # must never leave either behind when an assertion fails first: release the
-  # gate, then end each background process the test started and what it started
-  # (tests/state_root_reap.bash; every signal is preceded by a pid + start time
-  # check) before the fixture is removed.
+  # gate, then end the background jobs the test started (tests/state_root_reap.bash:
+  # only jobs of this shell, never a process found by pid) before the fixture is
+  # removed. A job that will not end fails the test.
+  local reaped=0
   if [ -n "${LEGACY_GATE:-}" ]; then touch "$LEGACY_GATE.release" 2>/dev/null || true; fi
-  bg_reap_all
+  bg_reap_all || reaped=1
   [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] && command rm -rf "$FAKE_HOME"
+  [ "$reaped" -eq 0 ]
 }
 
 inst() { HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg "$@"; }
@@ -384,8 +386,8 @@ EOS
 @test "while another operation holds the install lock the update moves nothing; it moves once the lock is released" {
   inst
   demote
-  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/.install-op/lock.db" >/dev/null 2>&1 &
-  local holder=$!; track_bg "$holder"
+  hold_lock "$SK/.install-op/lock.db" 9
+  local holder=$HOLD_PID
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
   local updater=$!; track_bg "$updater"
@@ -418,8 +420,8 @@ EOS
   demote
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
-  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 7 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
-  local holder=$!; track_bg "$holder"
+  hold_lock "$SK/run/install-op.lock.db" 7
+  local holder=$HOLD_PID
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
   local updater=$!; track_bg "$updater"
@@ -438,8 +440,8 @@ EOS
   demote
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
-  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 12 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
-  local holder=$!; track_bg "$holder"
+  hold_lock "$SK/run/install-op.lock.db" 12
+  local holder=$HOLD_PID
   sleep 1
   # the 30 s wait, shortened for the test
   run env AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS=1500 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
@@ -506,89 +508,26 @@ EOS
   [ "$status" -eq 0 ]
 }
 
-# --- the teardown's process handling, with every command stubbed: nothing here
-# --- touches a real process.
-
-reap_stubs() {
-  KILLS="$BATS_TEST_TMPDIR/kills"
-  : > "$KILLS"
-  sleep() { :; }
-  # alive pids: ALIVE_<pid>=<start time>; PS_CALLS_<pid> counts lookups
-  ps() {
-    local pid="$2" var="ALIVE_$2"
-    printf '%s\n' "${!var:-}"
-  }
-  kill() {
-    if [ "$1" = "-0" ]; then
-      local var="ALIVE_$2"
-      [ -n "${!var:-}" ]
-      return
-    fi
-    printf '%s %s\n' "$1" "$2" >> "$KILLS"
-    local var="ALIVE_$2"
-    # a TERM ends the process in the model
-    [ "$1" != "-TERM" ] || unset "$var"
-  }
-  # only 4242 has children
-  pgrep() { if [ "$1" = "-P" ] && [ "$2" = "4242" ]; then printf '%s\n' ${KIDS_OF_4242:-}; fi; }
+@test "teardown: a process that is not a job of this shell is never signalled" {
+  # started in a subshell, so this shell's job table does not list it
+  local other
+  other="$( (sleep 20 >/dev/null 2>&1 & echo $!) )"
+  track_bg "$other"
+  refute bg_is_running_job "$other"
+  bg_reap_all
+  kill -0 "$other"
+  kill "$other"
 }
 
-@test "teardown: a reused parent pid is skipped, and a family is never collected below it" {
-  reap_stubs
-  ALIVE_4242="new-start"
-  ALIVE_4243="new-child-start"
-  KIDS_OF_4242="4243"
-  bg_reap_family "4242|old-start"
-  [ ! -s "$KILLS" ]
-}
-
-@test "teardown: a pid that is reused during the polite wait gets no TERM and no KILL" {
-  reap_stubs
-  ALIVE_4242="old-start"
-  # the first identity checks see the old process; after that the pid is someone else's
-  # (the counter is a file: ps runs inside command substitutions)
-  : > "$BATS_TEST_TMPDIR/ps-count"
-  ps() {
-    printf x >> "$BATS_TEST_TMPDIR/ps-count"
-    if [ "$(wc -c < "$BATS_TEST_TMPDIR/ps-count")" -le 3 ]; then printf 'old-start\n'; else printf 'other-start\n'; fi
-  }
-  kill() { if [ "$1" = "-0" ]; then return 0; fi; printf '%s %s\n' "$1" "$2" >> "$KILLS"; }
-  bg_reap "4242|old-start"
-  [ ! -s "$KILLS" ]
-}
-
-@test "teardown: the verified owner and its child get TERM, nothing else, and nothing is killed twice" {
-  reap_stubs
-  ALIVE_4242="old-start"
-  ALIVE_4243="child-start"
-  KIDS_OF_4242="4243"
-  bg_reap_family "4242|old-start"
-  [ "$(sort "$KILLS" | tr '\n' ',')" = "-TERM 4242,-TERM 4243," ]
-}
-
-@test "teardown: a process that ignores TERM is ended with KILL after a bounded wait" {
-  reap_stubs
-  ALIVE_4242="old-start"
-  kill() {
-    if [ "$1" = "-0" ]; then return 0; fi
-    printf '%s %s\n' "$1" "$2" >> "$KILLS"
-    # TERM is ignored; KILL ends it
-    [ "$1" != "-KILL" ] || unset ALIVE_4242
-  }
-  bg_reap "4242|old-start"
-  [ "$(tr '\n' ',' < "$KILLS")" = "-TERM 4242,-KILL 4242," ]
-}
-
-@test "teardown: a pid reused after the last wait check and before TERM gets no signal" {
-  reap_stubs
-  # eleven identity checks see the old process (ten polls and the final look); the
-  # one made right before TERM sees someone else
-  : > "$BATS_TEST_TMPDIR/ps-count"
-  ps() {
-    printf x >> "$BATS_TEST_TMPDIR/ps-count"
-    if [ "$(wc -c < "$BATS_TEST_TMPDIR/ps-count")" -le 11 ]; then printf 'old-start\n'; else printf 'other-start\n'; fi
-  }
-  kill() { if [ "$1" = "-0" ]; then return 0; fi; printf '%s %s\n' "$1" "$2" >> "$KILLS"; }
-  bg_reap "4242|old-start"
-  [ ! -s "$KILLS" ]
+@test "teardown: a job of this shell that outlives its wait is ended, and one that has finished is left alone" {
+  sleep 30 &
+  local job=$!
+  track_bg "$job"
+  bg_is_running_job "$job"
+  sleep 0.1 &
+  local short=$!
+  track_bg "$short"
+  bg_reap_all
+  refute bg_is_running_job "$job"
+  refute bg_is_running_job "$short"
 }

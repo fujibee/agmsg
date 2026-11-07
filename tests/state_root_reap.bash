@@ -1,86 +1,56 @@
-# Ending the background processes a test started, without ever signalling a
-# process that is not the one it started. Every process is a record
-# "pid|start time", and EVERY signal is preceded by a fresh check that the pid
-# still has that start time, so a pid that was reaped and reused is skipped
-# (and so is anything found below a reused pid). The commands used (ps, pgrep,
-# kill, sleep) are looked up at call time so a test can stub them.
+# Background processes a test starts, and their cleanup.
+#
+# The only processes a test ever signals are jobs of the test's own shell: they
+# are recorded when they are started (track_bg), and a signal is sent only while
+# the shell's job table still lists the pid as a RUNNING job. A pid that has been
+# reaped, or that never was a job of this shell, is never signalled. Nothing is
+# looked up by walking the process table, so no process is adopted by its pid.
+# Whatever a job itself started (lock helpers) ends by itself: the update's lock
+# coprocess when the update's pipe closes, the earlier-release lock helper within
+# a second of its owner going away, and a held lock when its sleep ends.
 
 TEST_BG=()
 
-# Records a process the test just started.
-track_bg() {   # <pid>
-  TEST_BG+=("$1|$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)")
+# Records a background job of this shell, right after it was started.
+track_bg() {   # <pid of a job>
+  TEST_BG+=("$1")
 }
 
-# 0 only if <pid> is alive now and has exactly the recorded start time.
-bg_same() {   # <pid> <start time>
-  local now
-  [ -n "$2" ] || return 1
-  now="$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)"
-  [ "$now" = "$2" ]
-}
-
-# Sends <signal> to <pid> only if it is still the recorded process.
-bg_signal() {   # <signal> <pid> <start time>
-  bg_same "$2" "$3" || return 1
-  kill "-$1" "$2" 2>/dev/null || true
-}
-
-# Waits up to <tenths of a second> for the recorded process to be gone; 0 if it is.
-bg_wait_gone() {   # <pid> <start time> <ticks>
-  local i
-  for ((i = 0; i < $3; i++)); do
-    bg_same "$1" "$2" || return 0
-    kill -0 "$1" 2>/dev/null || return 0
-    sleep 0.2
-  done
-  bg_same "$1" "$2" || return 0
+# 0 only if <pid> is a running job of this shell.
+bg_is_running_job() {   # <pid>
+  case " $(jobs -r -p | tr '\n' ' ') " in
+    *" $1 "*) return 0 ;;
+  esac
   return 1
 }
 
-# Ends the recorded process: a polite wait, TERM, a wait, KILL. Each signal is
-# preceded by the identity check; none is sent to anything else.
-bg_reap() {   # <pid|start time>
-  local pid="${1%%|*}" started="${1#*|}"
-  [ -n "$started" ] || return 0
-  bg_wait_gone "$pid" "$started" 10 && return 0
-  bg_signal TERM "$pid" "$started" || return 0
-  bg_wait_gone "$pid" "$started" 15 && return 0
-  bg_signal KILL "$pid" "$started" || true
-  return 0
+# Holds BEGIN EXCLUSIVE on <db> for <seconds> in a background job of this shell.
+hold_lock() {   # <db> <seconds>
+  ( ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep "$2" ) | sqlite3 "$1" >/dev/null 2>&1 ) &
+  HOLD_PID=$!
+  track_bg "$HOLD_PID"
 }
 
-# Prints the records of the children below a process, recursively, but only
-# while that process is still the recorded one: nothing is collected below a pid
-# that has been reused.
-bg_children() {   # <pid> <start time>
-  local c cs
-  bg_same "$1" "$2" || return 0
-  for c in $(pgrep -P "$1" 2>/dev/null); do
-    cs="$(LC_ALL=C ps -p "$c" -o lstart= 2>/dev/null)"
-    [ -n "$cs" ] || continue
-    printf '%s|%s\n' "$c" "$cs"
-    bg_children "$c" "$cs"
-  done
-}
-
-# Ends a recorded process and what it started. The owner's identity is verified
-# BEFORE its children are looked for; if it does not match, nothing is done.
-bg_reap_family() {   # <pid|start time>
-  local pid="${1%%|*}" started="${1#*|}" fam sub
-  bg_same "$pid" "$started" || return 0
-  fam="$(bg_children "$pid" "$started")"
-  bg_reap "$1"
-  while IFS= read -r sub; do
-    [ -n "$sub" ] && bg_reap "$sub"
-  done <<< "$fam"
-  return 0
-}
-
+# Ends the tracked jobs: wait for them to finish by themselves, then TERM, then
+# KILL, each step bounded and each signal only to a pid still listed as a running
+# job. Returns 1 (and says so) if a job was still running at the end.
 bg_reap_all() {
-  local rec
-  for rec in ${TEST_BG[@]+"${TEST_BG[@]}"}; do
-    bg_reap_family "$rec"
-    wait "${rec%%|*}" 2>/dev/null || true
+  local pid i left=0
+  for pid in ${TEST_BG[@]+"${TEST_BG[@]}"}; do
+    for ((i = 0; i < 50; i++)); do bg_is_running_job "$pid" || break; sleep 0.2; done
+    if bg_is_running_job "$pid"; then
+      kill "$pid" 2>/dev/null || true
+      for ((i = 0; i < 15; i++)); do bg_is_running_job "$pid" || break; sleep 0.2; done
+    fi
+    if bg_is_running_job "$pid"; then
+      kill -KILL "$pid" 2>/dev/null || true
+      for ((i = 0; i < 10; i++)); do bg_is_running_job "$pid" || break; sleep 0.2; done
+    fi
+    if bg_is_running_job "$pid"; then
+      echo "teardown: background job $pid is still running" >&2
+      left=1
+    fi
+    wait "$pid" 2>/dev/null || true
   done
+  return "$left"
 }
