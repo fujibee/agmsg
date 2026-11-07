@@ -435,7 +435,7 @@ EOS
   [ -L "$SK/run" ]
 }
 
-@test "an earlier-release installer that holds the old lock past the wait stops the update with a stated reason and changes nothing" {
+@test "an earlier-release installer that holds the old lock past the wait stops the update with the stated reason and changes nothing" {
   inst
   demote
   : > "$SK/run/install-op.lock.db"
@@ -447,9 +447,31 @@ EOS
   run env AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS=1500 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   wait "$holder" || true
   [ "$status" -ne 0 ]
-  grep -qF -- "an installer from an earlier release holds" <<<"$output"
+  grep -qF -- "another agmsg install or update is running (it holds the old-layout lock $SK/run/install-op.lock.db); nothing was changed. Run this again after it finishes." <<<"$output"
   [ "$(<"$SK/scripts/agmsg")" = sentinel ]
   [ -d "$SK/run" ] && [ ! -L "$SK/run" ]
+  # nothing else moved either: no state root, no marker content, no Codex config
+  [ ! -e "$ST" ]
+  [ ! -s "$SK/.agmsg" ]
+  [ ! -e "$FAKE_HOME/.codex" ]
+  grep -qF -- "nothing was changed" <<<"$output"
+}
+
+@test "an earlier-release installer that holds the old lock past the wait stops the uninstall with the stated reason and removes nothing" {
+  inst
+  demote
+  : > "$SK/run/install-op.lock.db"
+  printf 'sentinel\n' > "$SK/scripts/agmsg"
+  hold_lock "$SK/run/install-op.lock.db" 12
+  local holder=$HOLD_PID
+  sleep 1
+  run env AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS=1500 HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  wait "$holder" || true
+  [ "$status" -ne 0 ]
+  grep -qF -- "another agmsg install or update is running (it holds the old-layout lock $SK/run/install-op.lock.db); nothing was changed. Run this again after it finishes." <<<"$output"
+  [ "$(<"$SK/scripts/agmsg")" = sentinel ]
+  [ -d "$SK/run" ] && [ ! -L "$SK/run" ]
+  [ -d "$SK/db" ] && [ -d "$SK/teams" ]
 }
 
 @test "state_link: run/ recreated by an ordinary writer in the gap is folded in, never linked into, and nothing is lost" {
