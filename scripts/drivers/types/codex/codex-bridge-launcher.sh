@@ -1052,6 +1052,19 @@ EOF
       continue
     fi
   fi
+  # An app-server address the bridge can never use is not a transient failure
+  # to retry: a bare `unix://` (no socket path) makes the bridge exit at once,
+  # and this loop would start it again every second for as long as the seat
+  # lives. Say so once, in this seat's bridge log, drop the request that carried
+  # it, and stop. The next SessionStart publishes a new request.
+  case "$req_app_server" in
+    unix://)
+      printf '[%s] codex-bridge-launcher: not starting a bridge for %s: the app-server address "unix://" has no socket path; request %s dropped, the next SessionStart publishes a new one\n' \
+        "$$" "$bridge_key" "$REQUEST_FILE" >>"$log" 2>/dev/null || true
+      rm -f "$REQUEST_FILE"
+      exit 0
+      ;;
+  esac
   # Committed to spawning now: clear the stale records immediately before writing
   # the new ones, so no gate can bail out between the wipe and the rewrite.
   rotate_bridge_log

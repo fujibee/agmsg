@@ -225,9 +225,22 @@ agmsg_session_start() {
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
     if [ -n "$agent_pid" ]; then
       agent_cmd=$(compat_get_cmdline "$agent_pid" 2>/dev/null || true)
+      # A `unix://` with a path. The managed daemon's own command line carries a
+      # bare `--listen unix://` (its default control socket); that is not an
+      # address a bridge can connect to, so it is resolved below instead.
       app_server=$(printf '%s\n' "$agent_cmd" \
-        | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
+        | sed -n 's/.*\(unix:\/\/[^[:space:]][^[:space:]]*\).*/\1/p' \
         | head -1)
+      if [ -z "$app_server" ]; then
+        case " $agent_cmd " in
+          *" unix:// "*|*"=unix:// "*)
+            default_socket="${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
+            if [ -S "$default_socket" ]; then
+              app_server="unix://$default_socket"
+            fi
+            ;;
+        esac
+      fi
     fi
   fi
   if [ -z "$app_server" ]; then
