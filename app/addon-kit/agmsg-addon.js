@@ -5,6 +5,7 @@
 //   const app = connect({
 //     onInit({ team, members, messages }) {},
 //     onMessage(message) {},
+//     onNotice({ name, at, ids }) {},   // an agent this add-on started was typed a notice; see canReportDelivery
 //   });
 //   app.locale;                            // the app's language, e.g. "ja" ("en" until it is known)
 //   app.onLocaleChange((tag) => {});       // fires when the user changes the app's language
@@ -53,6 +54,7 @@ export function connect(options = {}) {
     onInit = () => {},
     onMessage = () => {},
     onLocale = () => {},
+    onNotice = () => {},
     sample = true,
     sampleAfterMs = 1000,
     errorOverlay = true,
@@ -61,6 +63,7 @@ export function connect(options = {}) {
   if (errorOverlay) installErrorOverlay();
 
   let port = null;
+  let canReportDelivery = false; // the app says in `init` that it reports when it typed a notice into an agent
   let sampleMode = false;
   let nextId = 1;
   const pending = new Map();
@@ -88,6 +91,7 @@ export function connect(options = {}) {
     const data = event.data;
     if (!data || data.agmsg !== PROTOCOL) return;
     if (data.type === "init") {
+      canReportDelivery = data.notice === true;
       safe(() => onInit({ team: data.team, members: data.members || [], messages: data.messages || [] }));
     } else if (data.type === "locale") {
       if (typeof data.locale !== "string" || !LANG_TAG.test(data.locale)) return;
@@ -99,6 +103,8 @@ export function connect(options = {}) {
       if (changed) for (const cb of [...localeListeners]) safe(() => cb(locale));
     } else if (data.type === "message") {
       safe(() => onMessage(data.message));
+    } else if (data.type === "notice") {
+      safe(() => onNotice({ name: data.name, at: data.at, ids: Array.isArray(data.ids) ? data.ids : [] }));
     } else if (data.type === "response") {
       const p = pending.get(data.id);
       if (!p) return;
@@ -156,6 +162,8 @@ export function connect(options = {}) {
       localeListeners.add(cb);
       return () => localeListeners.delete(cb);
     },
+    /** True once `init` said the app reports delivery: `onNotice` will be called. False with an older app. */
+    get canReportDelivery() { return canReportDelivery; },
     openArgs: () => request("open.args"),
     fs: {
       stat: (path) => request("fs.stat", { path }),

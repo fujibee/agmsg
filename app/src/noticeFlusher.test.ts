@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createNoticeFlusher, RETRY_MAX_MS } from "./noticeFlusher";
+import { createNoticeFlusher, MAX_REPORT_IDS, RETRY_MAX_MS } from "./noticeFlusher";
 import { INJECT_SETTLE_MS, STARTUP_WAIT_MS, UNKNOWN_WAIT_MS, type Queues } from "./noticeQueue";
 
 type Call = { id: string; text: string; settle: (ok: boolean) => void };
 
 function setup(live = ["p1"]) {
   const calls: Call[] = [];
+  const typed: Array<{ id: string; ids: string[]; at: number }> = [];
   const banner: number[] = [];
   const failed: number[] = [];
   const logs: string[] = [];
@@ -19,8 +20,9 @@ function setup(live = ["p1"]) {
     log: (l) => logs.push(l),
     onInjectFailed: (_id, attempt) => failed.push(attempt),
     onWithoutReadySignal: (n) => banner.push(n),
+    onTyped: (id, ids, at) => typed.push({ id, ids, at }),
   });
-  return { f, calls, banner, failed, live, logs, held: () => held };
+  return { f, calls, banner, failed, live, logs, typed, held: () => held };
 }
 
 describe("noticeFlusher", () => {
@@ -167,5 +169,62 @@ describe("noticeFlusher", () => {
     live.length = 0;
     f.state("p1", "idle");
     expect(logs.some((l) => l.includes("dropped") && l.includes("closed"))).toBe(true);
+  });
+
+  it("reports the ids of the notices once they were typed, with the time, and only then", async () => {
+    const { f, calls, typed } = setup();
+    f.state("p1", "working");
+    f.notice("p1", "n1", "m1");
+    f.notice("p1", "n2", "m2");
+    f.notice("p1", "n3"); // a notice with no message id adds nothing to the report
+    expect(typed).toEqual([]);
+    vi.setSystemTime(5000);
+    f.state("p1", "idle");
+    expect(calls).toHaveLength(1);
+    expect(typed, "not while the write is still in flight").toEqual([]);
+    calls[0].settle(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(typed).toEqual([{ id: "p1", ids: ["m1", "m2"], at: 5000 }]);
+  });
+
+  it("reports nothing for a write that failed, and the retry that works reports the same ids", async () => {
+    const { f, calls, typed } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1", "m1");
+    calls[0].settle(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(typed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toHaveLength(2);
+    calls[1].settle(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(typed.map((t) => t.ids)).toEqual([["m1"]]);
+  });
+
+  it("reports nothing for notices dropped because the pane closed", async () => {
+    const { f, live, typed, calls } = setup();
+    f.state("p1", "working");
+    f.notice("p1", "n1", "m1");
+    live.length = 0;
+    f.flush();
+    await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS + 1000);
+    expect(calls).toHaveLength(0);
+    expect(typed).toEqual([]);
+  });
+
+  it("reports a long batch in pieces the host accepts, every id once, all with the same time", async () => {
+    for (const n of [MAX_REPORT_IDS - 1, MAX_REPORT_IDS, MAX_REPORT_IDS + 1, 2 * MAX_REPORT_IDS, 2 * MAX_REPORT_IDS + 1]) {
+      const { f, calls, typed } = setup();
+      f.state("p1", "working");
+      for (let k = 0; k < n; k++) f.notice("p1", `n${k}`, `m${k}`);
+      vi.setSystemTime(9000);
+      f.state("p1", "idle");
+      calls[0].settle(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(typed.every((t) => t.ids.length > 0 && t.ids.length <= MAX_REPORT_IDS), `${n}: every piece within the limit`).toBe(true);
+      expect(typed.map((t) => t.at), `${n}: one time`).toEqual(typed.map(() => 9000));
+      expect(typed.flatMap((t) => t.ids), `${n}: every id once, in order`).toEqual(Array.from({ length: n }, (_, k) => `m${k}`));
+      expect(typed.length).toBe(Math.ceil(n / MAX_REPORT_IDS));
+    }
   });
 });
