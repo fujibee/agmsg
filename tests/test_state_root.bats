@@ -15,19 +15,53 @@ setup() {
   export AGMSG_AGENT_PID=""
 }
 
+# Background processes this test started, recorded as "pid|start time". Teardown
+# signals one only while its pid still has that start time, so a pid that was
+# reaped and then reused by something else is never touched.
+TEST_BG=()
+track_bg() {   # <pid>
+  TEST_BG+=("$1|$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)")
+}
+
+# "pid|start time" of <pid> and of everything below it, found while <pid> is
+# still the verified owner.
+bg_family() {   # <pid>
+  local c
+  printf '%s|%s\n' "$1" "$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)"
+  for c in $(pgrep -P "$1" 2>/dev/null); do bg_family "$c"; done
+}
+
+# Ends the process in <record> if (and only if) it is still the recorded one:
+# a polite wait, TERM, then KILL, each bounded.
+bg_reap() {   # <pid|start time>
+  local pid="${1%%|*}" started="${1#*|}" now i
+  [ -n "$started" ] || return 0
+  now="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"
+  [ "$now" = "$started" ] || return 0
+  for ((i = 0; i < 10; i++)); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
+  kill "$pid" 2>/dev/null || true
+  for ((i = 0; i < 15; i++)); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
+  now="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"
+  if [ "$now" = "$started" ]; then kill -KILL "$pid" 2>/dev/null || true; fi
+  return 0
+}
+
 teardown() {
   # A test that pauses an update at the writer pid-publish gate or holds a lock
   # must never leave either behind when an assertion fails first: release the
-  # gate, then stop every background process the test started (all are its own,
-  # recorded in TEST_BG_PIDS) before the fixture is removed.
-  local pid
+  # gate, then end each background process the test started and what it started
+  # in turn (lock helpers), verified by pid AND start time, before the fixture
+  # is removed.
+  local rec fam sub
   if [ -n "${LEGACY_GATE:-}" ]; then touch "$LEGACY_GATE.release" 2>/dev/null || true; fi
-  for pid in ${TEST_BG_PIDS:-}; do
-    if kill -0 "$pid" 2>/dev/null; then
-      sleep 1
-      kill "$pid" 2>/dev/null || true
-    fi
-    wait "$pid" 2>/dev/null || true
+  for rec in ${TEST_BG[@]+"${TEST_BG[@]}"}; do
+    [ "${rec#*|}" != "" ] || continue
+    fam="$(bg_family "${rec%%|*}")"
+    bg_reap "$rec"
+    while IFS= read -r sub; do
+      [ -n "$sub" ] && bg_reap "$sub"
+    done <<< "$fam"
+    wait "${rec%%|*}" 2>/dev/null || true
   done
   [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] && command rm -rf "$FAKE_HOME"
 }
@@ -390,10 +424,10 @@ EOS
   inst
   demote
   ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/.install-op/lock.db" >/dev/null 2>&1 &
-  local holder=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $holder"
+  local holder=$!; track_bg "$holder"
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
-  local updater=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $updater"
+  local updater=$!; track_bg "$updater"
   sleep 4
   # still waiting for the lock: the state is where it was
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
@@ -424,10 +458,10 @@ EOS
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
   ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 7 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
-  local holder=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $holder"
+  local holder=$!; track_bg "$holder"
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
-  local updater=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $updater"
+  local updater=$!; track_bg "$updater"
   sleep 3
   # still waiting: the installed script was not replaced, the state not moved
   [ "$(<"$SK/scripts/agmsg")" = sentinel ]
@@ -444,7 +478,7 @@ EOS
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
   ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 12 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
-  local holder=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $holder"
+  local holder=$!; track_bg "$holder"
   sleep 1
   # the 30 s wait, shortened for the test
   run env AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS=1500 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
@@ -495,7 +529,7 @@ EOS
   local gate="$BATS_TEST_TMPDIR/gate" i
   LEGACY_GATE="$gate"
   AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE="$gate" inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
-  local updater=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $updater"
+  local updater=$!; track_bg "$updater"
   for ((i = 0; i < 1500; i++)); do
     [ -e "$gate.pid" ] && break
     kill -0 "$updater" 2>/dev/null || break
