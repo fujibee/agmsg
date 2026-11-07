@@ -2566,7 +2566,7 @@ let attempts = 0;
 const instance = vm.runInNewContext(`({${method}})`, {
   path: require("path"), toPosixPath: (value) => value,
   SCRIPTS_DIR: "/fixture/scripts", SKILL_DIR: "/fixture", BASH_BIN: "bash",
-  console: { error() {} },
+  console: { error() {} }, setTimeout: () => null, clearTimeout() {},
   spawnSync: () => ({ status: ++attempts % 2 ? 1 : 0 }),
 });
 instance.noticeComponent = "fixture";
@@ -2597,6 +2597,7 @@ let attempts = 0;
 const instance = vm.runInNewContext(`({${method}})`, {
   path, toPosixPath: (value) => value, SCRIPTS_DIR: path.join(root, "scripts"),
   SKILL_DIR: root, BASH_BIN: "bash", console: { error() {} },
+  setTimeout: () => null, clearTimeout() {},
   spawnSync: (...args) => { attempts++; return spawnSync(...args); },
 });
 instance.noticeComponent = "fixture";
@@ -2621,6 +2622,67 @@ instance.notice(null, "");
 assert.strictEqual(fs.existsSync(record), false);
 instance.notice(null, "");
 assert.strictEqual(attempts, 4);
+JS
+  [ "$status" -eq 0 ]
+}
+
+@test "codex recovery: a failed recovery clear retries autonomously after storage repair" {
+  run node - "$TYPES/codex/codex-bridge.js" "$TEST_SKILL_DIR" <<'JS'
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const assert = require("assert");
+const { spawnSync } = require("child_process");
+(async () => {
+  const root = fs.mkdtempSync(path.join(process.argv[3], "autonomous-notice-"));
+  fs.mkdirSync(path.join(root, "scripts/lib"), { recursive: true });
+  fs.copyFileSync(path.join(process.argv[3], "scripts/lib/down-notice.sh"), path.join(root, "scripts/lib/down-notice.sh"));
+  const source = fs.readFileSync(process.argv[2], "utf8");
+  const notice = source.match(/  notice\(state, reason, recovery = "agmsg doctor"\) \{[\s\S]*?\n  \}/)[0];
+  const recover = source.match(/  async recoverConnectionLoop\(\) \{[\s\S]*?\n  \}/)[0];
+  const shutdown = source.match(/  async shutdown\(\) \{[\s\S]*?\n  \}/)[0];
+  let arms = 0;
+  const instance = vm.runInNewContext(`({${notice},${recover},${shutdown}})`, {
+    path, toPosixPath: (value) => value, SCRIPTS_DIR: path.join(root, "scripts"),
+    SKILL_DIR: root, BASH_BIN: "bash", console: { error() {} },
+    spawnSync, setTimeout, clearTimeout, WATCH_REARM_MS: 50,
+    WebSocketAppServerClient: class {},
+  });
+  Object.assign(instance, {
+    noticeComponent: "fixture", clientStarted: true, initialized: true, client: { stop() {} },
+    lastRecoveryAttempt: 0, ensureThread: async () => {}, loadTurnIntent() {},
+    armWatch: async () => { arms++; }, recordSeat() {},
+    clearWatchRearmTimer() {}, clearTurnWatchdog() {}, cleanupMeta() {},
+  });
+  instance.notice("degraded", "connection interrupted");
+  const record = path.join(root, "run/down/fixture.json");
+  const previous = fs.readFileSync(record);
+  fs.unlinkSync(record);
+  fs.mkdirSync(record);
+  await instance.recoverConnectionLoop();
+  assert.strictEqual(arms, 1, "notice failure must not gate delivery recovery");
+  assert.strictEqual(fs.statSync(record).isDirectory(), true);
+  fs.rmdirSync(record);
+  fs.writeFileSync(record, previous);
+  // No second recovery, completion, or direct notice call follows the repair.
+  const deadline = Date.now() + 6500;
+  while (fs.existsSync(record) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.strictEqual(fs.existsSync(record), false, "dirty clear must retry without another connection event");
+  assert.strictEqual(arms, 1);
+  instance.notice("degraded", "connection interrupted");
+  fs.unlinkSync(record);
+  fs.mkdirSync(record);
+  instance.notice(null, "");
+  assert.ok(instance.noticeRetryTimer);
+  instance.notice("degraded", "connection interrupted");
+  assert.strictEqual(instance.noticeRetryTimer, null, "cached newer transition cancels the obsolete clear");
+  instance.notice(null, "");
+  assert.ok(instance.noticeRetryTimer);
+  await instance.shutdown();
+  assert.strictEqual(instance.noticeRetryTimer, null, "shutdown cancels notice retries");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
 JS
   [ "$status" -eq 0 ]
 }

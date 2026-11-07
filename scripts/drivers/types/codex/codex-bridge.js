@@ -1016,6 +1016,7 @@ class CodexBridge {
     this.uncertainThread = false;
     this.watchExpiresAt = 0;
     this.noticeSignature = null;
+    this.noticeRetryTimer = null;
     this.turnIntentToken = null;
     let physicalProject = opts.project;
     try { physicalProject = fs.realpathSync(opts.project); } catch (_) { /* preserve the supplied path when unavailable */ }
@@ -1105,8 +1106,13 @@ class CodexBridge {
   }
 
   // Use the shared shell helper; values cross as argv, never shell source.
-  // Writes happen only on transitions, not on every retry or healthy tick.
+  // Writes happen on transitions and bounded storage retries, never healthy ticks.
   notice(state, reason, recovery = "agmsg doctor") {
+    // A newer transition supersedes any failed older transition, even when
+    // the newer state already matches the last successfully stored value.
+    clearTimeout(this.noticeRetryTimer);
+    this.noticeRetryTimer = null;
+    if (this.stopping) return;
     const signature = JSON.stringify([state, reason, recovery]);
     if (signature === this.noticeSignature) return;
     const helper = path.join(SCRIPTS_DIR, "lib", "down-notice.sh");
@@ -1118,6 +1124,13 @@ class CodexBridge {
     const result = spawnSync(BASH_BIN, args, { cwd: SKILL_DIR, encoding: "utf8" });
     if (result.error || result.status !== 0) {
       console.error(`codex-bridge: could not publish recovery notice: ${result.error?.message || result.stderr || result.status}`);
+      // Independent of connection/turn events: a recovered connection may
+      // never fail again, but its dirty notice still needs to be cleared.
+      this.noticeRetryTimer = setTimeout(() => {
+        this.noticeRetryTimer = null;
+        this.notice(state, reason, recovery);
+      }, 5000);
+      this.noticeRetryTimer?.unref?.();
       return;
     }
     this.noticeSignature = signature;
@@ -1976,6 +1989,8 @@ class CodexBridge {
   async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
+    clearTimeout(this.noticeRetryTimer);
+    this.noticeRetryTimer = null;
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
