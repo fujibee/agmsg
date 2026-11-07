@@ -19,6 +19,24 @@ export interface InitEvent {
   team: string;
   members: Member[];
   messages: Message[]; // at most 500, newest kept
+  /**
+   * The app reports `notice` events (below). Absent with an older app: the add-on must then work without them.
+   * The kit shows it as `app.canReportDelivery`.
+   */
+  notice?: boolean;
+}
+
+/**
+ * The app typed a notice into the terminal of an agent THIS add-on started, in a team where the pane holds
+ * `agents:spawn`. Pushed only to that add-on's panes, once per typed notice, carrying no text.
+ *  - name: the agent's member name
+ *  - at:   when the notice was typed (ms since epoch)
+ *  - ids:  the ids of the messages the notice was about, to match against messages the add-on sent
+ */
+export interface NoticeEvent {
+  name: string;
+  at: number;
+  ids: string[];
 }
 
 /**
@@ -300,6 +318,12 @@ export interface SpawnRequest {
   folder?: string;
   /** Passed to the type's model option after validation. Omitted: the type's default. */
   model?: string;
+  /**
+   * A reasoning effort. Only an id that agents.models lists for the chosen model (`model`, else the list's default model)
+   * is accepted; anything else is `bad_args` and nothing starts. Omitted: the CLI's own default. A type without a
+   * model list takes none.
+   */
+  effort?: string;
 }
 
 /**

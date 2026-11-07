@@ -135,6 +135,28 @@ pub fn parse_model_page(result: &Value) -> Result<(Vec<ModelOption>, Option<Stri
     Ok((out, next))
 }
 
+/// The CLI tokens that set a reasoning effort for `agent_type`, or None when the type has no way to take one.
+/// The only value that reaches the argv is an effort id the model list offered (the caller checks that first);
+/// the tokens around it are fixed here.
+pub fn effort_args(agent_type: &str, effort: &str) -> Option<Vec<String>> {
+    if effort.is_empty() || !effort.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        return None;
+    }
+    match agent_type {
+        "claude-code" => Some(vec!["--effort".into(), effort.into()]),
+        "codex" => Some(vec!["-c".into(), format!("model_reasoning_effort={effort}")]),
+        _ => None,
+    }
+}
+
+/// The model an effort is checked against: the one asked for, else the list's default (else its first).
+pub fn model_for_effort<'a>(models: &'a [ModelOption], model: Option<&str>) -> Option<&'a ModelOption> {
+    match model {
+        Some(id) => models.iter().find(|m| m.id == id),
+        None => models.iter().find(|m| m.is_default).or_else(|| models.first()),
+    }
+}
+
 const WRAPPER_MARK: &str = "Optional Codex entrypoint shim for agmsg monitor mode";
 
 fn is_agmsg_wrapper(p: &Path) -> bool {
@@ -471,6 +493,24 @@ mod tests {
         assert_eq!(parse_model_page(&v).unwrap().1.as_deref(), Some("abc"));
         v["nextCursor"] = json!("");
         assert_eq!(parse_model_page(&v).unwrap().1, None);
+    }
+
+    #[test]
+    fn effort_tokens_are_fixed_per_type_and_only_a_plain_value_gets_through() {
+        assert_eq!(effort_args("claude-code", "xhigh"), Some(vec!["--effort".to_string(), "xhigh".to_string()]));
+        assert_eq!(effort_args("codex", "ultra"), Some(vec!["-c".to_string(), "model_reasoning_effort=ultra".to_string()]));
+        assert_eq!(effort_args("gemini", "low"), None);
+        for bad in ["", "Low", "low high", "low;x", "-low", "high\"", "a=b"] {
+            assert_eq!(effort_args("codex", bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_model_an_effort_is_checked_against_is_the_asked_one_else_the_default() {
+        let ms = claude_models();
+        assert_eq!(model_for_effort(&ms, Some("opus")).unwrap().id, "opus");
+        assert_eq!(model_for_effort(&ms, None).unwrap().id, "default");
+        assert!(model_for_effort(&ms, Some("nope")).is_none());
     }
 
     #[test]
