@@ -508,15 +508,42 @@ EOS
   [ "$status" -eq 0 ]
 }
 
-@test "teardown: a process that is not a job of this shell is never signalled" {
-  # started in a subshell, so this shell's job table does not list it
-  local other
-  other="$( (sleep 20 >/dev/null 2>&1 & echo $!) )"
-  track_bg "$other"
-  refute bg_is_running_job "$other"
+# The shell's job table, kill, sleep and wait are stubbed here, so no real
+# process is signalled or waited for.
+reap_stubs() {
+  CALLS="$BATS_TEST_TMPDIR/calls"
+  : > "$CALLS"
+  sleep() { :; }
+  kill() { printf 'kill %s\n' "$*" >> "$CALLS"; }
+  wait() { printf 'wait %s\n' "$1" >> "$CALLS"; }
+}
+
+# The real teardown runs after the test: it must see no stubs and no tracked pid.
+reap_unstub() {
+  unset -f jobs kill sleep wait
+  TEST_BG=()
+}
+
+@test "teardown: a pid the job table does not list as running is never signalled" {
+  reap_stubs
+  jobs() { :; }
+  track_bg 4242
   bg_reap_all
-  kill -0 "$other"
-  kill "$other"
+  ! grep -q '^kill' "$CALLS" || return 1
+  grep -qx 'wait 4242' "$CALLS"
+  reap_unstub
+}
+
+@test "teardown: a job that will not end is signalled TERM then KILL, reported, failed, and never waited for" {
+  reap_stubs
+  jobs() { printf '4242\n'; }
+  track_bg 4242
+  bg_reap_all 2> "$BATS_TEST_TMPDIR/err" && return 1
+  grep -qx 'kill 4242' "$CALLS"
+  grep -qx 'kill -KILL 4242' "$CALLS"
+  ! grep -q '^wait' "$CALLS" || return 1
+  grep -qF "background job 4242 is still running" "$BATS_TEST_TMPDIR/err"
+  reap_unstub
 }
 
 @test "teardown: a job of this shell that outlives its wait is ended, and one that has finished is left alone" {

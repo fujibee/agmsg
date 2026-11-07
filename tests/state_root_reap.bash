@@ -47,10 +47,12 @@ bg_reap_all() {
       for ((i = 0; i < 10; i++)); do bg_is_running_job "$pid" || break; sleep 0.2; done
     fi
     if bg_is_running_job "$pid"; then
+      # not waited for: a job that is still running would block the wait for good
       echo "teardown: background job $pid is still running" >&2
       left=1
+    else
+      wait "$pid" 2>/dev/null || true
     fi
-    wait "$pid" 2>/dev/null || true
   done
   return "$left"
 }
