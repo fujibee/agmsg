@@ -29,6 +29,8 @@ source "$SCRIPT_DIR/lib/sqlpath.sh"
 source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck source=lib/hash.sh
 source "$SCRIPT_DIR/lib/hash.sh"
+# shellcheck source=lib/down-notice.sh
+source "$SCRIPT_DIR/lib/down-notice.sh"
 
 _path_hint() {
   printf 'If agmsg is not found, use "%s/scripts/agmsg" daemon %s.\n' "$SKILL_DIR" "$1"
@@ -348,8 +350,16 @@ _systemd_unit_path_dirs() {
 }
 
 # NOT YET RUN ON LINUX in this environment -- configured with
-# (Restart=on-failure, RestartSec=30s, StartLimitIntervalSec=600,
-# StartLimitBurst=5) and shellchecked only.
+# (Restart=on-failure, RestartSec=30s) and shellchecked only.
+#
+# StartLimitBurst=0 turns off systemd's own restart-rate limiting (its
+# default is 5 restarts within a 10s window when unset -- not "no limit").
+# agmsgd is a resident a user expects to come back on its own; a crash loop
+# giving up and sitting dead until someone manually runs `systemctl --user
+# reset-failed` is exactly the terminal stop class B/C work (1.7.2, decision
+# 11-04) is removing. RestartSec=30s already bounds the retry rate (one
+# attempt per 30s, same as before), so this keeps backoff while dropping the
+# burst cap that used to end it permanently (S04).
 _register_linux() {
   local node_path="$1" unit_path unit_name unit_env
   unit_path="$(_systemd_unit_path)"
@@ -362,7 +372,7 @@ _register_linux() {
 [Unit]
 Description=agmsgd ($SKILL_DIR)
 StartLimitIntervalSec=600
-StartLimitBurst=5
+StartLimitBurst=0
 
 [Service]
 ExecStart=$LAUNCHER
@@ -375,6 +385,39 @@ WantedBy=default.target
 EOF
   "$AGMSGD_SYSTEMCTL" --user daemon-reload
   "$AGMSGD_SYSTEMCTL" --user enable "$unit_name"
+}
+
+# A unit registered before this fix (StartLimitBurst=5) can still be sitting
+# "failed" (systemd gave up restarting it) when this code runs. One
+# self-heal attempt per status/doctor check: clear the failure latch and
+# start it again. Desired=off is never looked at here by design -- an
+# explicitly disabled unit has no unit file at all (_unregister_linux
+# removes it), so there is nothing for "systemctl is-failed" to ever match
+# in that case; this never fights an explicit `agmsg daemon disable`.
+# Leaves a down_notice only when the self-heal attempt itself fails, cleared
+# the moment the unit is next seen running.
+_linux_recover_if_failed() {
+  _systemd_user_usable || return 0
+  local unit_path unit_name
+  unit_path="$(_systemd_unit_path)"
+  [ -f "$unit_path" ] || return 0
+  unit_name="$(basename "$unit_path")"
+  if [ "$("$AGMSGD_SYSTEMCTL" --user is-active "$unit_name" 2>/dev/null)" = active ]; then
+    # A notice is diagnostic, not load-bearing: an I/O failure here
+    # (rc 1, per the shared down-notice.sh contract) must never abort
+    # this function or the command that called it.
+    down_notice_clear agmsgd || :
+    return 0
+  fi
+  [ "$("$AGMSGD_SYSTEMCTL" --user is-failed "$unit_name" 2>/dev/null)" = failed ] || return 0
+  "$AGMSGD_SYSTEMCTL" --user reset-failed "$unit_name" >/dev/null 2>&1 || true
+  if "$AGMSGD_SYSTEMCTL" --user start "$unit_name" >/dev/null 2>&1; then
+    down_notice_clear agmsgd || :
+  else
+    down_notice_set agmsgd down \
+      "systemd gave up restarting agmsgd and the automatic reset-failed + start retry also failed" \
+      "systemctl --user reset-failed $unit_name && agmsg daemon start" || :
+  fi
 }
 
 _unregister_linux() {
@@ -833,6 +876,16 @@ cmd_status() {
       *) _usage; return 2 ;;
     esac
   done
+  if [ "$(_os)" = linux ]; then _linux_recover_if_failed || true; fi
+  # Show agmsgd's own down_notice record (if any) in the TEXT output only --
+  # the JSON contract (status.mjs's object, or the K14 fallback's
+  # json_object(...) below) is unchanged (review round 2). The record
+  # outlives any single call site that set it (install.sh's own failed
+  # restart attempt, this function's own _linux_recover_if_failed above),
+  # so this is the one place "agmsg daemon status" always surfaces it.
+  if [ "$json" != true ]; then
+    down_notice_list 2>/dev/null | awk -F'\t' '$1 == "agmsgd"' | _down_notice_text
+  fi
   local owner_tables
   # Only a database that answers and has no daemon_owner table is "not in use
   # yet"; a query that fails (corrupt, locked) falls through to the normal
