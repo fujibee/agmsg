@@ -568,7 +568,7 @@ agmsg_install_operation_begin() {
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
   trap 'agmsg_install_operation_exit' EXIT
-  if agmsg_install_op_legacy_lock_busy "$SKILL_DIR"; then
+  if ! agmsg_install_op_legacy_lock_hold "$SKILL_DIR"; then
     echo "  ! an installer from an earlier release holds $SKILL_DIR/run/install-op.lock.db; run this again when it has finished" >&2
     return 1
   fi

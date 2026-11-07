@@ -430,12 +430,12 @@ EOS
   demote
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
-  # a stand-in for the 30 s wait: a sqlite3 that gives up at once
-  mkdir -p "$BATS_TEST_TMPDIR/fakebin"
-  real="$(command -v sqlite3)"
-  printf '#!/bin/sh\ncase "$*" in *"BEGIN EXCLUSIVE; COMMIT;"*) echo "database is locked" >&2; exit 5 ;; esac\nexec %s "$@"\n' "$real" > "$BATS_TEST_TMPDIR/fakebin/sqlite3"
-  chmod +x "$BATS_TEST_TMPDIR/fakebin/sqlite3"
-  run env PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 12 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
+  local holder=$!
+  sleep 1
+  # the 30 s wait, shortened for the test
+  run env AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS=1500 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  wait "$holder" || true
   [ "$status" -ne 0 ]
   grep -qF -- "an installer from an earlier release holds" <<<"$output"
   [ "$(<"$SK/scripts/agmsg")" = sentinel ]
@@ -473,4 +473,26 @@ EOS
   [ "$(<"$ST/run/same")" = old ]
   [ "$(<"$SK/run/same")" = new ]
   [ ! -e "$SK/run/run" ]
+}
+
+@test "an earlier-release installer that arrives while the update is running is held out until the update ends" {
+  inst
+  demote
+  : > "$SK/run/install-op.lock.db"
+  local gate="$BATS_TEST_TMPDIR/gate" i
+  AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE="$gate" inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
+  local updater=$!
+  for ((i = 0; i < 1500; i++)); do
+    [ -e "$gate.pid" ] && break
+    kill -0 "$updater" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -e "$gate.pid" ]
+  # the update is paused in the middle of its writes; a legacy entrant cannot start
+  run sqlite3 -cmd '.timeout 500' "$SK/run/install-op.lock.db" "BEGIN EXCLUSIVE; COMMIT;"
+  [ "$status" -ne 0 ]
+  touch "$gate.release"
+  wait "$updater"
+  run sqlite3 -cmd '.timeout 5000' "$SK/run/install-op.lock.db" "BEGIN EXCLUSIVE; COMMIT;"
+  [ "$status" -eq 0 ]
 }

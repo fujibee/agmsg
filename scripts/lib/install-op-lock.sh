@@ -162,15 +162,47 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
 }
 
 # Releases before the lock moved to .install-op/ kept it in run/. An installer
-# of such a release can still be running; it only knows that file. 0 = one holds
-# it (after waiting up to 30 s), 1 = free, or there is no such file.
-agmsg_install_op_legacy_lock_busy() {   # <skill dir>
-  local old="${1%/}/run/install-op.lock.db"
-  [ -f "$old" ] || return 1
-  if sqlite3 -cmd '.timeout 30000' "$old" "BEGIN EXCLUSIVE; COMMIT;" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 0
+# of such a release can still be running or can start; it only knows that file.
+# So the legacy lock is HELD for the whole operation, not looked at once:
+# a helper process takes BEGIN EXCLUSIVE on it (waiting up to 30 s) and keeps it
+# until agmsg_install_op_unlock (which every path through an operation ends in),
+# or until this process is gone. 0 = held, or there is no such file; 1 = another
+# holder kept it past the wait.
+_AGMSG_LEGACY_LOCK_PID=""
+_AGMSG_LEGACY_LOCK_OUT=""
+agmsg_install_op_legacy_lock_hold() {   # <skill dir>
+  local old="${1%/}/run/install-op.lock.db" out owner=$$ waited=0 first="" wait_ms="${AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS:-30000}"
+  [ -f "$old" ] || return 0
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-legacy-lock.XXXXXX")" || return 1
+  _AGMSG_LEGACY_LOCK_OUT="$out"
+  (
+    {
+      printf '.timeout %s\nBEGIN EXCLUSIVE;\nSELECT '"'"'agmsg-legacy-ok'"'"';\n' "$wait_ms"
+      while kill -0 "$owner" 2>/dev/null && [ ! -e "$out.stop" ]; do sleep 1; done
+    } | sqlite3 "$old" > "$out" 2>&1
+  ) 3>&- 4>&- &
+  _AGMSG_LEGACY_LOCK_PID=$!
+  while [ "$waited" -lt "$((wait_ms + 6000))" ]; do
+    if [ -s "$out" ]; then
+      first="$(head -n 1 "$out")"
+      [ "${first%$'\r'}" = "agmsg-legacy-ok" ] && return 0
+      break
+    fi
+    kill -0 "$_AGMSG_LEGACY_LOCK_PID" 2>/dev/null || break
+    sleep 0.2
+    waited=$((waited + 200))
+  done
+  _agmsg_install_op_legacy_lock_release
+  return 1
+}
+
+_agmsg_install_op_legacy_lock_release() {
+  [ -n "$_AGMSG_LEGACY_LOCK_PID" ] || return 0
+  : > "$_AGMSG_LEGACY_LOCK_OUT.stop" 2>/dev/null
+  wait "$_AGMSG_LEGACY_LOCK_PID" 2>/dev/null || true
+  command rm -f "$_AGMSG_LEGACY_LOCK_OUT" "$_AGMSG_LEGACY_LOCK_OUT.stop"
+  _AGMSG_LEGACY_LOCK_PID=""
+  _AGMSG_LEGACY_LOCK_OUT=""
 }
 
 # Preserve a short, shell-escaped first response so a caller can explain which
@@ -537,6 +569,7 @@ agmsg_install_op_unlock() {
   unset _AGMSG_LOCK_PID _AGMSG_LOCK_TMPDIR _AGMSG_INSTALL_OP_USE_COPROC _AGMSG_LOCK_CHANNELS_READY
   unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
   AGMSG_INSTALL_OP_PHASE_ACTIVE=false
+  _agmsg_install_op_legacy_lock_release
 }
 
 # Places <src>'s CONTENT at <dest> atomically: a reader of <dest> sees either

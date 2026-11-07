@@ -243,7 +243,7 @@ _uninstall_one() {
     return 1
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
-  if agmsg_install_op_legacy_lock_busy "$SKILL_DIR"; then
+  if ! agmsg_install_op_legacy_lock_hold "$SKILL_DIR"; then
     echo "  ! an installer from an earlier release holds $SKILL_DIR/run/install-op.lock.db; run this again when it has finished" >&2
     return 1
   fi
