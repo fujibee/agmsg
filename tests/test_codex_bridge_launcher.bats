@@ -95,11 +95,23 @@ _pairs_hash="$(printf '%s' "$(printf '%s' "$_ph" | LC_ALL=C sort | sed '/^$/d')"
     "$_pairs_hash" \
     "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
 _sleep_pid=""
-trap '[ -z "$_sleep_pid" ] || kill "$_sleep_pid" 2>/dev/null || true; rm -f "$_lease"' EXIT
+cleanup_mock_bridge() {
+  local owned_pid
+  for owned_pid in $(jobs -pr); do
+    if [ "$owned_pid" = "$_sleep_pid" ]; then
+      kill "$owned_pid" 2>/dev/null || true
+      wait "$owned_pid" 2>/dev/null || true
+    fi
+  done
+  _sleep_pid=""
+  rm -f "$_lease"
+}
+trap cleanup_mock_bridge EXIT
 trap 'exit 0' TERM INT
 if [ -n "${MOCK_BRIDGE_SLEEP:-}" ]; then
   sleep "$MOCK_BRIDGE_SLEEP" & _sleep_pid=$!
   wait "$_sleep_pid" || true
+  _sleep_pid=""
 fi
 exit 0
 EOF
@@ -108,6 +120,7 @@ EOF
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
   # Isolate the notice transport; these tests exercise launcher recovery and
   # the shared helper calls, not the helper's persistence implementation.
+  cp "$SCRIPTS/lib/down-notice.sh" "$SCRIPTS/lib/down-notice.persistence.sh"
   cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
 down_notice_set() { printf '%s\n' "$3" > "$RUN_DIR/test-down.$1"; }
 down_notice_clear() { rm -f "$RUN_DIR/test-down.$1"; }
@@ -1272,10 +1285,12 @@ unknown_requests_keep_bridge() {
 }
 
 @test "launcher: identity notices retry real helper I/O failures without failing discovery" {
-  run bash - "$SCRIPTS/lib/down-notice.sh" "$TYPES/codex/codex-bridge-launcher.sh" "$TEST_SKILL_DIR" <<'SH'
+  run bash -s -- "$SCRIPTS/lib/down-notice.persistence.sh" "$TYPES/codex/codex-bridge-launcher.sh" "$TEST_SKILL_DIR" <<'SH'
 set -e
 source "$1"
-source <(sed -n '/^identity_ready() {/,/^# Positive removal proof:/ { /^# Positive removal proof:/!p; }' "$2")
+printf executed > "$3/identity-body-executed"
+sed -n '/^identity_ready() {/,/^# Positive removal proof:/ { /^# Positive removal proof:/!p; }' "$2" > "$3/identity-methods.sh"
+source "$3/identity-methods.sh"
 AGMSG_DOWN_NOTICE_ROOT="$3/identity-notice-io"
 mkdir -p "$AGMSG_DOWN_NOTICE_ROOT"
 printf blocked > "$AGMSG_DOWN_NOTICE_ROOT/run"
@@ -1299,4 +1314,5 @@ identity_ready
 [ ! -e "$record" ]
 SH
   [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/identity-body-executed" ]
 }
