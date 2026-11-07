@@ -46,6 +46,21 @@ agmsg_codex_writable_paths() {
   printf '%s\n' "${paths[@]}"
 }
 
+# Prints, one per line, the writable_roots entries an earlier release wrote for
+# <skill_dir> that are now links into a state root (db/, teams/, run/,
+# ext-tools/ under the skills directory itself, in the same form
+# agmsg_codex_writable_paths writes). Codex refuses a writable root that
+# contains a symlink, so an update that moved the state replaces these with the
+# real paths. Nothing is printed for a part that is still a real directory.
+agmsg_codex_stale_writable_paths() {
+  local skill_dir="$1" part
+  for part in db teams run ext-tools; do
+    if [ -L "$skill_dir/$part" ]; then
+      agmsg_codex_native_path "$skill_dir/$part"
+    fi
+  done
+}
+
 # agmsg_codex_writable_roots_notice <skill_dir>
 #
 # Prints ONE line to stdout when a Codex config this install would write to

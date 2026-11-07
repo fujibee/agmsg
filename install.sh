@@ -837,6 +837,53 @@ move_into_place() {
   agmsg_install_op_require
 }
 
+# Removes from ONE Codex config.toml's writable_roots the entries this install
+# wrote for db/, teams/, run/ and ext-tools/ under the skills directory when
+# those are now links into a state root (Codex rejects a writable root that
+# contains a symlink). Only those exact quoted paths go, and only from inside
+# the writable_roots array: every other entry, including ones the user wrote
+# and other installs', stays.
+_drop_stale_codex_roots() {
+  local code_config="$1" stale=() _s
+  while IFS= read -r _s; do
+    [ -n "$_s" ] && stale+=("$_s")
+  done < <(agmsg_codex_stale_writable_paths "$SKILL_DIR")
+  [ ${#stale[@]} -gt 0 ] || return 0
+
+  local hit=0
+  for _s in "${stale[@]}"; do
+    if grep -qF "\"$_s\"" "$code_config" 2>/dev/null; then hit=1; fi
+  done
+  [ "$hit" -eq 1 ] || return 0
+
+  agmsg_install_op_require || return 1
+  cp "$code_config" "$code_config.bak"
+  agmsg_install_op_require || return 1
+  AGMSG_STALE_ROOTS="$(printf '%s\n' "${stale[@]}")" awk '
+    BEGIN { n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n") }
+    /writable_roots[[:space:]]*=[[:space:]]*\[/ { inr = 1 }
+    {
+      gone = 0
+      if (inr) {
+        for (i = 1; i <= n; i++) {
+          if (st[i] == "") continue
+          q = "\"" st[i] "\""
+          while ((k = index($0, q)) > 0) {
+            rest = substr($0, k + length(q))
+            sub(/^[ \t]*,[ \t]*/, "", rest)
+            $0 = substr($0, 1, k - 1) rest
+            gone = 1
+          }
+        }
+      }
+      if (inr && $0 ~ /\]/) inr = 0
+      if (!(gone && $0 ~ /^[ \t]*$/)) print
+    }
+  ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
+  agmsg_install_op_require || return 1
+  echo "  ~ replaced Codex writable_roots entries that are now links ($code_config)"
+}
+
 # Adds this install's writable_paths (below) to ONE Codex config.toml.
 # Apply the active profile's sandbox configuration.
 _configure_codex_sandbox_file() {
@@ -846,6 +893,8 @@ _configure_codex_sandbox_file() {
   if [ ! -f "$code_config" ]; then
     return 0
   fi
+
+  _drop_stale_codex_roots "$code_config"
 
   local missing=()
   local p

@@ -153,6 +153,47 @@ demote() {
   grep -qF "$SK/.install-op" "$FAKE_HOME/.codex/config.toml"
 }
 
+@test "--update on the old layout replaces the entries it wrote for the now-linked directories, and leaves every other entry alone" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/mine"
+  cat > "$FAKE_HOME/.codex/config.toml" <<EOF
+model = "m"
+[sandbox_workspace_write]
+writable_roots = [
+  "$FAKE_HOME/mine",
+  "$SK/db",
+  "$SK/teams", "$SK/run",
+  "$SK/ext-tools",
+  "$FAKE_HOME/.agents/skills/other/db"
+]
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  local cfg="$FAKE_HOME/.codex/config.toml" p
+  # no writable root is, or contains, a link
+  for p in $(grep -o '"[^"]*"' "$cfg" | tr -d '"' | grep '^/'); do
+    [ ! -L "$p" ]
+  done
+  # the new entries carry the resolved spelling (/private/var for /var on macOS)
+  local real
+  real="$(cd -P "$ST" && pwd -P)"
+  for p in db teams run ext-tools; do
+    refute grep -qF "\"$SK/$p\"" "$cfg"
+    grep -qF "\"$real/$p\"" "$cfg"
+  done
+  grep -qF "\"$SK/.install-op\"" "$cfg"
+  # entries that are not this install's own stay
+  grep -qF "\"$FAKE_HOME/mine\"" "$cfg"
+  grep -qF "\"$FAKE_HOME/.agents/skills/other/db\"" "$cfg"
+  grep -qF 'model = "m"' "$cfg"
+  # a second update has nothing left to replace and changes nothing
+  cp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+  run inst --update
+  [ "$status" -eq 0 ]
+  cmp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+}
+
 @test "uninstall removes the state root too, and its Codex entries" {
   mkdir -p "$FAKE_HOME/.codex"
   printf 'model = "m"\n' > "$FAKE_HOME/.codex/config.toml"
