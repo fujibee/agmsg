@@ -1026,6 +1026,129 @@ _unit_file() {
   case "$out" in *'we"ird'*) return 1 ;; esac
 }
 
+@test "daemon.sh enable (linux): the unit turns off systemd's own restart-rate limit (StartLimitBurst=0), keeping RestartSec backoff (decision 11-04, S04)" {
+  _seed_install_db
+  _fake_linux_unit_env
+  local fns unit
+  fns="$(_daemon_fns)"
+  PATH="$FAKE_SQLITE_DIR:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2"' _ "$fns" "$FAKE_NODE_DIR/node"
+  [ "$status" -eq 0 ]
+  unit="$(_unit_file)"
+  grep -Fxq 'StartLimitBurst=0' "$unit"
+  grep -Fxq 'Restart=on-failure' "$unit"
+  grep -Fxq 'RestartSec=30s' "$unit"
+}
+
+# A fake systemctl for _linux_recover_if_failed: is-active/is-failed read from
+# two marker files so a test can set the starting state up front; reset-failed
+# always succeeds and clears the failed marker; start's result is controlled
+# by a third marker and, on success, also clears failed and sets active.
+_fake_recover_systemctl() {
+  FAKE_LINUX="$TEST_SKILL_DIR/fake-linux"
+  mkdir -p "$FAKE_LINUX"
+  cat > "$FAKE_LINUX/systemctl" <<'EOF'
+#!/usr/bin/env bash
+state_dir="$TEST_SKILL_DIR/fake-linux"
+printf '%s\n' "$2" >> "$state_dir/call-log"
+case "$2" in
+  show-environment) exit 0 ;;
+  is-active)
+    [ -f "$state_dir/active" ] && { echo active; exit 0; }
+    echo inactive; exit 3 ;;
+  is-failed)
+    [ -f "$state_dir/failed" ] && { echo failed; exit 0; }
+    echo active; exit 1 ;;
+  reset-failed)
+    rm -f "$state_dir/failed"
+    exit 0 ;;
+  start)
+    if [ -f "$state_dir/start-fails" ]; then
+      exit 1
+    fi
+    rm -f "$state_dir/failed"
+    : > "$state_dir/active"
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_LINUX/systemctl"
+  export TEST_SKILL_DIR
+}
+
+@test "_linux_recover_if_failed resets a failed unit and restarts it, clearing any down_notice (decision 11-04, S04)" {
+  _seed_install_db
+  _fake_recover_systemctl
+  local fns unit
+  fns="$(_daemon_fns)"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/failed"; down_notice_set agmsgd down stale stale; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  unit="$(_unit_file)"
+  [ -f "$TEST_SKILL_DIR/fake-linux/active" ]
+  [ ! -f "$TEST_SKILL_DIR/fake-linux/failed" ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
+@test "_linux_recover_if_failed leaves a down_notice when the automatic reset+start retry also fails (decision 11-04, S04)" {
+  _seed_install_db
+  _fake_recover_systemctl
+  local fns
+  fns="$(_daemon_fns)"
+  : > "$TEST_SKILL_DIR/fake-linux/start-fails"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/failed"; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -q '"component":"agmsgd"' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  grep -q '"state":"down"' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  grep -q 'reset-failed' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+}
+
+@test "_linux_recover_if_failed does nothing when the unit is already active (no reset-failed/start calls, review round 2)" {
+  _seed_install_db
+  _fake_recover_systemctl
+  local fns
+  fns="$(_daemon_fns)"
+  : > "$TEST_SKILL_DIR/fake-linux/active"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/call-log"; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/fake-linux/failed" ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  refute grep -qx 'reset-failed' "$TEST_SKILL_DIR/fake-linux/call-log"
+  refute grep -qx 'start' "$TEST_SKILL_DIR/fake-linux/call-log"
+  refute grep -qx 'is-failed' "$TEST_SKILL_DIR/fake-linux/call-log"
+  grep -qx 'is-active' "$TEST_SKILL_DIR/fake-linux/call-log"
+}
+
+@test "daemon.sh status: a retry failure's reason and recovery are shown in text, JSON stays an object (review round 2)" {
+  _seed_install_db
+  _fake_recover_systemctl
+  local fns
+  fns="$(_daemon_fns)"
+  : > "$TEST_SKILL_DIR/fake-linux/start-fails"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/failed"; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  # _os is only reachable through daemon.sh's own dispatch (sourced fns strip
+  # it), so this exercises cmd_status directly rather than the full CLI --
+  # same function `agmsg daemon status` calls.
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _os() { echo linux; }; _require_install_db() { :; }; cmd_status' \
+    _ "$fns"
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+  grep -q 'is down since' <<<"$output"
+  grep -q 'reset-failed' <<<"$output"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _os() { echo linux; }; _require_install_db() { :; }; cmd_status --json' \
+    _ "$fns"
+  refute grep -q 'is down since' <<<"$output"
+}
+
 @test "daemon.sh enable: no Codex warning when no Codex seat is registered, one when a Codex seat is" {
   _seed_install_db
   local fns

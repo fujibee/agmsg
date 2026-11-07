@@ -60,7 +60,7 @@ impl InitTooLarge {
 /// Returns the JSON event and the ids it contains.
 pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMessage>) -> Result<(Value, HashSet<String>), InitTooLarge> {
     let members_json: Vec<Value> = members.iter().map(|(name, ty)| json!({ "name": name, "type": ty })).collect();
-    let envelope = json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": [] });
+    let envelope = json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": [], "notice": true });
     let mut bytes = serde_json::to_string(&envelope).map(|s| s.len()).unwrap_or(usize::MAX);
     // Members are never cut silently: if the envelope alone is over the cap the
     // pane fails closed with a named error the failure card can explain.
@@ -80,7 +80,13 @@ pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMe
     }
     kept.reverse();
     let ids: HashSet<String> = kept.iter().map(|m| m.id.clone()).collect();
-    Ok((json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": kept }), ids))
+    Ok((json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": kept, "notice": true }), ids))
+}
+
+/// The app typed a turn notice into the pane of an agent this add-on started: the member, when (ms since epoch) and
+/// the ids of the messages the notice was about. No text.
+pub fn notice_event(name: &str, at: u64, ids: &[String]) -> Value {
+    json!({ "agmsg": 1, "type": "notice", "name": name, "at": at, "ids": ids })
 }
 
 /// Wraps one live message in the protocol event.
