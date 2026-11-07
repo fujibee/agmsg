@@ -318,6 +318,12 @@ export interface SpawnRequest {
   folder?: string;
   /** Passed to the type's model option after validation. Omitted: the type's default. */
   model?: string;
+  /**
+   * A reasoning effort. Only an id that agents.models lists for the chosen model (`model`, else the list's default model)
+   * is accepted; anything else is `bad_args` and nothing starts. Omitted: the CLI's own default. A type without a
+   * model list takes none.
+   */
+  effort?: string;
 }
 
 /**

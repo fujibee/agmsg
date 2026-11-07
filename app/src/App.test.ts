@@ -12,6 +12,7 @@ import {
   hasNoTerminalByDesign,
   knownTypes,
   loadRoster,
+  agentCliArgs,
   actionFailedToast,
   deleteTeamForceToast,
   deleteTeamToast,
@@ -34,6 +35,20 @@ import {
 } from "./App";
 import { createLatestOnly } from "./latestOnly";
 import { RailAvatar, SidebarUser, type Translate } from "./SidebarUser";
+
+describe("agentCliArgs", () => {
+  it("puts the model, then the effort, between the spawn options and the actas prompt", () => {
+    expect(agentCliArgs(["--x"], "--model", "opus", ["--effort", "high"], ["/agmsg actas w"])).toEqual(["--x", "--model", "opus", "--effort", "high", "/agmsg actas w"]);
+    expect(agentCliArgs([], "-m", "gpt-x", ["-c", "model_reasoning_effort=ultra"], ["$agmsg actas w"])).toEqual(["-m", "gpt-x", "-c", "model_reasoning_effort=ultra", "$agmsg actas w"]);
+  });
+  it("is the old argv when no model or effort was asked for", () => {
+    expect(agentCliArgs(["--x"], "--model", undefined, undefined, ["/agmsg actas w"])).toEqual(["--x", "/agmsg actas w"]);
+    expect(agentCliArgs([], null, "opus", [], ["p"])).toEqual(["p"]);
+  });
+  it("can take an effort without a model", () => {
+    expect(agentCliArgs([], "--model", undefined, ["--effort", "max"], ["p"])).toEqual(["--effort", "max", "p"]);
+  });
+});
 
 describe("actasSpawnArgs", () => {
   it("claude-code: no cmd_prefix/prompt_arg -> bare '/<cmd> actas <name>' (unchanged)", () => {
