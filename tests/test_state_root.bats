@@ -16,6 +16,19 @@ setup() {
 }
 
 teardown() {
+  # A test that pauses an update at the writer pid-publish gate or holds a lock
+  # must never leave either behind when an assertion fails first: release the
+  # gate, then stop every background process the test started (all are its own,
+  # recorded in TEST_BG_PIDS) before the fixture is removed.
+  local pid
+  if [ -n "${LEGACY_GATE:-}" ]; then touch "$LEGACY_GATE.release" 2>/dev/null || true; fi
+  for pid in ${TEST_BG_PIDS:-}; do
+    if kill -0 "$pid" 2>/dev/null; then
+      sleep 1
+      kill "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
   [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] && command rm -rf "$FAKE_HOME"
 }
 
@@ -377,10 +390,10 @@ EOS
   inst
   demote
   ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/.install-op/lock.db" >/dev/null 2>&1 &
-  local holder=$!
+  local holder=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $holder"
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
-  local updater=$!
+  local updater=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $updater"
   sleep 4
   # still waiting for the lock: the state is where it was
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
@@ -411,10 +424,10 @@ EOS
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
   ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 7 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
-  local holder=$!
+  local holder=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $holder"
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
-  local updater=$!
+  local updater=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $updater"
   sleep 3
   # still waiting: the installed script was not replaced, the state not moved
   [ "$(<"$SK/scripts/agmsg")" = sentinel ]
@@ -431,7 +444,7 @@ EOS
   : > "$SK/run/install-op.lock.db"
   printf 'sentinel\n' > "$SK/scripts/agmsg"
   ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 12 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
-  local holder=$!
+  local holder=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $holder"
   sleep 1
   # the 30 s wait, shortened for the test
   run env AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS=1500 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
@@ -480,8 +493,9 @@ EOS
   demote
   : > "$SK/run/install-op.lock.db"
   local gate="$BATS_TEST_TMPDIR/gate" i
+  LEGACY_GATE="$gate"
   AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE="$gate" inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
-  local updater=$!
+  local updater=$!; TEST_BG_PIDS="${TEST_BG_PIDS:-} $updater"
   for ((i = 0; i < 1500; i++)); do
     [ -e "$gate.pid" ] && break
     kill -0 "$updater" 2>/dev/null || break

@@ -493,7 +493,13 @@ agmsg_install_op_run_writer() {
   writer_pid=$!
   if [ -n "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE:-}" ]; then
     printf '%s\n' "$writer_pid" > "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.pid"
-    while [ ! -e "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.release" ]; do sleep 0.02; done
+    # Bounded (about 2 minutes) so a test that fails before it releases the gate
+    # cannot leave this operation paused for good.
+    local gate_waits=0
+    while [ ! -e "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.release" ] && [ "$gate_waits" -lt 6000 ]; do
+      sleep 0.02
+      gate_waits=$((gate_waits + 1))
+    done
   fi
   AGMSG_INSTALL_OP_WRITER_PID="$writer_pid"
   AGMSG_INSTALL_OP_WRITER_STARTING=false
