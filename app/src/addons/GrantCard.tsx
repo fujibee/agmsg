@@ -1,12 +1,16 @@
 import type { GrantNeed } from "./types";
 import type { Translate } from "./model";
 import { BusyButton } from "../busy";
+import type { FolderTrust } from "./source";
 
 // S6: the grant card inside the pane (not a modal; the rest of the app stays
 // usable). Messages: Allow / Not now. Files: Allow once / Always for this
 // folder / Not now. A denied path is refused in the card, with no Allow.
 
 export type GrantChoice = "allow" | "once" | "always" | "notNow";
+
+/** The opt-in to trust ~/agmsg-agents in Claude Code, shown with the agents:spawn grant. `state` null = not read yet. */
+export type TrustOption = { state: FolderTrust | null; checked: boolean; onChange: (on: boolean) => void; /** Why reading the trust state failed; the grant is not held back. */ error?: string };
 
 export function GrantCard(props: {
   t: Translate;
@@ -19,6 +23,8 @@ export function GrantCard(props: {
   pending?: boolean;
   /** The choice that started the running call: its button shows the spinner. */
   pendingChoice?: GrantChoice;
+  /** Only given with agents:spawn. */
+  trust?: TrustOption;
 }) {
   const { t, title, need, onChoose } = props;
   const canRemember = props.canRemember ?? true;
@@ -29,6 +35,36 @@ export function GrantCard(props: {
       <div className="addon-card addon-grant-card" role="group" aria-label={t("addons.card.grantAria")}>
         <p>{t("addons.card.messagesWant", { title, team: need.team })}</p>
         {need.why && <p className="addon-why">{need.why}</p>}
+        <div className="addon-card-actions">
+          <BusyButton type="button" disabled={pending} busy={spin("allow")} onClick={() => onChoose("allow")}>
+            {t("addons.card.allow")}
+          </BusyButton>
+          <BusyButton type="button" disabled={pending} busy={spin("notNow")} onClick={() => onChoose("notNow")}>
+            {t("addons.card.notNow")}
+          </BusyButton>
+        </div>
+      </div>
+    );
+  }
+  if (need.permission === "powers") {
+    const rows = ["teamJoin", ...(need.send ? ["messagesSend"] : []), ...(need.spawn ? ["agentsSpawn"] : [])];
+    return (
+      <div className="addon-card addon-grant-card" role="group" aria-label={t("addons.card.grantAria")}>
+        <p>{t("addons.card.powersWant", { title, team: need.team })}</p>
+        <ul className="addon-powers">
+          {rows.map((r) => (
+            <li key={r}>{t(`addons.permission.${r}`)}</li>
+          ))}
+        </ul>
+        {need.why && <p className="addon-why">{need.why}</p>}
+        {(need.send || need.spawn) && (
+          <>
+            <p className="addon-never">{t("addons.confirm.agentsBody")}</p>
+            {need.spawn && <p className="addon-never">{t("addons.confirm.agentsMode")}</p>}
+            {need.spawn && <p className="addon-never">{t("addons.confirm.agentsFolder")}</p>}
+          </>
+        )}
+        {need.spawn && props.trust && <TrustRow t={t} trust={props.trust} pending={pending} />}
         <div className="addon-card-actions">
           <BusyButton type="button" disabled={pending} busy={spin("allow")} onClick={() => onChoose("allow")}>
             {t("addons.card.allow")}
@@ -78,5 +114,22 @@ export function GrantCard(props: {
         </BusyButton>
       </div>
     </div>
+  );
+}
+
+function TrustRow(props: { t: Translate; trust: TrustOption; pending: boolean }) {
+  const { t, trust } = props;
+  if (trust.state === "trusted") return <p className="addon-trust-state">{t("addons.trust.trusted")}</p>;
+  if (trust.state === "config not found") return <p className="addon-trust-state">{t("addons.trust.notFound")}</p>;
+  if (trust.error) return <p className="addon-trust-state">{t("addons.trust.readFailed", { error: trust.error })}</p>;
+  if (trust.state === null) return null;
+  return (
+    <label className="addon-trust">
+      <input type="checkbox" checked={trust.checked} disabled={props.pending} onChange={(e) => trust.onChange(e.target.checked)} />
+      <span>
+        {t("addons.trust.label")}
+        <small className="addon-trust-note">{t("addons.trust.note")}</small>
+      </span>
+    </label>
   );
 }

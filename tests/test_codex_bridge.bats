@@ -4,6 +4,11 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): no test here is about agent-pid
+  # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
+  # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
+  # agent process too.
+  export AGMSG_AGENT_PID=""
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
@@ -81,7 +86,7 @@ EOF
   [ "$status" -eq 1 ]
   # `[<digits>] ` and then the message, on one line — the prefix is what makes
   # a spliced line show two pids instead of reading as a single line.
-  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] codex-bridge: --project is required$'
+  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z codex-bridge: --project is required$'
 }
 
 @test "codex-bridge: a diagnostic never continues the half-line streamed output left open" {
@@ -98,9 +103,18 @@ EOF
   # The streamed bytes are unchanged and on their own line...
   printf '%s\n' "$output" | grep -qx 'delta-ending-mid'
   # ...and the diagnostic starts a line of its own, prefix first.
-  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] codex-bridge: the diagnostic after it$'
+  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z codex-bridge: the diagnostic after it$'
   # `refute`, not `!`: a bare `! cmd` does not trip errexit on either bash.
   refute grep -q 'delta-ending-midcodex-bridge' <<<"$output"
+}
+
+@test "codex-bridge: every log record carries the time it was written" {
+  run bash -c 'node -e "
+    const { logLine } = require(process.argv[1]);
+    logLine(\"codex-bridge: dated\");
+  " "$1" 2>&1 >/dev/null' _ "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z codex-bridge: dated$'
 }
 
 @test "codex-bridge: only one place writes to stderr, so the funnel cannot be bypassed" {
@@ -1480,7 +1494,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "wakeup 1" ]]
-  [[ "$output" =~ "chunk-5" ]]                       # the full stream was delivered, not cut short
+  refute grep -q 'chunk-' <<<"$output"               # the reply's words are not copied into the log
   [[ "$output" =~ "turn completed on thread" ]]      # ended via real completion...
   [[ "$output" != *"no turn activity within"* ]]     # ...never via the idle watchdog
   [[ "$output" =~ "wakeup 2" ]]

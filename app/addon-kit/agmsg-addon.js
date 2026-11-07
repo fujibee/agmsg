@@ -5,7 +5,10 @@
 //   const app = connect({
 //     onInit({ team, members, messages }) {},
 //     onMessage(message) {},
+//     onNotice({ name, at, ids }) {},   // an agent this add-on started was typed a notice; see canReportDelivery
 //   });
+//   app.locale;                            // the app's language, e.g. "ja" ("en" until it is known)
+//   app.onLocaleChange((tag) => {});       // fires when the user changes the app's language
 //   const args = await app.openArgs();     // { path } / { url } / { base }
 //   const tree = await app.fs.list(".");   // needs files:read
 //
@@ -28,10 +31,30 @@ export class AddonError extends Error {
   }
 }
 
+// The tag the app tells an add-on is one of its supported languages (en, ja, zh-CN, ...). Anything else is ignored.
+const LANG_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+
+/**
+ * The best of `supported` for the app's language `tag`: an exact match (case-insensitive), then the language
+ * alone (pt-BR -> pt) when `supported` lists it, else `fallback`. Never throws, never returns a tag that
+ * `supported` does not list (unless it is the fallback).
+ */
+export function pickLocale(tag, supported, fallback = "en") {
+  const list = Array.isArray(supported) ? supported.filter((t) => typeof t === "string") : [];
+  const want = typeof tag === "string" ? tag.toLowerCase() : "";
+  const exact = list.find((t) => t.toLowerCase() === want);
+  if (exact) return exact;
+  const lang = want.split("-")[0];
+  const primary = lang && list.find((t) => t.toLowerCase() === lang);
+  return primary || fallback;
+}
+
 export function connect(options = {}) {
   const {
     onInit = () => {},
     onMessage = () => {},
+    onLocale = () => {},
+    onNotice = () => {},
     sample = true,
     sampleAfterMs = 1000,
     errorOverlay = true,
@@ -40,10 +63,21 @@ export function connect(options = {}) {
   if (errorOverlay) installErrorOverlay();
 
   let port = null;
+  let canReportDelivery = false; // the app says in `init` that it reports when it typed a notice into an agent
   let sampleMode = false;
   let nextId = 1;
   const pending = new Map();
   const waiters = [];
+
+  // The app's language. "en" until the app says otherwise; localeReady resolves on the first word from the app,
+  // or with "en" after sampleAfterMs, so an add-on that waits for it never hangs (outside the app, or in an app
+  // too old to send it). A later event still updates the value and fires the callbacks.
+  let locale = "en";
+  let localeKnown = false;
+  const localeListeners = new Set([(tag) => onLocale(tag)]);
+  let resolveLocaleReady = () => {};
+  const localeReady = new Promise((resolve) => { resolveLocaleReady = resolve; });
+  const localeTimer = setTimeout(() => resolveLocaleReady(locale), sampleAfterMs);
 
   function ready() {
     if (port || sampleMode) return Promise.resolve();
@@ -57,9 +91,20 @@ export function connect(options = {}) {
     const data = event.data;
     if (!data || data.agmsg !== PROTOCOL) return;
     if (data.type === "init") {
+      canReportDelivery = data.notice === true;
       safe(() => onInit({ team: data.team, members: data.members || [], messages: data.messages || [] }));
+    } else if (data.type === "locale") {
+      if (typeof data.locale !== "string" || !LANG_TAG.test(data.locale)) return;
+      const changed = !localeKnown || data.locale !== locale;
+      locale = data.locale;
+      localeKnown = true;
+      clearTimeout(localeTimer);
+      resolveLocaleReady(locale);
+      if (changed) for (const cb of [...localeListeners]) safe(() => cb(locale));
     } else if (data.type === "message") {
       safe(() => onMessage(data.message));
+    } else if (data.type === "notice") {
+      safe(() => onNotice({ name: data.name, at: data.at, ids: Array.isArray(data.ids) ? data.ids : [] }));
     } else if (data.type === "response") {
       const p = pending.get(data.id);
       if (!p) return;
@@ -111,11 +156,33 @@ export function connect(options = {}) {
   return {
     get inApp() { return port !== null; },
     get sample() { return sampleMode; },
+    get locale() { return locale; },
+    localeReady,
+    onLocaleChange(cb) {
+      localeListeners.add(cb);
+      return () => localeListeners.delete(cb);
+    },
+    /** True once `init` said the app reports delivery: `onNotice` will be called. False with an older app. */
+    get canReportDelivery() { return canReportDelivery; },
     openArgs: () => request("open.args"),
     fs: {
       stat: (path) => request("fs.stat", { path }),
       list: (path = ".") => request("fs.list", { path }),
       read: (path, range) => request("fs.read", range ? { path, range } : { path }),
+    },
+    // Needs team:join (and messages:send / agents:spawn for the rest). The app decides the team and the sender.
+    team: {
+      join: () => request("team.join"),
+    },
+    messages: {
+      // Not de-duplicated: a retried send is a second message.
+      send: (to, body) => request("messages.send", { to, body }),
+    },
+    agents: {
+      types: () => request("agents.types"),
+      models: (type) => request("agents.models", { type }),
+      spawn: (type, name, opts = {}) => request("agents.spawn", { type, name, ...opts }),
+      list: () => request("agents.list"),
     },
     git: {
       status: () => request("git.status"),
@@ -196,6 +263,18 @@ function sampleRequest(op, args) {
   switch (op) {
     case "open.args":
       return { path: "sample-project", base: "main" };
+    case "team.join":
+      return { name: "sample-addon", type: "app-addon", created: false };
+    case "messages.send":
+      return { to: args.to };
+    case "agents.types":
+      return { types: [{ type: "claude-code", models: true }] };
+    case "agents.models":
+      return { type: args.type, source: "fixed", models: [{ id: "sample", name: "Sample", description: "A sample model", isDefault: true, defaultEffort: null, efforts: [{ id: "low", description: "Low" }] }] };
+    case "agents.spawn":
+      return { name: args.name, type: args.type, state: "running", pid: 1 };
+    case "agents.list":
+      return { agents: [] };
     case "fs.list": {
       const dir = norm(args.path);
       const seen = new Map();

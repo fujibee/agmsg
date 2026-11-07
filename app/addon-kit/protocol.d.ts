@@ -19,7 +19,43 @@ export interface InitEvent {
   team: string;
   members: Member[];
   messages: Message[]; // at most 500, newest kept
+  /**
+   * The app reports `notice` events (below). Absent with an older app: the add-on must then work without them.
+   * The kit shows it as `app.canReportDelivery`.
+   */
+  notice?: boolean;
 }
+
+/**
+ * The app typed a notice into the terminal of an agent THIS add-on started, in a team where the pane holds
+ * `agents:spawn`. Pushed only to that add-on's panes, once per typed notice, carrying no text.
+ *  - name: the agent's member name
+ *  - at:   when the notice was typed (ms since epoch)
+ *  - ids:  the ids of the messages the notice was about, to match against messages the add-on sent
+ */
+export interface NoticeEvent {
+  name: string;
+  at: number;
+  ids: string[];
+}
+
+/**
+ * The app's language, pushed over the pane's port to every add-on (no permission needed): once right after the
+ * port is handed over, and again each time the user changes the app's language. Only the tag; nothing else
+ * about the user or the machine. `locale` is one of the app's languages: en, ja, zh-CN, zh-TW, ko, es, fr, de,
+ * pt-BR. The SDK exposes it as `app.locale`, `app.localeReady` and `app.onLocaleChange(cb)`.
+ */
+export interface LocaleEvent {
+  agmsg: 1;
+  type: "locale";
+  locale: string;
+}
+
+/**
+ * The best of `supported` for `tag`: an exact match, then the language alone (pt-BR -> pt) when listed, else
+ * `fallback` (default "en"). Exported by the SDK as `pickLocale`.
+ */
+export type PickLocale = (tag: string | undefined, supported: readonly string[] | undefined, fallback?: string) => string;
 
 export interface OpenArgs {
   path?: string;
@@ -233,6 +269,46 @@ export interface AgentTypes {
   types: SpawnableType[];
 }
 
+/** agents.models: the model choices for one CLI type, as the CLI's own /model offers them. */
+export interface ModelsRequest {
+  /** One of the `type`s agents.types lists. */
+  type: string;
+}
+
+export interface EffortOption {
+  /** The value to pass as the effort. */
+  id: string;
+  description: string;
+}
+
+export interface ModelChoice {
+  /** The value to pass as `model` in agents.spawn. */
+  id: string;
+  name: string;
+  description: string;
+  /** The CLI's own default model. */
+  isDefault: boolean;
+  /** The effort used when none is chosen; null when the list does not say. */
+  defaultEffort: string | null;
+  /** The efforts this model takes (they differ per model). */
+  efforts: EffortOption[];
+}
+
+/**
+ * agents.models answer. `source` says where the list came from:
+ *  - app-server: Codex itself answered (read once per app run; a failed read is not repeated for a minute)
+ *  - fixed:      a list the app keeps (Claude Code has no way to be asked)
+ *  - fallback:   Codex could not be asked; a stand-in list is returned and `reason` says why (plain text)
+ *  - none:       the type has no model list; `models` is empty
+ * Needs the same grant as agents.spawn (agents:spawn); there is no separate permission.
+ */
+export interface ModelList {
+  type: string;
+  source: "app-server" | "fixed" | "fallback" | "none";
+  reason?: string;
+  models: ModelChoice[];
+}
+
 /** agents.spawn */
 export interface SpawnRequest {
   type: string;
@@ -242,6 +318,12 @@ export interface SpawnRequest {
   folder?: string;
   /** Passed to the type's model option after validation. Omitted: the type's default. */
   model?: string;
+  /**
+   * A reasoning effort. Only an id that agents.models lists for the chosen model (`model`, else the list's default model)
+   * is accepted; anything else is `bad_args` and nothing starts. Omitted: the CLI's own default. A type without a
+   * model list takes none.
+   */
+  effort?: string;
 }
 
 /**

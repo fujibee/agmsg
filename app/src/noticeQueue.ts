@@ -9,11 +9,11 @@ export const UNKNOWN_WAIT_MS = 180_000;
 // A pane that is working or blocked on a dialog through its startup is given longer, but not without end.
 export const STARTUP_WAIT_MS = 600_000;
 
-export type Held = { text: string; at: number; late?: boolean };
+export type Held = { text: string; at: number; late?: boolean; id?: string };
 export type Queues = Record<string, Held[]>;
 
-export function hold(queues: Queues, paneId: string, text: string, now: number): Queues {
-  return { ...queues, [paneId]: [...(queues[paneId] ?? []), { text, at: now }] };
+export function hold(queues: Queues, paneId: string, text: string, now: number, id?: string): Queues {
+  return { ...queues, [paneId]: [...(queues[paneId] ?? []), id === undefined ? { text, at: now } : { text, at: now, id }] };
 }
 
 // What to type now into `paneId`. `released` = the pane has been seen idle, or has already been given notices.

@@ -14,6 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
+import { isAddonMember } from "./addons/addonMember";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
 import { NewMenu, type NewMenuVariant } from "./NewMenu";
@@ -48,6 +49,7 @@ import {
   insertAsNewLeaf,
   insertBeside,
   leaves,
+  createAskedPlacer,
   presetTree,
   renameLeaf,
   sameZone,
@@ -100,6 +102,8 @@ export type Pane = {
   /** An add-on pane (no PTY): rendered by AddonPaneHost instead of TerminalPane. */
   kind?: "addon";
   addon?: AddonPaneRef;
+  /** The host's id for this add-on pane, once it has one (what an agent's open request names as its asker). */
+  hostId?: number;
 };
 // A tab. Holds one or more panes, arranged as a binary split tree (see
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
@@ -303,6 +307,38 @@ type Modal =
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
 export const APP_USER_TYPE = "agmsg-app";
+// The type an add-on's own member joins with (it reads through the broker, not a terminal).
+export const ADDON_MEMBER_TYPE = "app-addon";
+
+// A member with no terminal by design: the app's own user and add-on members. A message for one is not a missed
+// notice, so it is not logged as one.
+export function hasNoTerminalByDesign(types: ReadonlyArray<string>): boolean {
+  return types.includes(APP_USER_TYPE) || types.includes(ADDON_MEMBER_TYPE);
+}
+
+// A member list and the team it was fetched for.
+export type Roster = { team: string; list: Member[] };
+
+// The types of `name` from the roster the app already holds. Undefined when the roster is for another team than the
+// message's, or does not have the name: nothing is fetched to find out, and a name in one team says nothing about
+// the same name in another.
+export function knownTypes(roster: Roster | null, msgTeam: string, name: string): string[] | undefined {
+  return roster && roster.team === msgTeam ? roster.list.find((m) => m.name === name)?.types : undefined;
+}
+
+// Fetch a team's members and adopt them only if no later fetch has started since (a response for a team the user
+// has already switched away from is dropped, however late it arrives). Always returns what was fetched.
+export async function loadRoster(
+  latest: ReturnType<typeof createLatestOnly>,
+  fetchMembers: (team: string) => Promise<Member[]>,
+  team: string,
+  adopt: (roster: Roster) => void,
+): Promise<Member[]> {
+  const current = latest.start();
+  const list = await fetchMembers(team);
+  if (current()) adopt({ team, list });
+  return list;
+}
 // Team-room history page size — the initial load, and each scroll-up "load more".
 const ROOM_PAGE_SIZE = 30;
 // Persists which team was selected across restarts. Window/pane state is
@@ -386,9 +422,24 @@ export function actasSpawnArgs(
   name: string,
   cmdPrefix?: string | null,
   promptArg?: string | null,
+  team?: string,
 ): string[] {
-  const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}`;
+  const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}${team ? startupInboxText(cmdName, team, name) : ""}`;
   return promptArg ? [promptArg, prompt] : [prompt];
+}
+
+// Said after the actas line of an app-opened agent: the startup turn itself reads the inbox, so a message sent
+// before the agent was ready is picked up without waiting for a typed notice (which, held until the first Idle,
+// then finds nothing new). The scripts are the install's own, as in kickoffText.
+export function startupInboxText(cmdName: string, team: string, name: string): string {
+  const scripts = `~/.agents/skills/${cmdName}/scripts`;
+  // One line with none of the characters cmd.exe treats specially (quotes, < > & | ^ %, parentheses): on Windows
+  // every launch goes through cmd /d /c.
+  return (
+    ` and then read your inbox with: bash ${scripts}/inbox.sh ${team} ${name} and act on what is waiting, ` +
+    `reply with: bash ${scripts}/send.sh ${team} ${name} SENDER followed by your reply, ` +
+    `a reply written in this chat is not delivered`
+  );
 }
 
 // Where a message the app sees goes. The room feed is the selected team's. A pane is reached by the team it
@@ -457,6 +508,13 @@ export function kickoffText(cmdName: string, team: string, to: string, from: str
     `answer with: bash ${scripts}/send.sh ${team} ${to} ${from} "<your reply>" ` +
     `(a reply written in this chat is not delivered; /${cmdName} does the same).`
   );
+}
+
+// The CLI's argv for an agent pane: the type's spawn options, then the model, then the reasoning effort (both
+// only for an add-on's agent: the effort tokens are built by the backend from a validated value), then the actas
+// prompt last, the order spawn.sh uses.
+export function agentCliArgs(options: string[], modelArg: string | null | undefined, model: string | undefined, effortArgs: string[] | undefined, actasArgs: string[]): string[] {
+  return [...options, ...(model && modelArg ? [modelArg, model] : []), ...(effortArgs ?? []), ...actasArgs];
 }
 
 // Whether the outdated-CLI banner should render. A pure function (rather
@@ -574,6 +632,7 @@ export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
+  const rosterRef = useRef<Roster | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
@@ -807,6 +866,7 @@ export default function App() {
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
   const deliveryCache = useRef(new Map<string, boolean>());
+  const askedPlacer = useRef(createAskedPlacer());
   const feedRef = useRef<HTMLDivElement>(null);
   // Set right before prepending an older history page, so the scroll-to-
   // bottom effect below skips that render (loadOlderMessages restores the
@@ -891,9 +951,15 @@ export default function App() {
       },
       onWithoutReadySignal: (count) =>
         pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count } }),
+      // An agent an add-on started: tell the host, which tells that add-on (and only it) when the notice was typed.
+      onTyped: (paneId, ids, at) => {
+        const key = panesRef.current.find((p) => p.id === paneId)?.agentKey;
+        if (key) void invoke("addon_notice_typed", { key, ids, at }).catch(() => {});
+      },
     });
   }
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    appLog(`agent-state ${paneId} -> ${state} received at ${Date.now()} ms`);
     noticeFlusherRef.current?.state(paneId, state);
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -963,11 +1029,15 @@ export default function App() {
     return t;
   }, []);
 
-  const loadMembers = useCallback(async (t: string) => {
-    const m = await invoke<Member[]>("agmsg_members", { team: t });
-    setMembers(m);
-    return m;
-  }, []);
+  const rosterLoadRef = useRef(createLatestOnly());
+  const loadMembers = useCallback(
+    (t: string) =>
+      loadRoster(rosterLoadRef.current, (x) => invoke<Member[]>("agmsg_members", { team: x }), t, (r) => {
+        rosterRef.current = r;
+        setMembers(r.list);
+      }),
+    [],
+  );
 
   // The agmsg slash-command name, for the `/<cmd> actas <name>` boot prompt.
   useEffect(() => {
@@ -1207,8 +1277,15 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
+      appLog(`message ${e.payload.id} ${e.payload.from} -> ${e.payload.to} received at ${Date.now()} ms`);
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
-      if (!pane) appLog(`notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}`);
+      if (!pane) {
+        const types = knownTypes(rosterRef.current, e.payload.team, e.payload.to);
+        if (!types || !hasNoTerminalByDesign(types))
+          appLog(
+            `notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}${types ? "" : " (member type not known here)"}`,
+          );
+      }
       if (feed) setMessages((prev) => appendIfNew(prev, e.payload));
       if (pane && !firstSight(noticedRef.current, pane.id, e.payload.id)) {
         appLog(`notice not typed: message ${e.payload.id} was already typed into ${pane.id}`);
@@ -1231,7 +1308,7 @@ export default function App() {
         const flat = e.payload.body.replace(/\s+/g, " ").trim();
         const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
         const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
-        noticeFlusherRef.current?.notice(pane.id, kickoff);
+        noticeFlusherRef.current?.notice(pane.id, kickoff, e.payload.id);
       }
     });
     return () => void p.then((u) => u());
@@ -1314,7 +1391,7 @@ export default function App() {
   const spawnMember = useCallback(
     // targetWindowId: spawn straight into an existing tab as an extra
     // side-by-side pane, instead of opening a new tab (the default).
-    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string }) => {
+    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string; effortArgs?: string[]; pane?: number; order?: number }) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -1376,14 +1453,23 @@ export default function App() {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, ...(fromAddon?.model && modelArg ? [modelArg, fromAddon.model] : []), ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
+            args: agentCliArgs(options, modelArg, fromAddon?.model, fromAddon?.effortArgs, actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg, fromAddon?.team ?? team)),
             cwd: m.project || undefined,
             native: monitors,
             agentKey: fromAddon?.key,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       setPanes((prev) => [...prev, pane]);
-      if (targetWindowId) {
+      // An agent an add-on pane asked for opens beside that pane, in its tab; with no such pane open, in a tab of its own.
+      const asker = fromAddon?.pane !== undefined ? panesRef.current.find((p) => p.kind === "addon" && p.hostId === fromAddon.pane) : undefined;
+      const askerWin = asker ? windowsRef.current.find((w) => leaves(w.root).includes(asker.id)) : undefined;
+      if (asker && askerWin) {
+        // The record of who sits beside which asker is kept here, not read from the rendered panes: two spawns that
+        // finish before the next render must see each other.
+        const apply = askedPlacer.current.place(fromAddon!.pane!, asker.id, id, fromAddon!.order);
+        setWindows((prev) => prev.map((w) => (w.id === askerWin.id ? { ...w, root: apply(w.root) } : w)));
+        setActive(askerWin.id);
+      } else if (targetWindowId) {
         setWindows((prev) =>
           prev.map((w) => (w.id === targetWindowId ? { ...w, root: insertAsNewLeaf(w.root, id) } : w)),
         );
@@ -1402,8 +1488,8 @@ export default function App() {
   const spawnMemberRef = useRef(spawnMember);
   spawnMemberRef.current = spawnMember;
   useEffect(() => {
-    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null }>("addon-agent-open", (e) => {
-      const { key, team: agentTeam, name, type: agentType, project, model } = e.payload;
+    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null; pane: number | null; order: number | null; effort_args?: string[] }>("addon-agent-open", (e) => {
+      const { key, team: agentTeam, name, type: agentType, project, model, pane, order, effort_args } = e.payload;
       const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
       // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
       const open = panesRef.current.find((p) => p.label === name);
@@ -1413,7 +1499,7 @@ export default function App() {
       }
       // The member as the backend just joined it (name, type, folder): agmsg is not asked for the member list again.
       const m: Member = { name, types: [agentType], project };
-      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined }).catch((err) => fail(String(err)));
+      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined, effortArgs: effort_args ?? [], pane: pane ?? undefined, order: order ?? undefined }).catch((err) => fail(String(err)));
     });
     return () => void p.then((unlisten) => unlisten());
   }, []);
@@ -2630,6 +2716,7 @@ export default function App() {
                       ),
                   );
                   const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
+                  const addonMember = isAddonMember(m);
                   return (
                     <li
                       key={m.name}
@@ -2664,11 +2751,16 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m, spawnTargetWindowId(windows, active, team))}
+                        onClick={() => {
+                          // An add-on is not an agent: there is no CLI to start for it.
+                          if (!addonMember) spawnMember(m, spawnTargetWindowId(windows, active, team));
+                        }}
                         title={
-                          pane
-                            ? t("sidebar.member.titleRunning")
-                            : t("sidebar.member.titleSpawn")
+                          addonMember
+                            ? t("sidebar.member.titleAddon")
+                            : pane
+                              ? t("sidebar.member.titleRunning")
+                              : t("sidebar.member.titleSpawn")
                         }
                       >
                         <span className="member-name">{m.name}</span>
@@ -2678,7 +2770,11 @@ export default function App() {
                           </span>
                         )}
                         <span className="member-types">
-                          {m.types.join(", ") || t("sidebar.member.noTypes")}
+                          {addonMember ? (
+                            <span className="member-addon-badge">{t("sidebar.member.addonBadge")}</span>
+                          ) : (
+                            m.types.join(", ") || t("sidebar.member.noTypes")
+                          )}
                         </span>
                       </button>
                     </li>
@@ -2947,6 +3043,7 @@ export default function App() {
                       addons={catalog.addons}
                       onClose={() => setModal({ kind: "closePane", paneId: p.id })}
                       onOpenSettings={() => setModal({ kind: "settings" })}
+                      onHostId={(hostId) => setPanes((prev) => (prev.some((x) => x.id === p.id && x.hostId !== hostId) ? prev.map((x) => (x.id === p.id ? { ...x, hostId } : x)) : prev))}
                     />
                   ) : (
                   <TerminalPane

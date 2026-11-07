@@ -638,7 +638,8 @@ fi
 # watcher is currently receiving for that role.
 READY_FILES=""
 cleanup() {
-  # This watcher's own install-state notice goes with it.
+  # This watcher's own down and install-state notices go with it.
+  down_notice_clear "watch.$$" 2>/dev/null || true
   [ -n "${_INSTALL_KEEP_NOTICE:-}" ] || down_notice_clear "watch-install.$$" 2>/dev/null || true
   # EXIT only removes the pidfile if it still records our pid. A successor
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
@@ -1243,29 +1244,67 @@ _held_elsewhere_without() {
 # the number of CONSECUTIVE poll cycles the cursor stayed at the same value while a
 # pending batch waited -- an EVENT count, not elapsed time, which fires the same on a
 # slow and a fast machine (time would misfire on one and never fire on the other). At
-# the threshold, print WHY and exit. The report goes to STDOUT deliberately: the
+# the threshold, print WHY (once per episode) and keep running -- ending the watcher would leave the session deaf. The report goes to STDOUT deliberately: the
 # watcher's stderr is /dev/null in every launcher we ship (#691) and the Monitor tool
 # surfaces only stdout as an event, so a reason on stderr would share the fate of the
 # delivery it reports on -- exactly the invisibility being fixed. It is a plain
 # "agmsg watch:" line, NOT the "ts | team | from -> to | body" delivery shape, so a
-# reader does not mistake it for a message. Exiting (rather than looping) makes "the
-# monitor stopped" visible; a watcher that ends without a reason cannot be told from a
-# crash (#983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
+# reader does not mistake it for a message. Saying it once and then retrying every cycle
+# keeps the problem visible without ending the watcher (a watcher that ends without a
+# reason cannot be told from a crash, #983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
 # would silently disable the very guard against silence.
 STUCK_THRESHOLD=3
-# Exit status for a watcher that STOPS because delivery is unhealthy -- the store
-# read failed, or a cursor is wedged behind a pending batch. These print a reason
-# and exit, but the exit must not read as success: a supervisor or launcher that
-# only sees the process end would otherwise treat an unhealthy watcher as a clean
-# shutdown, indistinguishable from the intentional exits (install-changed,
-# session-ended, role-moved) that DO mean "done, nothing wrong". A defined
-# non-zero keeps "visible failure" visible at the process contract too. Distinct
-# from the startup exit 1 (usage / DB path / DB-open, #197) so "started, then
-# delivery broke" can be told from "never started"; the value matters only that
-# it is non-zero and stable, which the tests pin.
-_AGMSG_EXIT_DELIVERY_UNHEALTHY=75
+# A failed store read or a wedged cursor does not end the watcher: the next cycle
+# asks again, and the state is reported once per episode (and once more when it
+# clears), not once per cycle. These lists hold the "<team>:<agent>" keys now in
+# each state, newline-separated so a name with a space stays one entry.
+READ_FAILING=""
+STUCK_REPORTED=""
+_flag_has() { case $'\n'"$1"$'\n' in *$'\n'"$2"$'\n'*) return 0 ;; esac; return 1; }
+_flag_add() { printf '%s' "${1:+$1$'\n'}$2"; }
+_flag_without() {
+  local line out="" 
+  while IFS= read -r line; do
+    [ -n "$line" ] && [ "$line" != "$2" ] && out="${out:+$out$'\n'}$line"
+  done <<< "$1"
+  printf '%s' "$out"
+}
+# A pair this watcher no longer serves (another session took the role, or its store
+# is gone) is no longer observed: drop it from both state lists without calling that
+# a recovery, and keep the notice while another pair is still failing.
+_watch_pair_not_observed() {   # <team:agent>
+  local key="$1" changed=0
+  if _flag_has "$READ_FAILING" "$key"; then READ_FAILING="$(_flag_without "$READ_FAILING" "$key")"; changed=1; fi
+  if _flag_has "$STUCK_REPORTED" "$key"; then STUCK_REPORTED="$(_flag_without "$STUCK_REPORTED" "$key")"; changed=1; fi
+  [ "$changed" -eq 0 ] || _watch_notice_sync
+}
+
+# Down/degraded notice (shown by doctor, status and the session-start hook) while
+# any pair is in one of those states; cleared when none is.
+#
+# A write or removal that did not verifiably happen (the helper returns non-zero)
+# stays pending and is tried again from the top of the poll loop, no sooner than
+# _WATCH_NOTICE_RETRY seconds after the last failure; nothing here stops the watcher.
+_WATCH_NOTICE_RETRY=10
+_WATCH_NOTICE_DIRTY=""
+_WATCH_NOTICE_RETRY_AT=0
+_watch_notice_sync() {
+  local rc=0
+  if [ -n "$READ_FAILING$STUCK_REPORTED" ]; then
+    down_notice_set "watch.$$" degraded "the inbox watcher is running but cannot deliver: ${READ_FAILING:+store read failing for ${READ_FAILING//$'\n'/ }}${STUCK_REPORTED:+ read cursor stuck for ${STUCK_REPORTED//$'\n'/ }}; it retries every cycle" "restart this session or run /agmsg actas <name> if it does not clear" || rc=$?
+  else
+    down_notice_clear "watch.$$" || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    _WATCH_NOTICE_DIRTY=""
+  else
+    _WATCH_NOTICE_DIRTY=1
+    _WATCH_NOTICE_RETRY_AT=$((SECONDS + _WATCH_NOTICE_RETRY))
+  fi
+  return 0
+}
 # The watcher was told to fold itself, released its role, and the pane is STILL
-# THERE. Distinct from 75 (delivery is unhealthy) because the operator's next
+# THERE. A distinct code, because the operator's next
 # move is different: the placement record is deliberately left in place and
 # `despawn --force` works from it.
 _AGMSG_EXIT_TEARDOWN_INCOMPLETE=76
@@ -1431,6 +1470,11 @@ _watch_renew_or_stop() {
 while true; do
   # Renewal point: see _watch_renew_or_stop above.
   [ -n "$WATCH_MAX_SECONDS" ] && _watch_renew_or_stop
+  # A degraded record that could not be written or removed last time: try again
+  # (builtins only while nothing is pending).
+  if [ -n "$_WATCH_NOTICE_DIRTY" ] && [ "$SECONDS" -ge "$_WATCH_NOTICE_RETRY_AT" ]; then
+    _watch_notice_sync
+  fi
   # Advance the per-cycle cache epoch as a PLAIN STATEMENT (never via $(...) —
   # see the actas-lock cache warming below for why): this is what lets
   # _agmsg_partition_load's per-team driver cache (lib/storage.sh) reuse one
@@ -1598,6 +1642,7 @@ EOF
 }${pair_team}/${pair_agent}"
           echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${PAIR_VERDICT#held:}; not serving it while they hold it." >&2
         fi
+        _watch_pair_not_observed "$pair_team:$pair_agent"
         continue
         ;;
       unverified:*)
@@ -1620,6 +1665,7 @@ EOF
           *) NO_STORE_REPORTED="$NO_STORE_REPORTED $pair_team:$pair_agent"
              watch_log "${pair_team}/${pair_agent}: no store yet; skipping this pair until one exists." ;;
         esac
+        _watch_pair_not_observed "$pair_team:$pair_agent"
         continue
         ;;
     esac
@@ -1637,8 +1683,8 @@ EOF
     # catch, one level earlier. The stuck guard cannot see this one -- a failed
     # scan returns no message_sent row to count, so the pair looks caught up
     # forever. So on a failed observation, say why on stdout (a plain
-    # "agmsg watch:" line, not the delivery shape) and exit: a bounded, visible
-    # stop, never silent continuation. This is the same failure-is-not-empty
+    # "agmsg watch:" line, not the delivery shape), once, and retry next cycle:
+    # visible, never silent continuation, and the watcher stays up. This is the same failure-is-not-empty
     # collapse the cursor-only fix above closed, at the read itself.
     #
     # The two OTHER reads in this cycle that also fall back to empty are the
@@ -1653,10 +1699,22 @@ EOF
        && OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null)"; then
       [ -n "$READ_CURSOR" ] || READ_CURSOR=0
     else
-      printf 'agmsg watch: cannot read delivery state for %s — the store read failed, so whether messages are waiting is unknown. Treating "unknown" as "no messages" would leave this watcher alive and silent, so it is exiting instead; restart this session (or run /%s actas <name>) to resume delivery (#1045/#777).\n' \
-        "$pair_team:$pair_agent" "$(basename "$SKILL_DIR")"
-      cleanup
-      exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+      # Not "no messages", and not the end of the watcher either: whether mail is
+      # waiting is unknown, so say so once and ask again next cycle. The store
+      # that failed to read (busy, locked, briefly unreachable) usually comes
+      # back; ending the process would leave the session deaf until someone
+      # noticed (#1045/#777).
+      if ! _flag_has "$READ_FAILING" "$pair_team:$pair_agent"; then
+        READ_FAILING="$(_flag_add "$READ_FAILING" "$pair_team:$pair_agent")"
+        watch_report "cannot read delivery state for $pair_team:$pair_agent — the store read failed, so whether messages are waiting is unknown. This watcher stays up and tries again every cycle; it will say when the read works again. If it keeps failing, restart this session (or run /$(basename "$SKILL_DIR") actas <name>) (#1045/#777)."
+        _watch_notice_sync
+      fi
+      continue
+    fi
+    if _flag_has "$READ_FAILING" "$pair_team:$pair_agent"; then
+      READ_FAILING="$(_flag_without "$READ_FAILING" "$pair_team:$pair_agent")"
+      watch_report "delivery state for $pair_team:$pair_agent can be read again; delivery continues."
+      _watch_notice_sync
     fi
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
     # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
@@ -1669,7 +1727,7 @@ EOF
     # perfectly healthy watcher. So track a pair only while a message_sent row is
     # actually waiting for it; a glob avoids forking grep in the poll loop. When
     # READ_CURSOR is UNCHANGED from the previous cycle delivery did not advance it --
-    # count that; at the threshold say why on stdout and exit. With no message row
+    # count that; at the threshold say why on stdout (once) and keep retrying. With no message row
     # waiting the pair is caught up, so drop its tracker and a future backlog starts
     # a fresh count.
     _agmsg_pair_key="$pair_team:$pair_agent"
@@ -1688,12 +1746,13 @@ EOF
         else
           _agmsg_n=1
         fi
-        if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ]; then
+        if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ] && ! _flag_has "$STUCK_REPORTED" "$_agmsg_pair_key"; then
+          # Said once per episode, then the watcher keeps trying: ending it would
+          # leave the session deaf, and the same batch is simply retried next cycle.
           _agmsg_bytes="$(printf '%s' "$OUT" | wc -c | tr -d ' ')"
-          printf 'agmsg watch: delivery for %s is STUCK — its read cursor (%s) has not advanced for %s poll cycles while %s bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher is exiting rather than looping in silence; restart this session (or run /%s actas <name>) to resume delivery. If it recurs, the pending batch may be hitting a system limit (#1045/#777).\n' \
-            "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n" "$_agmsg_bytes" "$(basename "$SKILL_DIR")"
-          cleanup
-          exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+          STUCK_REPORTED="$(_flag_add "$STUCK_REPORTED" "$_agmsg_pair_key")"
+          watch_report "delivery for $_agmsg_pair_key is STUCK — its read cursor ($READ_CURSOR) has not advanced for $_agmsg_n poll cycles while $_agmsg_bytes bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher stays up and retries every cycle; it will say when delivery resumes. If it recurs, the pending batch may be hitting a system limit; restart this session (or run /$(basename "$SKILL_DIR") actas <name>) if it does not clear (#1045/#777)."
+          _watch_notice_sync
         fi
         _stuck_set "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n"
         ;;
@@ -1701,6 +1760,13 @@ EOF
         _stuck_drop "$_agmsg_pair_key"
         ;;
     esac
+    # Delivery resumed (the cursor moved, or the batch is gone): close the episode.
+    if _flag_has "$STUCK_REPORTED" "$_agmsg_pair_key" \
+       && { [ "$_agmsg_has_new_message" -eq 0 ] || [ "${_agmsg_n:-0}" -lt "$STUCK_THRESHOLD" ]; }; then
+      STUCK_REPORTED="$(_flag_without "$STUCK_REPORTED" "$_agmsg_pair_key")"
+      watch_report "delivery for $_agmsg_pair_key resumed."
+      _watch_notice_sync
+    fi
     if [ "$_agmsg_has_new_message" -eq 1 ]; then
     # The quote is held in a variable, never written as \' in the pattern: bash 3.2
     # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form

@@ -2,6 +2,7 @@
 // state, so the components stay thin and the decisions are testable without
 // rendering. Strings themselves live in the locale files under `addons.*`.
 
+import { PERMISSIONS } from "./types";
 import type { AddonPaneDecl, Grant, InstallError, InstalledAddon, NetworkScope, Permission } from "./types";
 
 export type Translate = (key: string, options?: Record<string, unknown>) => string;
@@ -10,6 +11,15 @@ export function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }
 
+const PERMISSION_KEY: Record<Exclude<Permission, "network">, string> = {
+  "messages:read": "messagesRead",
+  "files:read": "filesRead",
+  "git:read": "gitRead",
+  "team:join": "teamJoin",
+  "messages:send": "messagesSend",
+  "agents:spawn": "agentsSpawn",
+};
+
 /** The plain-words row for one declared permission in the dialogs. */
 export function permissionRow(p: Permission, network: NetworkScope): { key: string; params: Record<string, string> } {
   if (p === "network") {
@@ -17,7 +27,7 @@ export function permissionRow(p: Permission, network: NetworkScope): { key: stri
     const hosts = network.kind === "origins" ? network.origins.map(originHost).join(", ") : "";
     return { key: "addons.permission.network", params: { hosts } };
   }
-  return { key: `addons.permission.${p === "messages:read" ? "messagesRead" : p === "files:read" ? "filesRead" : "gitRead"}`, params: {} };
+  return { key: `addons.permission.${PERMISSION_KEY[p]}`, params: {} };
 }
 
 function originHost(origin: string): string {
@@ -28,7 +38,7 @@ function originHost(origin: string): string {
 export function declaredPermissions(addon: InstalledAddon): Permission[] {
   const set = new Set<Permission>();
   for (const pane of addon.panes) for (const p of pane.permissions) set.add(p);
-  return (["messages:read", "files:read", "git:read", "network"] as const).filter((p) => set.has(p));
+  return PERMISSIONS.filter((p) => set.has(p));
 }
 
 /** The network scope of an add-on: the widest one any of its panes declares. */
@@ -41,6 +51,12 @@ export function addonNetwork(addon: InstalledAddon): NetworkScope {
   return origins.length ? { kind: "origins", origins } : { kind: "none" };
 }
 
+/** True when the add-on talks to or starts agents, which work with their own permissions (the dialog says so in a second block). */
+export function reachesAgents(perms: Iterable<Permission>): { send: boolean; spawn: boolean } {
+  const set = new Set(perms);
+  return { send: set.has("messages:send"), spawn: set.has("agents:spawn") };
+}
+
 /** True when a read permission and `network` are declared together (the dialog then says it can send what it reads). */
 export function canSendWhatItReads(pane: Pick<AddonPaneDecl, "permissions">): boolean {
   const has = (p: Permission) => pane.permissions.includes(p);
@@ -51,9 +67,17 @@ export function grantsOf(grants: Grant[], addonId: string): Grant[] {
   return grants.filter((g) => g.addonId === addonId);
 }
 
+const GRANT_KEY = {
+  "messages:read": "addons.grant.messages",
+  "files:read": "addons.grant.files",
+  "team:join": "addons.grant.join",
+  "messages:send": "addons.grant.send",
+  "agents:spawn": "addons.grant.spawn",
+} as const;
+
 /** "Reads messages: team-a" / "Reads files: ~/proj (remembered)". */
 export function grantText(t: Translate, g: Grant): string {
-  const key = g.permission === "messages:read" ? "addons.grant.messages" : "addons.grant.files";
+  const key = GRANT_KEY[g.permission as keyof typeof GRANT_KEY] ?? "addons.grant.files";
   const base = t(key, { scope: g.scope });
   return g.remember && g.permission === "files:read" ? `${base} ${t("addons.grant.remembered")}` : base;
 }
@@ -154,7 +178,6 @@ export function permissionDiff(oldPanes: AddonPaneDecl[], newPanes: AddonPaneDec
     if (wider) networkWider = true;
     if (combined(n.perms) && !combined(o.perms)) networkWithRead = true;
   }
-  const order = ["messages:read", "files:read", "git:read", "network"] as const;
-  const list = order.filter((p) => added.has(p));
+  const list = PERMISSIONS.filter((p) => added.has(p));
   return { added: list, networkWider, networkWithRead, asksAgain: list.length > 0 || networkWider || networkWithRead };
 }
