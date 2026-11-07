@@ -72,6 +72,32 @@ connect-src <own> <net>; frame-src 'none'; worker-src <own>; form-action 'none';
 
 8. **Tell the author how to see it:** in the agmsg app, Settings → Add-ons → Developer → **Load from folder…**, pick this repository, and open the pane from **＋ New ▾ → Add-on pane**.
 
+## Localizing the add-on (optional)
+
+The app tells every add-on its language, so an add-on can follow the app. Nothing is required: an add-on that ignores it works as before.
+
+- `app.locale` is the app's language tag (`en`, `ja`, `zh-CN`, `zh-TW`, `ko`, `es`, `fr`, `de` or `pt-BR`); it is `en` until the app has said otherwise. `await app.localeReady` resolves with it before first paint (with `en` after about a second when no app answers, so it never hangs). `app.onLocaleChange((tag) => …)` fires when the user changes the language, and returns a function that stops it.
+- Ship your own strings as `web/locales/<tag>.json` and load them yourself with a relative `fetch("./locales/ja.json")`. The app has no file call for this and needs none. Pick the file with `pickLocale(app.locale, ["en", "ja"])`: an exact match, then the language alone (`pt-BR` finds `pt`), then `en`. An add-on that has no file for the app's language simply shows its default; nothing is reported to the user.
+
+  ```js
+  import { connect, pickLocale } from "./agmsg-addon.js";
+  const SUPPORTED = ["en", "ja"];
+  const app = connect({ /* … */ });
+  let strings = {};
+  let latest = 0;
+  async function load(tag) {
+    const n = ++latest;
+    const res = await fetch(`./locales/${pickLocale(tag, SUPPORTED)}.json`);
+    const next = await res.json();
+    if (n === latest) { strings = next; render(); }   // ignore an answer the user already moved past
+  }
+  load(await app.localeReady);
+  app.onLocaleChange(load);
+  ```
+
+- In `addon.conf`, `locales = en, ja` lists the tags you ship and `default = en` names the one used when none matches (`en` if omitted). Both are optional and advisory: the app never refuses an add-on over them, and an add-on works the same without them. `agmsg-addon-check` warns (never errors) when a tag is not shaped like a language tag or is repeated, when a listed `web/locales/<tag>.json` is missing, or when `default` is not listed; the app ignores a bad entry the same way and still installs the add-on.
+- Only the tag is sent. It costs no process and one small message per open pane per language change.
+
 ## Do not
 
 - Do not add `allow-same-origin`, iframes of other sites, or any other workaround for the sandbox; they will not work and the app refuses them.

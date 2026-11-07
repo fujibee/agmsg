@@ -510,6 +510,13 @@ export function kickoffText(cmdName: string, team: string, to: string, from: str
   );
 }
 
+// The CLI's argv for an agent pane: the type's spawn options, then the model, then the reasoning effort (both
+// only for an add-on's agent: the effort tokens are built by the backend from a validated value), then the actas
+// prompt last, the order spawn.sh uses.
+export function agentCliArgs(options: string[], modelArg: string | null | undefined, model: string | undefined, effortArgs: string[] | undefined, actasArgs: string[]): string[] {
+  return [...options, ...(model && modelArg ? [modelArg, model] : []), ...(effortArgs ?? []), ...actasArgs];
+}
+
 // Whether the outdated-CLI banner should render. A pure function (rather
 // than an inline JSX condition) purely so it's unit-testable — pinning down
 // that "Update now" already in flight (updatingCore) and a session-only ×
@@ -944,9 +951,15 @@ export default function App() {
       },
       onWithoutReadySignal: (count) =>
         pushCompletionNoticeRef.current("success", { key: "toast.noticeWithoutReadySignal", vars: { count } }),
+      // An agent an add-on started: tell the host, which tells that add-on (and only it) when the notice was typed.
+      onTyped: (paneId, ids, at) => {
+        const key = panesRef.current.find((p) => p.id === paneId)?.agentKey;
+        if (key) void invoke("addon_notice_typed", { key, ids, at }).catch(() => {});
+      },
     });
   }
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    appLog(`agent-state ${paneId} -> ${state} received at ${Date.now()} ms`);
     noticeFlusherRef.current?.state(paneId, state);
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -1264,6 +1277,7 @@ export default function App() {
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
     const p = listen<Message>("agmsg-message", (e) => {
+      appLog(`message ${e.payload.id} ${e.payload.from} -> ${e.payload.to} received at ${Date.now()} ms`);
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
       if (!pane) {
         const types = knownTypes(rosterRef.current, e.payload.team, e.payload.to);
@@ -1294,7 +1308,7 @@ export default function App() {
         const flat = e.payload.body.replace(/\s+/g, " ").trim();
         const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
         const kickoff = kickoffText(cmdName, e.payload.team, e.payload.to, e.payload.from, preview);
-        noticeFlusherRef.current?.notice(pane.id, kickoff);
+        noticeFlusherRef.current?.notice(pane.id, kickoff, e.payload.id);
       }
     });
     return () => void p.then((u) => u());
@@ -1377,7 +1391,7 @@ export default function App() {
   const spawnMember = useCallback(
     // targetWindowId: spawn straight into an existing tab as an extra
     // side-by-side pane, instead of opening a new tab (the default).
-    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string; pane?: number; order?: number }) => {
+    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string; effortArgs?: string[]; pane?: number; order?: number }) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -1439,7 +1453,7 @@ export default function App() {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, ...(fromAddon?.model && modelArg ? [modelArg, fromAddon.model] : []), ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg, fromAddon?.team ?? team)],
+            args: agentCliArgs(options, modelArg, fromAddon?.model, fromAddon?.effortArgs, actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg, fromAddon?.team ?? team)),
             cwd: m.project || undefined,
             native: monitors,
             agentKey: fromAddon?.key,
@@ -1474,8 +1488,8 @@ export default function App() {
   const spawnMemberRef = useRef(spawnMember);
   spawnMemberRef.current = spawnMember;
   useEffect(() => {
-    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null; pane: number | null; order: number | null }>("addon-agent-open", (e) => {
-      const { key, team: agentTeam, name, type: agentType, project, model, pane, order } = e.payload;
+    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null; pane: number | null; order: number | null; effort_args?: string[] }>("addon-agent-open", (e) => {
+      const { key, team: agentTeam, name, type: agentType, project, model, pane, order, effort_args } = e.payload;
       const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
       // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
       const open = panesRef.current.find((p) => p.label === name);
@@ -1485,7 +1499,7 @@ export default function App() {
       }
       // The member as the backend just joined it (name, type, folder): agmsg is not asked for the member list again.
       const m: Member = { name, types: [agentType], project };
-      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined, pane: pane ?? undefined, order: order ?? undefined }).catch((err) => fail(String(err)));
+      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined, effortArgs: effort_args ?? [], pane: pane ?? undefined, order: order ?? undefined }).catch((err) => fail(String(err)));
     });
     return () => void p.then((unlisten) => unlisten());
   }, []);

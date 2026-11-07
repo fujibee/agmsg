@@ -73,11 +73,17 @@ impl PtyManager {
             for (id, tail, detection) in snapshots {
                 let tail = tail.lock().unwrap().detection_tail();
                 if let Some(state) = detection.lock().unwrap().observe(&tail, now) {
+                    eprintln!("[agmsg-app] agent-state {id} -> {state:?} emitted at {} ms", unix_ms());
                     let _ = app.emit("agent-state", AgentStateEvent { id, state });
                 }
             }
         });
     }
+}
+
+/// Wall-clock milliseconds for log lines, so the app's lines can be lined up with an agent's own transcript.
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
 #[derive(Clone, Serialize)]

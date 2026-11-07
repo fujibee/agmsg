@@ -1552,6 +1552,14 @@ impl Watcher {
     }
 }
 
+/// One message to the window, with a log line (id, team, recipient, created_at, wall-clock ms) so the time it was
+/// stored, emitted and typed can be lined up.
+fn emit_message(app: &AppHandle, m: Message) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    eprintln!("[agmsg-app] emit message {} {} -> {} in {} (created {}) at {now} ms", m.id, m.from, m.to, m.team, m.created_at);
+    let _ = app.emit("agmsg-message", m);
+}
+
 /// Poll the DB for new rows and emit each as an `agmsg-message` event so the
 /// team room updates live (and so spawned panes can be fed via stdin-inject).
 pub fn start_watcher(app: AppHandle) {
@@ -1562,7 +1570,7 @@ pub fn start_watcher(app: AppHandle) {
         let mut watcher = Watcher::new();
         loop {
             for m in watcher.step() {
-                let _ = app.emit("agmsg-message", m);
+                emit_message(&app, m);
             }
             thread::sleep(Duration::from_millis(800));
         }

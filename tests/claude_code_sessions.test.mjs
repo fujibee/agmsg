@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { findSessionSocket, parseStart } from '../scripts/daemon/channels/claude-code-sessions.mjs';
+import { findSessionSocket, parseStart, pidAlive } from '../scripts/daemon/channels/claude-code-sessions.mjs';
 
 function configDir(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsg-sessions-'));
@@ -70,4 +70,26 @@ test('the temp file of a record sits beside the record, also with Windows separa
   const tmp = win.join(win.dirname(file), '.k.json.42');
   assert.equal(tmp, 'C:\\Users\\x\\run\\down\\.k.json.42');
   assert.equal(win.isAbsolute(tmp), true);
+});
+
+test('pidAlive: ESRCH is dead, EPERM is alive, any other error is unknown', () => {
+  const original = process.kill;
+  try {
+    for (const [code, want] of [['ESRCH', false], ['EPERM', true], ['ENOSYS', null], ['EIO', null]]) {
+      process.kill = () => { throw Object.assign(new Error(code), { code }); };
+      assert.equal(pidAlive(1234), want, code);
+    }
+    process.kill = () => true;
+    assert.equal(pidAlive(1234), true);
+  } finally {
+    process.kill = original;
+  }
+});
+
+test('a pid that cannot be checked makes the session unknown, never ended', async (t) => {
+  const dir = configDir(t);
+  sessionFile(dir, 2);
+  const result = await findSessionSocket(base(dir, { alive: () => null }));
+  assert.equal(result.state, 'unknown');
+  assert.equal(result.reason, 'sessions_files_unreadable_or_other_shape');
 });
