@@ -35,6 +35,14 @@ const thread = '01a0ea97-c011-73f3-8470-fd59db15adba';
 const itemId = '01a0ea98-2235-7f02-b477-7c130e602fcd';
 const notYetVisibleItemId = '01a0ea99-3509-7d03-a588-8d241f7130de';
 
+// What the channel last observed about a seat, held in memory (never in
+// install.db).
+function seatBrief(channel, seat) {
+  const rows = channel.seats().seats;
+  const row = seat ? rows.find((item) => item.seat === seat) : rows[0];
+  return row && { state: row.state, reason: row.reason };
+}
+
 function temporaryDirectory(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-codex-queue-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -195,7 +203,7 @@ test('a live unwitnessed Windows child expires after its maximum lifetime and pe
   const expired = db.prepare('SELECT state, children FROM beta_codex_queue WHERE id=?').get(first);
   assert.equal(expired.state, 'expired');
   assert.equal(JSON.parse(expired.children).expiration_reason, 'queue_child_timeout:child_start_witness_unavailable');
-  assert.equal(db.prepare('SELECT reason FROM beta_codex_seat').get().reason, 'queue_child_timeout:child_start_witness_unavailable');
+  assert.equal(seatBrief(channel).reason, 'queue_child_timeout:child_start_witness_unavailable');
   await channel.pollOnce();
   assert.equal(nudges, 2);
   assert.equal(db.prepare("SELECT count(*) AS n FROM beta_codex_queue WHERE state='pending'").get().n, 1);
@@ -239,8 +247,8 @@ test('recorded absolute Codex runs with an env-node shebang under a minimal serv
   chmodSync(binary, 0o755);
   const channel = createCodexQueueChannel(options);
   await channel.pollOnce();
-  assert.equal(db.prepare('SELECT state FROM beta_codex_seat').get().state, 'blocked');
-  assert.match(db.prepare('SELECT reason FROM beta_codex_seat').get().reason, /codex_executable_unavailable/);
+  assert.equal(seatBrief(channel).state, 'blocked');
+  assert.match(seatBrief(channel).reason, /codex_executable_unavailable/);
   db.prepare('UPDATE meta SET codex_path=?, node_path=?').run(binary, process.execPath);
   await channel.pollOnce();
   const row = db.prepare('SELECT state, queue_item_id FROM beta_codex_queue').get();
@@ -502,10 +510,9 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   await channel.pollOnce();
   assert.equal(queued.length, 1, 'the queued snapshot is not retried after the child exits');
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
-  assert.equal(installDb.prepare("SELECT state FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'addressable');
-  const status = readOwnerAndIntentReadOnly(root);
-  assert.equal(status.codexSeats.state, 'ok');
-  assert.equal(status.codexSeats.seats[0].state, 'addressable');
+  assert.equal(seatBrief(channel, JSON.stringify(['alpha', 'alice'])).state, 'addressable');
+  assert.equal(channel.seats().polled, true);
+  assert.equal(channel.seats().seats[0].state, 'addressable');
 
   await channel.pollOnce();
   assert.equal(queued.length, 1, 'the confirmed cursor prevents another nudge for the same unread snapshot');
@@ -521,13 +528,13 @@ test('Codex channel advances accepted snapshots while reserving only active writ
     queue: async () => { throw new Error('Windows queue must stay closed until live delivery is verified'); },
   });
   await windowsChannel.pollOnce();
-  assert.equal(installDb.prepare("SELECT reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).reason, 'windows_codex_version_below_minimum:0.156.0');
+  assert.equal(seatBrief(windowsChannel, JSON.stringify(['alpha', 'alice'])).reason, 'windows_codex_version_below_minimum:0.156.0');
   installDb.prepare(`
     INSERT INTO beta_codex_queue (seat, codex_home, thread, up_to, nonce, queue_item_id, state, children, created_at)
     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
   `).run(JSON.stringify(['alpha', 'alice']), codexHome, thread, JSON.stringify({ eventSeq: 1, legacyId: 0 }), 'windows-pending-nonce', notYetVisibleItemId, JSON.stringify({ state: 'absent' }), new Date().toISOString());
   await windowsChannel.pollOnce();
-  const windowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  const windowsSeat = seatBrief(windowsChannel, JSON.stringify(['alpha', 'alice']));
   assert.equal(windowsSeat.state, 'blocked');
   assert.equal(windowsSeat.reason, 'windows_codex_version_below_minimum:0.156.0');
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
@@ -535,7 +542,7 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   windowsQueueDb.prepare('INSERT INTO queued_items VALUES (?, ?, ?)').run(notYetVisibleItemId, thread, '{}');
   windowsQueueDb.close();
   await windowsChannel.pollOnce();
-  const confirmedWindowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  const confirmedWindowsSeat = seatBrief(windowsChannel, JSON.stringify(['alpha', 'alice']));
   assert.equal(confirmedWindowsSeat.state, 'blocked');
   assert.equal(confirmedWindowsSeat.reason, 'windows_codex_version_below_minimum:0.156.0');
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
@@ -566,7 +573,7 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   });
   await verifiedWindowsChannel.pollOnce();
   assert.equal(windowsQueues, 1);
-  assert.equal(installDb.prepare("SELECT state FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'addressable');
+  assert.equal(seatBrief(verifiedWindowsChannel, JSON.stringify(['alpha', 'alice'])).state, 'addressable');
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'pending');
   windowsChildState = 'absent';
   await verifiedWindowsChannel.pollOnce();
@@ -575,10 +582,14 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   assert.equal(windowsQueues, 1, 'a confirmed Windows snapshot is not requeued');
   await verifiedWindowsChannel.stop();
 
-  writeFileSync(path.join(teamsDir, 'alpha', 'config.json'), JSON.stringify({ agents: {} }));
+  // The seat is known to this channel from an earlier poll, then leaves the
+  // roster: what agmsgd observed is kept in memory, so only a seat it has seen
+  // can be marked as gone.
   const missingSeatChannel = createCodexQueueChannel({ db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir } });
   await missingSeatChannel.pollOnce();
-  const missingSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  writeFileSync(path.join(teamsDir, 'alpha', 'config.json'), JSON.stringify({ agents: {} }));
+  await missingSeatChannel.pollOnce();
+  const missingSeat = seatBrief(missingSeatChannel, JSON.stringify(['alpha', 'alice']));
   assert.equal(missingSeat.state, 'unaddressable');
   assert.equal(missingSeat.reason, 'seat_registration_missing');
   await missingSeatChannel.stop();
@@ -590,7 +601,7 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   const retiredChannel = createCodexQueueChannel({ db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir } });
   await retiredChannel.pollOnce();
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
-  const retiredSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  const retiredSeat = seatBrief(retiredChannel, JSON.stringify(['alpha', 'alice']));
   assert.equal(retiredSeat.state, 'unaddressable');
   assert.equal(retiredSeat.reason, 'seat_registration_missing');
   await retiredChannel.stop();
@@ -667,7 +678,18 @@ test('Codex channel advances accepted snapshots while reserving only active writ
     queue: async () => { throw new Error('a verified live bridge retains delivery ownership'); },
   });
   await bridgedChannel.pollOnce();
-  assert.equal(installDb.prepare("SELECT state FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'bridged');
+  assert.equal(seatBrief(bridgedChannel, JSON.stringify(['alpha', 'alice'])).state, 'bridged');
+  // Seat state is held in memory: more polls with the same answer write
+  // nothing to install.db, and `since` stays where the state began.
+  installDb.exec(`CREATE TABLE seat_writes (n INTEGER);
+    CREATE TRIGGER seat_writes_i AFTER INSERT ON beta_codex_seat BEGIN INSERT INTO seat_writes VALUES (1); END;
+    CREATE TRIGGER seat_writes_u AFTER UPDATE ON beta_codex_seat BEGIN INSERT INTO seat_writes VALUES (1); END;`);
+  const sinceBefore = bridgedChannel.seats().seats.find((row) => row.seat === JSON.stringify(['alpha', 'alice'])).since;
+  await bridgedChannel.pollOnce();
+  await bridgedChannel.pollOnce();
+  assert.equal(installDb.prepare('SELECT count(*) AS n FROM seat_writes').get().n, 0);
+  assert.equal(installDb.prepare('SELECT count(*) AS n FROM beta_codex_seat').get().n, 0);
+  assert.equal(bridgedChannel.seats().seats.find((row) => row.seat === JSON.stringify(['alpha', 'alice'])).since, sinceBefore);
   await bridgedChannel.stop();
   const leaseFile = path.join(runDir, `codex-bridge-lease.${bridgePid}`);
   const goodLease = readFileSync(leaseFile, 'utf8');
@@ -679,7 +701,7 @@ test('Codex channel advances accepted snapshots while reserving only active writ
     });
     await channel.pollOnce();
     await channel.stop();
-    return installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+    return seatBrief(channel, JSON.stringify(['alpha', 'alice']));
   };
   const reusedPairs = await seatStateAfter(goodLease.replace(/^pairs=.*$/m, `pairs=${'0'.repeat(40)}`));
   assert.notEqual(reusedPairs.state, 'bridged', 'a live PID whose lease names another bridge is not this seat\'s bridge');
@@ -767,7 +789,7 @@ for (const failure of [{ kind: 'failed', reason: 'queue_exit_1' }, { kind: 'fail
       queue: async request => { calls++; request.onChildStart(4242); return failure; },
     });
     await channel.pollOnce();
-    assert.match(readOwnerAndIntentReadOnly(options.installRoot).codexSeats.seats[0].reason, new RegExp(failure.reason ?? failure.kind));
+    assert.match(channel.seats().seats[0].reason, new RegExp(failure.reason ?? failure.kind));
     await channel.pollOnce();
     assert.equal(calls, 2);
     await channel.stop();
@@ -790,7 +812,7 @@ for (const scenario of ['dead bridge', 'another seat malformed meta', 'own malfo
       queue: async request => { calls++; request.onChildStart(4242); return { kind: 'queued', queueItemId: itemId }; },
     });
     await channel.pollOnce();
-    const seat = db.prepare('SELECT state, reason FROM beta_codex_seat').get();
+    const seat = seatBrief(channel);
     if (scenario === 'own malformed meta') {
       assert.equal(calls, 0);
       assert.match(seat.reason, /codex-bridge.test.alice.meta.*identities_missing/);
@@ -841,7 +863,7 @@ for (const retired of [false, true]) {
     });
     await channel.pollOnce();
     assert.equal(calls, 0);
-    assert.equal(db.prepare('SELECT reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]').reason, 'shared_codex_home_queue_pending');
+    assert.equal(seatBrief(channel, '["test","alice"]').reason, 'shared_codex_home_queue_pending');
     groupState = 'absent';
     await channel.pollOnce();
     assert.ok(calls >= 1);
@@ -878,7 +900,7 @@ for (const kind of ['archived', 'no_rollout']) {
       queue: async request => { calls++; request.onChildStart(4242); return { kind }; },
     });
     await channel.pollOnce();
-    assert.equal(db.prepare('SELECT reason FROM beta_codex_seat').get().reason, kind === 'archived' ? 'thread_archived' : 'codex_home_mismatch');
+    assert.equal(seatBrief(channel).reason, kind === 'archived' ? 'thread_archived' : 'codex_home_mismatch');
     await channel.pollOnce();
     assert.equal(calls, 2);
     await channel.stop();
@@ -901,9 +923,9 @@ test('a stuck seat times out, the next seat sends, and late completion cannot ch
     },
   });
   await channel.pollOnce();
-  const alice = () => db.prepare('SELECT state, reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]');
+  const alice = () => seatBrief(channel, '["test","alice"]');
   assert.equal(alice().reason, 'seat_poll_deadline');
-  assert.equal(db.prepare('SELECT state FROM beta_codex_seat WHERE seat=?').get('["test","bob"]').state, 'addressable');
+  assert.equal(seatBrief(channel, '["test","bob"]').state, 'addressable');
   assert.ok(logs.some(line => line.includes('poll_timeout') && line.includes('alice')));
   assert.ok(logs.some(line => line.includes('sent') && line.includes('bob')));
   release({ kind: 'queued', queueItemId: itemId });
@@ -964,7 +986,7 @@ test('a channel cutoff resumes after the interrupted seat on the next cycle', as
     },
   });
   await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
-  assert.equal(db.prepare('SELECT reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]').reason, 'channel_poll_deadline');
+  assert.equal(seatBrief(channel, '["test","alice"]').reason, 'channel_poll_deadline');
   await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
   assert.equal(sends, 1);
   await channel.stop();
@@ -992,20 +1014,15 @@ test('one unusable team is skipped alone: the other teams are still polled and t
   });
   await channel.pollOnce();
   await channel.pollOnce();
-  const rows = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => ({ seat: JSON.parse(row.seat), reason: row.reason }));
+  const rows = channel.seats().seats.map((row) => ({ seat: JSON.parse(row.seat), reason: row.reason }));
   assert.ok(rows.some(({ seat }) => seat[0] === 'one' && seat[1] === 'alice'), 'team one is still polled');
   assert.ok(rows.some(({ seat }) => seat[0] === 'two' && seat[1] === 'bob'), 'team two is still polled');
   assert.equal(rows.find(({ seat }) => seat[0] === 'broken' && seat[1] === '')?.reason, 'team_roster_malformed');
   assert.equal(rows.find(({ seat }) => seat[0] === 'linked' && seat[1] === '')?.reason, 'team_roster_symlink');
   assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
-  await channel.stop();
   writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
-  const restarted = createCodexQueueChannel({
-    db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: root },
-    readDriver: () => ({ state: 'ok', driver: 'sqlite' }), log: () => {},
-  });
-  await restarted.pollOnce();
-  const after = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => JSON.parse(row.seat));
-  assert.equal(after.some((seat) => seat[0] === 'broken' && seat[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
-  await restarted.stop();
+  await channel.pollOnce();
+  const after = channel.seats().seats.map((row) => JSON.parse(row.seat));
+  assert.equal(after.some((seat) => seat[0] === 'broken' && seat[1] === ''), false, 'the reason goes away once the team is readable');
+  await channel.stop();
 });
