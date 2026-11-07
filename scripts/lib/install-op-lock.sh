@@ -168,6 +168,16 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
 # until agmsg_install_op_unlock (which every path through an operation ends in),
 # or until this process is gone. 0 = held, or there is no such file; 1 = another
 # holder kept it past the wait.
+# Liveness through the shared helper (a bare kill -0 is not one); without it,
+# the process table.
+_agmsg_install_op_pid_running() {   # <pid>
+  if _agmsg_install_op_load_pid_helper; then
+    _agmsg_pid_alive_local "$1"
+    return
+  fi
+  ps -p "$1" >/dev/null 2>&1
+}
+
 _AGMSG_LEGACY_LOCK_PID=""
 _AGMSG_LEGACY_LOCK_OUT=""
 agmsg_install_op_legacy_lock_hold() {   # <skill dir>
@@ -175,10 +185,11 @@ agmsg_install_op_legacy_lock_hold() {   # <skill dir>
   [ -f "$old" ] || return 0
   out="$(mktemp "${TMPDIR:-/tmp}/agmsg-legacy-lock.XXXXXX")" || return 1
   _AGMSG_LEGACY_LOCK_OUT="$out"
+  _agmsg_install_op_load_pid_helper || true
   (
     {
       printf '.timeout %s\nBEGIN EXCLUSIVE;\nSELECT '"'"'agmsg-legacy-ok'"'"';\n' "$wait_ms"
-      while kill -0 "$owner" 2>/dev/null && [ ! -e "$out.stop" ]; do sleep 1; done
+      while _agmsg_install_op_pid_running "$owner" && [ ! -e "$out.stop" ]; do sleep 1; done
     } | sqlite3 "$old" > "$out" 2>&1
   ) 3>&- 4>&- &
   _AGMSG_LEGACY_LOCK_PID=$!
@@ -188,7 +199,7 @@ agmsg_install_op_legacy_lock_hold() {   # <skill dir>
       [ "${first%$'\r'}" = "agmsg-legacy-ok" ] && return 0
       break
     fi
-    kill -0 "$_AGMSG_LEGACY_LOCK_PID" 2>/dev/null || break
+    _agmsg_install_op_pid_running "$_AGMSG_LEGACY_LOCK_PID" || break
     sleep 0.2
     waited=$((waited + 200))
   done
