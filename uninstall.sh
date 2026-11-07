@@ -238,11 +238,15 @@ _uninstall_one() {
   # stale-lock recovery step, so an uninstall
   # that crashes mid-way is the same "held until the holder dies" state a
   # crashed install.sh already leaves.
-  if ! agmsg_install_op_lock "$SKILL_DIR/.install-op.lock.db"; then
+  if ! agmsg_install_op_lock "$SKILL_DIR/.install-op/lock.db"; then
     echo "  ! could not take the install operation lock for $SKILL_DIR: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
     return 1
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
+  if agmsg_install_op_legacy_lock_busy "$SKILL_DIR"; then
+    echo "  ! an installer from an earlier release holds $SKILL_DIR/run/install-op.lock.db; run this again when it has finished" >&2
+    return 1
+  fi
   _uninstall_operation_require || return 1
 
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
@@ -538,7 +542,7 @@ _uninstall_one() {
   else
     echo ""
     if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
-      # .install-op.lock.db (in the install directory, which a state move never
+      # .install-op/lock.db (in the install directory, which a state move never
       # touches) is NEVER deleted, even here (agmsgd beta):
       # removing a DB a waiter still has open makes a
       # freshly recreated file of the same name a DIFFERENT lock than the
@@ -547,7 +551,7 @@ _uninstall_one() {
       # inside run/ remove everything except install-op.lock.db by name --
       # never a single recursive rm -rf "$SKILL_DIR" that cannot make this
       # one exception. rmdir (not rm -rf) on SKILL_DIR itself: it correctly
-      # fails and is left in place, since .install-op.lock.db means it
+      # fails and is left in place, since .install-op/lock.db means it
       # is never truly empty after this.
       local _entry _run_entry
       for _entry in "$SKILL_DIR"/* "$SKILL_DIR"/.[!.]*; do
@@ -555,7 +559,7 @@ _uninstall_one() {
         # Keep the installed recovery entrypoint available until the
         # incomplete-operation record is cleared below.
         case "$(basename "$_entry")" in
-        uninstall.sh|.install-op-uninstaller-retired.*|.install-op.lock.db) continue ;;
+        uninstall.sh|.install-op-uninstaller-retired.*|.install-op) continue ;;
         esac
         if [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
@@ -581,7 +585,7 @@ _uninstall_one() {
       fi
       _uninstall_operation_require || return 1
       rmdir "$SKILL_DIR" 2>/dev/null || true
-      echo "  - removed $SKILL_DIR (kept .install-op.lock.db and the active operation record)"
+      echo "  - removed $SKILL_DIR (kept .install-op/lock.db and the active operation record)"
       REMOVED=true
     fi
   fi

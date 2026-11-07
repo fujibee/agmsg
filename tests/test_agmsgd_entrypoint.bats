@@ -22,7 +22,7 @@ _write_completion_record() {
   # interval -- fragile on a slower machine. Write it for real.
   echo "test" > "$TEST_SKILL_DIR/VERSION"
   local install_id="test-install-id"
-  mkdir -p "$TEST_SKILL_DIR/run"
+  mkdir -p "$TEST_SKILL_DIR/run" "$TEST_SKILL_DIR/.install-op"
   node -e "
     const { createHash } = require('node:crypto');
     const { readFileSync, readdirSync, writeFileSync } = require('node:fs');

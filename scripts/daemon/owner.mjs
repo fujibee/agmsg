@@ -5,7 +5,7 @@
 // never from here. This file only READS daemon_intent, to condition taking
 // ownership on it still matching what the launcher observed.
 //
-// The install-op lock (.install-op.lock.db) is separate from the
+// The install-op lock (.install-op/lock.db) is separate from the
 // daemon_owner CAS. The entrypoint holds it while revalidating the install
 // generation and through takeOwnership() plus control-socket readiness, so
 // an install cannot begin between validation and this claim.

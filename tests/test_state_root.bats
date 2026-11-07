@@ -126,6 +126,9 @@ demote() {
   grep -qF "$ST/teams" "$FAKE_HOME/.codex/config.toml"
   grep -qF "$ST/run" "$FAKE_HOME/.codex/config.toml"
   grep -qF "$ST/ext-tools" "$FAKE_HOME/.codex/config.toml"
+  # the install operation lock lives in a real directory at the install root
+  [ -d "$SK/.install-op" ] && [ ! -L "$SK/.install-op" ]
+  grep -qF "$SK/.install-op" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "--update on the old layout writes the real state directories into Codex writable_roots" {
@@ -137,6 +140,7 @@ demote() {
   [ "$status" -eq 0 ]
   grep -qF "$ST/run" "$FAKE_HOME/.codex/config.toml"
   grep -qF "$ST/teams" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "$SK/.install-op" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "uninstall removes the state root too, and its Codex entries" {
@@ -372,7 +376,7 @@ EOS
 @test "while another operation holds the install lock the update moves nothing; it moves once the lock is released" {
   inst
   demote
-  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/.install-op.lock.db" >/dev/null 2>&1 &
+  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 9 ) | sqlite3 "$SK/.install-op/lock.db" >/dev/null 2>&1 &
   local holder=$!
   sleep 1
   inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
@@ -389,30 +393,53 @@ EOS
 
 @test "the install lock lives in the install directory, which a move does not touch: it is the same file before and after" {
   inst
-  [ -f "$SK/.install-op.lock.db" ]
-  [ ! -L "$SK/.install-op.lock.db" ]
+  [ -f "$SK/.install-op/lock.db" ]
+  [ ! -L "$SK/.install-op/lock.db" ]
   local before after
-  before="$(stat -f %i "$SK/.install-op.lock.db" 2>/dev/null || stat -c %i "$SK/.install-op.lock.db")"
+  before="$(python3 -I -c 'import os,sys;print(os.stat(sys.argv[1]).st_ino)' "$SK/.install-op/lock.db")"
   demote
   run inst --update
   [ "$status" -eq 0 ]
-  after="$(stat -f %i "$SK/.install-op.lock.db" 2>/dev/null || stat -c %i "$SK/.install-op.lock.db")"
+  after="$(python3 -I -c 'import os,sys;print(os.stat(sys.argv[1]).st_ino)' "$SK/.install-op/lock.db")"
   [ "$before" = "$after" ]
   [ -L "$SK/run" ]
 }
 
-@test "an installer from an earlier release that holds run/install-op.lock.db keeps the state in place, visibly" {
+@test "an installer from an earlier release that holds run/install-op.lock.db serializes the whole update: nothing is written until it lets go" {
   inst
   demote
   : > "$SK/run/install-op.lock.db"
-  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 8 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
+  printf 'sentinel\n' > "$SK/scripts/agmsg"
+  ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep 7 ) | sqlite3 "$SK/run/install-op.lock.db" >/dev/null 2>&1 &
   local holder=$!
   sleep 1
-  run inst --update
-  wait "$holder" || true
-  grep -qF -- "an installer from an earlier release holds" <<<"$output"
+  inst --update > "$BATS_TEST_TMPDIR/update.out" 2>&1 &
+  local updater=$!
+  sleep 3
+  # still waiting: the installed script was not replaced, the state not moved
+  [ "$(<"$SK/scripts/agmsg")" = sentinel ]
   [ -d "$SK/run" ] && [ ! -L "$SK/run" ]
-  [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = in-place ]
+  wait "$holder" || true
+  wait "$updater"
+  [ "$(<"$SK/scripts/agmsg")" != sentinel ]
+  [ -L "$SK/run" ]
+}
+
+@test "an earlier-release installer that holds the old lock past the wait stops the update with a stated reason and changes nothing" {
+  inst
+  demote
+  : > "$SK/run/install-op.lock.db"
+  printf 'sentinel\n' > "$SK/scripts/agmsg"
+  # a stand-in for the 30 s wait: a sqlite3 that gives up at once
+  mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+  real="$(command -v sqlite3)"
+  printf '#!/bin/sh\ncase "$*" in *"BEGIN EXCLUSIVE; COMMIT;"*) echo "database is locked" >&2; exit 5 ;; esac\nexec %s "$@"\n' "$real" > "$BATS_TEST_TMPDIR/fakebin/sqlite3"
+  chmod +x "$BATS_TEST_TMPDIR/fakebin/sqlite3"
+  run env PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -ne 0 ]
+  grep -qF -- "an installer from an earlier release holds" <<<"$output"
+  [ "$(<"$SK/scripts/agmsg")" = sentinel ]
+  [ -d "$SK/run" ] && [ ! -L "$SK/run" ]
 }
 
 @test "state_link: run/ recreated by an ordinary writer in the gap is folded in, never linked into, and nothing is lost" {

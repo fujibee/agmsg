@@ -3,7 +3,7 @@
 #
 # One lock per install, held for the whole of install.sh / uninstall.sh /
 # the `enable` / `disable` / `start` CLI operations. Mechanism: SQLite's own
-# BEGIN EXCLUSIVE on .install-op.lock.db in the install directory (a place the
+# BEGIN EXCLUSIVE on .install-op/lock.db in the install directory (a place the
 # state move never touches; older releases kept it in run/) -- a SEPARATE file from
 # install.db, held by a single long-running sqlite3 process bash keeps alive
 # for the whole operation. Bash 4+ feeds it through a coprocess; Bash 3.2 uses
@@ -156,6 +156,18 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
       _agmsg_install_op_lock_set_failure "unexpected empty lock confirmation from sqlite3"
     fi
     agmsg_install_op_unlock
+    return 1
+  fi
+  return 0
+}
+
+# Releases before the lock moved to .install-op/ kept it in run/. An installer
+# of such a release can still be running; it only knows that file. 0 = one holds
+# it (after waiting up to 30 s), 1 = free, or there is no such file.
+agmsg_install_op_legacy_lock_busy() {   # <skill dir>
+  local old="${1%/}/run/install-op.lock.db"
+  [ -f "$old" ] || return 1
+  if sqlite3 -cmd '.timeout 30000' "$old" "BEGIN EXCLUSIVE; COMMIT;" >/dev/null 2>&1; then
     return 1
   fi
   return 0

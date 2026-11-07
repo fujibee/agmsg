@@ -307,20 +307,6 @@ agmsg_install_move_state() {
   if [ "$moved_any" = true ]; then
     # The caller holds the install operation lock (and has refused on an
     # unfinished operation record) from before this point to the end of the update.
-    # An installer from before the lock moved out of run/ still takes
-    # run/install-op.lock.db: if one holds it, nothing is moved.
-    if [ -f "$skill/run/install-op.lock.db" ]; then
-      local old_lock_busy=false
-      # A separate one-shot sqlite3: the lock this process holds is on its own
-      # channel and must not be touched.
-      sqlite3 -cmd '.timeout 1000' "$skill/run/install-op.lock.db" "BEGIN EXCLUSIVE; COMMIT;" >/dev/null 2>&1 || old_lock_busy=true
-      if [ "$old_lock_busy" = true ]; then
-        AGMSG_STATE_REASON="an installer from an earlier release holds $skill/run/install-op.lock.db"
-        echo "  ! state of '$name' is not moved: $AGMSG_STATE_REASON; it keeps working in place (Codex rescans its skills on writes there)" >&2
-        [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
-        return 0
-      fi
-    fi
     echo "  ~ moving the state of '$name' to $root (a link stays in $skill)"
     # Same stop the update uses before replacing scripts: the intent stays on, so
     # the update's own restart at the end brings agmsgd back. The move only goes
@@ -360,7 +346,7 @@ $team"
       return 0
     fi
   fi
-  # The install operation lock (.install-op.lock.db, in the install directory,
+  # The install operation lock (.install-op/lock.db, in the install directory,
   # which this move never touches) is already held by the caller from before the
   # checks above, so no other install, update or uninstall runs while run/ is
   # renamed and linked.
@@ -572,7 +558,7 @@ agmsg_install_write_recovery_helper() {
 
 agmsg_install_operation_begin() {
   local manifest="$SKILL_DIR/run/install-manifest.json"
-  local lock_db="$SKILL_DIR/.install-op.lock.db"
+  local lock_db="$SKILL_DIR/.install-op/lock.db"
   local install_db="$SKILL_DIR/run/install.db"
 
   mkdir -p "$SKILL_DIR/run"
@@ -582,6 +568,10 @@ agmsg_install_operation_begin() {
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
   trap 'agmsg_install_operation_exit' EXIT
+  if agmsg_install_op_legacy_lock_busy "$SKILL_DIR"; then
+    echo "  ! an installer from an earlier release holds $SKILL_DIR/run/install-op.lock.db; run this again when it has finished" >&2
+    return 1
+  fi
   trap 'agmsg_install_op_handle_signal INT' INT
   trap 'agmsg_install_op_handle_signal TERM' TERM
 
