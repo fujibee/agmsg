@@ -18,7 +18,8 @@ agmsg_codex_native_path() {
 }
 
 # Prints one writable_roots path per line for <skill_dir>: db/, teams/, run/,
-# ext-tools/ under it, in the SAME form install.sh's configure_codex_sandbox
+# ext-tools/ and .install-op/ (the install operation lock, which a state move
+# never touches, so it stays a real directory here) under it (or where their links point, when the state lives outside), in the SAME form install.sh's configure_codex_sandbox
 # writes into Codex's config.toml. On Windows (MSYS2/Git Bash), $skill_dir is
 # in MSYS form (/c/Users/...); Codex is a native Windows binary whose Rust
 # path resolution cannot parse that (it resolves to a phantom C:\c\Users\...),
@@ -31,9 +32,15 @@ agmsg_codex_native_path() {
 # correct `install --update` (#1483 review).
 agmsg_codex_writable_paths() {
   local skill_dir="$1"
-  local paths=("$skill_dir/db" "$skill_dir/teams" "$skill_dir/run" "$skill_dir/ext-tools")
-  local i
+  local paths=("$skill_dir/db" "$skill_dir/teams" "$skill_dir/run" "$skill_dir/ext-tools" "$skill_dir/.install-op")
+  local i real
   for i in "${!paths[@]}"; do
+    # State kept outside the skills directory (scripts/lib/state-root.sh) is
+    # reached through a link; Codex's sandbox checks the path a write resolves
+    # to, so the entry has to name the real directory.
+    if [ -L "${paths[$i]}" ] && real="$(cd -P "${paths[$i]}" 2>/dev/null && pwd -P)" && [ -n "$real" ]; then
+      paths[$i]="$real"
+    fi
     paths[$i]="$(agmsg_codex_native_path "${paths[$i]}")"
   done
   printf '%s\n' "${paths[@]}"

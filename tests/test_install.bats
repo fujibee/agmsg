@@ -29,6 +29,15 @@ setup() {
   WATCHED_PIDS=""
 }
 
+# The real directory the state of an install lives in (Codex writable_roots name
+# real paths: a sandbox checks where a write resolves to). $1 = optional part,
+# $2 = install name.
+state_path() {
+  local d="$FAKE_HOME/.agmsg/${2:-agmsg}"
+  d="$(cd -P "$d" 2>/dev/null && pwd -P)" || d="$FAKE_HOME/.agmsg/${2:-agmsg}"
+  printf '%s%s\n' "$d" "${1:+/$1}"
+}
+
 # Register <pid> for teardown, together with a substring that MUST appear in
 # its cmdline (read fresh from the real ps, below) before teardown may signal
 # it. Call this immediately after the pid becomes known -- before any
@@ -160,7 +169,13 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
   [ -n "$src" ] && [ -d "$src/.agents/skills/$cmd" ] || return 1
   cp -Rp "$src/." "$FAKE_HOME/" || return 1
   esc="$(printf '%s' "$src" | sed 's/[][\.*^$|]/\\&/g')"
-  for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path"; do
+  # The state parts are links to <template>/.agmsg/<cmd>/<part>; point them at the copy.
+  for f in run db teams ext-tools .trash; do
+    [ -L "$FAKE_HOME/.agents/skills/$cmd/$f" ] || continue
+    ln -sfn "$FAKE_HOME/.agmsg/$cmd/$f" "$FAKE_HOME/.agents/skills/$cmd/$f" || return 1
+  done
+  for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path" \
+           ".agents/skills/$cmd/.agmsg" ".agmsg/$cmd/.owner"; do
     [ -f "$FAKE_HOME/$f" ] || continue
     # cat into the existing file keeps its mode (the launcher is 0711).
     sed "s|$esc|$FAKE_HOME|g" "$FAKE_HOME/$f" > "$BATS_TEST_TMPDIR/restore-rewrite" || return 1
@@ -619,10 +634,10 @@ _pid_gone_harness() {   # <kill message>
   [ -f "$proj_cmd_second" ]
   grep -qF "$SK/" "$settings"
   grep -qF "$sk_second/" "$settings"
-  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
-  refute grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
-  grep -qF "$SK/" "$codex_home2/config.toml"
-  grep -qF "$sk_second/" "$codex_home2/config.toml"
+  refute grep -qF "/.agmsg/agmsg/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "/.agmsg/agmsg-second/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "/.agmsg/agmsg/" "$codex_home2/config.toml"
+  grep -qF "/.agmsg/agmsg-second/" "$codex_home2/config.toml"
   [ -f "$opencode_first" ]
   [ -f "$opencode_second" ]
   [ -f "$hermes_first" ]
@@ -638,17 +653,17 @@ _pid_gone_harness() {   # <kill message>
   # install this run is about (#1400).
   HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$SK/uninstall.sh" --yes
 
-  # $SK itself is no longer fully gone: run/install-op.lock.db
+  # $SK itself is no longer fully gone: .install-op/lock.db
   # is kept on purpose, so a residual $SK/run/ survives. Its substantive
   # content is what must be gone -- covered in full by its own test
-  # ("uninstall keeps run/install-op.lock.db while removing everything else").
+  # ("uninstall keeps .install-op/lock.db while removing everything else").
   [ ! -e "$SK/scripts" ]
   [ ! -e "$SK/SKILL.md" ]
   [ ! -f "$cmd_first" ]
   [ ! -f "$proj_cmd_first" ]
   refute grep -qF "$SK/" "$settings"
-  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
-  refute grep -qF "$SK/" "$codex_home2/config.toml"
+  refute grep -qF "/.agmsg/agmsg/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "/.agmsg/agmsg/" "$codex_home2/config.toml"
   [ ! -e "$opencode_first" ]
   [ ! -e "$hermes_first" ]
   [ ! -e "$grok_first" ]
@@ -660,8 +675,8 @@ _pid_gone_harness() {   # <kill message>
   [ -f "$cmd_second" ]
   [ -f "$proj_cmd_second" ]
   grep -qF "$sk_second/" "$settings"
-  refute grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
-  grep -qF "$sk_second/" "$codex_home2/config.toml"
+  refute grep -qF "/.agmsg/agmsg-second/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "/.agmsg/agmsg-second/" "$codex_home2/config.toml"
   [ -f "$opencode_second" ]
   [ -f "$hermes_second" ]
   [ -f "$grok_second" ]
@@ -688,8 +703,8 @@ _pid_gone_harness() {   # <kill message>
   printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third-second
   local sk_third_second="$FAKE_HOME/.agents/skills/third-second"
-  grep -qF "$sk_third_second/" "$FAKE_HOME/.codex/config.toml"
-  refute grep -qF "$sk_third/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "/.agmsg/$(basename "$sk_third_second")/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "/.agmsg/$(basename "$sk_third")/" "$FAKE_HOME/.codex/config.toml"
 
   # install.sh's own codex-config step makes its own .bak when it added
   # third-second's entry above -- clear it too, so the check below is only
@@ -719,7 +734,7 @@ _pid_gone_harness() {   # <kill message>
   # two installs present and no single one identified.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
 
-  # Neither install is fully gone: run/install-op.lock.db
+  # Neither install is fully gone: .install-op/lock.db
   # is kept on purpose for each. Substantive content is what must be gone.
   [ ! -e "$FAKE_HOME/.agents/skills/agmsg/scripts" ]
   [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second/scripts" ]
@@ -1225,7 +1240,7 @@ SH
 
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_MODE=crlf-canary \
     bash -c 'source "$1"; agmsg_install_op_lock "$2" 1000 || exit 1; agmsg_install_op_confirm || exit 2; printf "lock acquired\\n"; agmsg_install_op_unlock' \
-    _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$FAKE_HOME/run/install-op.lock.db"
+    _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$FAKE_HOME/.install-op/lock.db"
   [ "$status" -eq 0 ]
   grep -Fq -- "lock acquired" <<<"$output"
 }
@@ -1558,21 +1573,21 @@ EOF
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
-  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path teams)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/.codex/config.toml"
   # A sandboxed Codex seat runs an ext-tool member's `setup` (secret and
   # save) too, which writes under ext-tools/ the same way the bridge writes
   # under db/teams/run — measured directly against a real seat
   # (`codex exec -s workspace-write`) before this entry existed:
   # `mkdir: .../ext-tools/<team>: Operation not permitted`.
-  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path ext-tools)" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install/update/uninstall: CODEX_HOME isolates the default Codex config (#1718)" {
   source "$REPO_ROOT/scripts/lib/codex-config.sh"
   local native_root
-  native_root="$(agmsg_codex_native_path "$SK")"
+  native_root="$(agmsg_codex_native_path "$(state_path)")"
   local profile_home="$FAKE_HOME/.codex_profiles/work"
   mkdir -p "$FAKE_HOME/.codex" "$profile_home"
   printf 'model = "default-sentinel"\n' > "$FAKE_HOME/.codex/config.toml"
@@ -1637,7 +1652,7 @@ EOF
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
 
-  grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install: fills an existing EMPTY Codex writable_roots without corrupting TOML" {
@@ -1652,9 +1667,9 @@ EOF
   # The empty-array path used to emit `[, "..."]` — a leading comma, which is
   # invalid TOML and broke the user's Codex config.
   refute grep -Eq '\[[[:space:]]*,' "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path teams)" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/.codex/config.toml"
 
   # Parse end-to-end when a TOML reader is available, to prove validity.
   if command -v python3 >/dev/null 2>&1; then
@@ -1686,9 +1701,9 @@ EOF
   # The link survives: `mv` would have replaced it with a plain file (#747).
   [ -L "$FAKE_HOME/.codex/config.toml" ]
   # The edit reached the link's target, not a detached copy at the link path.
-  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
-  grep -q "$SK/teams" "$FAKE_HOME/dotfiles/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path teams)" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/dotfiles/config.toml"
   # The pre-existing entry is kept.
   grep -q "/some/existing/path" "$FAKE_HOME/dotfiles/config.toml"
 }
@@ -1705,8 +1720,8 @@ EOF
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
   [ -L "$FAKE_HOME/.codex/config.toml" ]
-  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
-  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$(state_path run)" "$FAKE_HOME/dotfiles/config.toml"
 }
 
 @test "install: an ordinary Codex config.toml is replaced atomically, not truncated in place (#747 control)" {
@@ -1725,7 +1740,7 @@ EOF
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
   [ ! -L "$FAKE_HOME/.codex/config.toml" ]
-  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
+  grep -q "$(state_path db)" "$FAKE_HOME/.codex/config.toml"
   grep -q "/some/existing/path" "$FAKE_HOME/.codex/config.toml"
   local ino_after; ino_after="$(ls -i "$FAKE_HOME/.codex/config.toml" | awk '{print $1}')"
   [ "$ino_after" != "$ino_before" ]
@@ -2604,7 +2619,7 @@ CYG
   # The operation lock DB must exist, never be empty-deleted by install
   # itself, and never appear in the manifest's own file listing (it lives
   # under run/, not scripts/).
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op/lock.db" ]
 
   local id1 gen1
   id1="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.install_id');")"
@@ -2621,7 +2636,7 @@ CYG
   # later PR) to check against under the operation lock.
   local bv
   bv="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.bootstrap_version');")"
-  [ "$bv" = "2" ]
+  [ "$bv" = "3" ]
 
   # install_id's one source of truth is install.db's meta row; the manifest
   # only carries a copy of it.
@@ -2632,7 +2647,7 @@ CYG
   # The lock DB holds no tables of its own -- it exists only to be BEGIN
   # EXCLUSIVE'd.
   local lock_tables
-  lock_tables="$(sqlite3 "$SK/run/install-op.lock.db" "SELECT count(*) FROM sqlite_master WHERE type='table';")"
+  lock_tables="$(sqlite3 "$SK/.install-op/lock.db" "SELECT count(*) FROM sqlite_master WHERE type='table';")"
   [ "$lock_tables" = "0" ]
 
   # The two daemon bootstrap files were placed (not left out by the bulk
@@ -2774,7 +2789,7 @@ CYG
   done
   if [ -e "$entered" ]; then
     if bash -c 'source "$1"; if agmsg_install_op_lock "$2" 300; then agmsg_install_op_unlock; exit 3; else exit 0; fi' \
-        _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$SK/run/install-op.lock.db"; then
+        _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$SK/.install-op/lock.db"; then
       blocked=1
     fi
   fi
@@ -2805,14 +2820,14 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op/lock.db"' \
     'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
     "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op/lock.db"' \
     'target="$test_home/.agents/skills/agmsg/scripts/"' \
     'dest=""; for arg do dest="$arg"; done' \
     'if [ "$dest" = "$target" ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
@@ -2880,7 +2895,7 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/cancel-writer}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op/lock.db"' \
     'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
     "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
@@ -2907,7 +2922,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
-  _agmsg_watch_pid "$lock_pid" "$SK/run/install-op.lock.db"
+  _agmsg_watch_pid "$lock_pid" "$SK/.install-op/lock.db"
   [ -e "$SK/run/install-op-incomplete.json" ]
 
   kill -TERM "$install_pid"
@@ -2933,7 +2948,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
-  _agmsg_watch_pid "$lock_pid" "$SK/run/install-op.lock.db"
+  _agmsg_watch_pid "$lock_pid" "$SK/.install-op/lock.db"
   op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
   kill -KILL "$install_pid"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
@@ -3012,15 +3027,15 @@ CYG
   [ ! -e "$SK/run/install-op-incomplete.json" ]
 }
 
-@test "uninstall keeps run/install-op.lock.db while removing everything else" {
+@test "uninstall keeps .install-op/lock.db while removing everything else" {
   _restore_install
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op/lock.db" ]
   [ -f "$SK/run/install.db" ]
   [ -f "$SK/scripts/team.sh" ]
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
 
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op/lock.db" ]
   [ ! -e "$SK/run/install.db" ]
   [ ! -e "$SK/run/install-manifest.json" ]
   [ ! -e "$SK/scripts" ]
@@ -3045,14 +3060,14 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op/lock.db"' \
     'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
     "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op/lock.db"' \
     'target="$test_home/.agents/skills/agmsg/scripts"' \
     'final_root="$test_home/.agents/skills/agmsg/uninstall.sh"' \
     'final_retired="$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."' \
@@ -3082,7 +3097,7 @@ CYG
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
-    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'lock_db="$test_home/.agents/skills/agmsg/.install-op/lock.db"' \
     'source_path="$1"; dest_path="$2"' \
     'case "$source_path:$dest_path" in "$test_home/.agents/skills/agmsg/uninstall.sh:$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."*)' \
     '  if [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/move-fired" ]; then' \
@@ -3126,7 +3141,7 @@ CYG
   # order. This injection stops immediately after removing scripts, so other
   # entries may legitimately remain if they sort after scripts.
   [ ! -e "$SK/scripts" ]
-  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/.install-op/lock.db" ]
   [ -x "$SK/uninstall.sh" ]
   [ -r "$SK/run/install-op-recovery.sh" ]
 

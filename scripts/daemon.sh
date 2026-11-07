@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DB="$SKILL_DIR/run/install.db"
-LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
+LOCK_DB="$SKILL_DIR/.install-op/lock.db"
 LAUNCHER="$SCRIPT_DIR/daemon/agmsgd-launch.sh"
 # shellcheck source=lib/daemon-state.sh
 source "$SCRIPT_DIR/lib/daemon-state.sh"
@@ -132,6 +132,9 @@ _with_op_lock_run() {
     return 1
   }
   AGMSGD_LOCK_INSTALL_ID="${expected_generation%%:*}"
+  # The lock lives in .install-op/ at the install root; the installer makes it,
+  # and an install that predates it gets it here.
+  mkdir -p "${LOCK_DB%/*}" 2>/dev/null || true
   lock_dir="$(mktemp -d "$SKILL_DIR/run/daemon-op-lock.XXXXXX")" || return 1
   if [ "$(_os)" = windows ] && [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
     # The native sqlite3 on Windows cannot be driven through an MSYS FIFO (it

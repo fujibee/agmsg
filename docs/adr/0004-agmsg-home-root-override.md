@@ -134,3 +134,25 @@ New variables (including `AGMSG_HOME`) follow the table above.
   a different concern from this ADR's data-root override.
 - Related: #201 (skills-CLI install migration — the larger direction this
   ADR is a compatible first step toward, not a commitment to it).
+
+## Amendment (2026-11-05): per-install state under `AGMSG_HOME`
+
+`AGMSG_HOME` is now implemented, with a narrower meaning for installs made by
+`install.sh`: it is the root under which each install keeps its own state, in
+`$AGMSG_HOME/<install name>/` (default `~/.agmsg/<install name>/`), holding
+`run/`, `db/`, `teams/`, `ext-tools/` and `.trash/`. `<install name>` is the
+`--cmd` name, so `--cmd` side installs never share state. An install outside
+`~/.agents/skills` is named `<directory name>-<8 hex of a hash of its path>`.
+`$AGMSG_HOME/config/` stays a shared directory, so `config` cannot be an
+install name.
+
+Why: Codex watches every skill root and rescans all skills whenever anything
+under `~/.agents/skills` changes, and agmsg wrote its state there constantly.
+The skill directory now keeps real `scripts/`, `SKILL.md` and
+`agents/openai.yaml`, plus a symlink for each state directory, so every script,
+hook and the app keep using the old paths. The earlier text above (everything
+resolved directly under `$AGMSG_HOME`, shared by all installs) is superseded for
+installs made by `install.sh`; the app's fallback when no install exists is
+unchanged. `AGMSG_HOME` is read only by install, update, uninstall and doctor;
+running scripts follow the links, so an ambient value cannot redirect a running
+install. `AGMSG_STORAGE_PATH` still decides where `messages.db` is.

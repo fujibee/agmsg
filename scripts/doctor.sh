@@ -110,6 +110,8 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/stale-outcome-files.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/down-notice.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/state-root.sh"
 
 # --- orphaned run/ records (#1507) -----------------------------------------
 #
@@ -1094,6 +1096,25 @@ _doctor_scan_stale_outcome_files
 if [ -n "$STALE_OUTCOME_FILES" ]; then
   _warn "$(_agmsg_stale_outcome_dir) holds leaked storage sync driver outcome file(s) from before #1572 (see 'leaked storage sync driver outcome files' above); fix them with: doctor.sh --fix"
 fi
+# State kept outside the skills directory (scripts/lib/state-root.sh). The marker
+# says where it is; a link whose target is gone, state that was left in place,
+# and a copy of an install that still points at the original's state are all
+# shown here.
+_st_name="${SKILL_DIR##*/}"
+_st_marker_state="$(agmsg_state_marker_get "$SKILL_DIR" state)"
+_st_marker_skill="$(agmsg_state_marker_get "$SKILL_DIR" skill)"
+if [ "$_st_marker_state" = "in-place" ]; then
+  _warn "state of '$_st_name' stays in $SKILL_DIR: $(agmsg_state_marker_get "$SKILL_DIR" reason); fix that and run: install.sh --update --cmd $_st_name"
+fi
+if [ -n "$_st_marker_skill" ] && [ "$_st_marker_skill" != "$SKILL_DIR" ] && [ -d "$_st_marker_skill" ]; then
+  _warn "this install looks like a copy of $_st_marker_skill and shares its state ($_st_marker_state); run: install.sh --update --cmd $_st_name from this copy's own source to give it its own"
+fi
+for _st_part in run db teams ext-tools .trash; do
+  if [ -L "$SKILL_DIR/$_st_part" ] && [ ! -d "$SKILL_DIR/$_st_part" ]; then
+    _warn "$SKILL_DIR/$_st_part is a link to $(readlink "$SKILL_DIR/$_st_part"), which does not exist; recover with: mkdir -p $(readlink "$SKILL_DIR/$_st_part")"
+  fi
+done
+unset _st_part _st_name _st_marker_state _st_marker_skill
 # A component that is down or degraded and could not recover itself
 # (scripts/lib/down-notice.sh): installation-wide, one warning per record.
 while IFS=$'\t' read -r _dn_component _dn_state _dn_since _dn_reason _dn_recovery; do

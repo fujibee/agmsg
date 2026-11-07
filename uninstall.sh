@@ -59,6 +59,11 @@ else
   # shellcheck disable=SC1090
   . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
 fi
+# The state-root helpers (an older recovery helper does not carry them).
+if ! declare -F agmsg_state_detach_foreign >/dev/null 2>&1 && [ -r "$SCRIPT_DIR/scripts/lib/state-root.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/state-root.sh"
+fi
 
 AUTO_YES=false
 KEEP_DATA=false
@@ -220,6 +225,8 @@ _uninstall_clean_codex_config() {
 # below). Sets the global REMOVED=true on any change.
 _uninstall_one() {
   local SKILL_DIR="$1"
+  # A copy of an install points at the ORIGINAL's state: detach it before any lock or record.
+  agmsg_state_detach_foreign "$SKILL_DIR" || return 1
   local SKILL_NAME; SKILL_NAME="$(basename "$SKILL_DIR")"
 
   # Operation lock (agmsgd beta): held for the whole of this function,
@@ -231,11 +238,15 @@ _uninstall_one() {
   # stale-lock recovery step, so an uninstall
   # that crashes mid-way is the same "held until the holder dies" state a
   # crashed install.sh already leaves.
-  if ! agmsg_install_op_lock "$SKILL_DIR/run/install-op.lock.db"; then
+  if ! agmsg_install_op_lock "$SKILL_DIR/.install-op/lock.db"; then
     echo "  ! could not take the install operation lock for $SKILL_DIR: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
     return 1
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
+  if ! agmsg_install_op_legacy_lock_hold "$SKILL_DIR"; then
+    echo "  ! an installer from an earlier release holds $SKILL_DIR/run/install-op.lock.db; run this again when it has finished" >&2
+    return 1
+  fi
   _uninstall_operation_require || return 1
 
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
@@ -494,27 +505,53 @@ _uninstall_one() {
     break
   done
 
+  # --- State kept outside the skills directory ---
+  # install.sh links run/ db/ teams/ ext-tools/ .trash/ to <state base>/<name>/
+  # (scripts/lib/state-root.sh). The links go with the skill directory below;
+  # the data they point at is removed here, by the same rules: with --keep-data
+  # only the backup copies in .trash go, otherwise everything but the install
+  # operation lock database.
+  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target
+  for _state_part in db teams ext-tools .trash run; do
+    if [ -L "$SKILL_DIR/$_state_part" ]; then
+      _state_target="$(readlink "$SKILL_DIR/$_state_part")"
+      case "$_state_target" in
+        /*/"$_state_part") STATE_PARENT="${_state_target%/*}" ;;
+      esac
+    fi
+  done
+  unset _state_part _state_target
+  # The Codex entries carry the resolved spelling of that path (/private/var
+  # for /var on macOS); read before the directory goes.
+  if [ -n "$STATE_PARENT" ]; then
+    STATE_PARENT_REAL="$(cd -P "$STATE_PARENT" 2>/dev/null && pwd -P)" || STATE_PARENT_REAL=""
+  fi
+
   # --- Remove the skill directory ---
   if [ "$KEEP_DATA" = true ]; then
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
     _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
+    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/.trash" ]; then
+      _uninstall_checked_rm -rf "$STATE_PARENT/.trash" || return 1
+    fi
     _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" "$SKILL_DIR/CHANGELOG.md" || return 1
     echo "  - removed scripts, templates, SKILL.md, CHANGELOG.md"
-    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
+    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/${STATE_PARENT:+ (kept in $STATE_PARENT)}"
     REMOVED=true
   else
     echo ""
     if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
-      # run/install-op.lock.db is NEVER deleted, even here (agmsgd beta):
+      # .install-op/lock.db (in the install directory, which a state move never
+      # touches) is NEVER deleted, even here (agmsgd beta):
       # removing a DB a waiter still has open makes a
       # freshly recreated file of the same name a DIFFERENT lock than the
       # one the waiter holds a reference to -- see install-op-lock.sh's own
-      # header). Remove every top-level entry EXCEPT run/ by name, then
+      # header). Remove every top-level entry EXCEPT run/ and the lock by name, then
       # inside run/ remove everything except install-op.lock.db by name --
       # never a single recursive rm -rf "$SKILL_DIR" that cannot make this
       # one exception. rmdir (not rm -rf) on SKILL_DIR itself: it correctly
-      # fails and is left in place, since run/install-op.lock.db means it
+      # fails and is left in place, since .install-op/lock.db means it
       # is never truly empty after this.
       local _entry _run_entry
       for _entry in "$SKILL_DIR"/* "$SKILL_DIR"/.[!.]*; do
@@ -522,7 +559,7 @@ _uninstall_one() {
         # Keep the installed recovery entrypoint available until the
         # incomplete-operation record is cleared below.
         case "$(basename "$_entry")" in
-        uninstall.sh|.install-op-uninstaller-retired.*) continue ;;
+        uninstall.sh|.install-op-uninstaller-retired.*|.install-op) continue ;;
         esac
         if [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
@@ -537,9 +574,18 @@ _uninstall_one() {
         fi
       done
       unset _entry _run_entry
+      if [ -n "$STATE_PARENT" ]; then
+        local _state_dir
+        for _state_dir in db teams ext-tools .trash; do
+          [ -d "$STATE_PARENT/$_state_dir" ] || continue
+          _uninstall_checked_rm -rf "$STATE_PARENT/$_state_dir" || return 1
+        done
+        unset _state_dir
+        echo "  - removed the state kept in $STATE_PARENT"
+      fi
       _uninstall_operation_require || return 1
       rmdir "$SKILL_DIR" 2>/dev/null || true
-      echo "  - removed $SKILL_DIR (kept run/install-op.lock.db and the active operation record)"
+      echo "  - removed $SKILL_DIR (kept .install-op/lock.db and the active operation record)"
       REMOVED=true
     fi
   fi
@@ -549,6 +595,12 @@ _uninstall_one() {
   local _codex_cfg
   while IFS= read -r _codex_cfg; do
     _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR" || return 1
+    if [ -n "$STATE_PARENT" ]; then
+      _uninstall_clean_codex_config "$_codex_cfg" "$STATE_PARENT" || return 1
+      if [ -n "$STATE_PARENT_REAL" ] && [ "$STATE_PARENT_REAL" != "$STATE_PARENT" ]; then
+        _uninstall_clean_codex_config "$_codex_cfg" "$STATE_PARENT_REAL" || return 1
+      fi
+    fi
   done < <(agmsg_codex_config_paths)
 
   # --- Remove OpenCode, Hermes, and Grok Build skill files ---

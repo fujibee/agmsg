@@ -3,7 +3,8 @@
 #
 # One lock per install, held for the whole of install.sh / uninstall.sh /
 # the `enable` / `disable` / `start` CLI operations. Mechanism: SQLite's own
-# BEGIN EXCLUSIVE on run/install-op.lock.db -- a SEPARATE file from
+# BEGIN EXCLUSIVE on .install-op/lock.db in the install directory (a place the
+# state move never touches; older releases kept it in run/) -- a SEPARATE file from
 # install.db, held by a single long-running sqlite3 process bash keeps alive
 # for the whole operation. Bash 4+ feeds it through a coprocess; Bash 3.2 uses
 # a pair of named pipes so bash can keep working while the transaction stays
@@ -158,6 +159,61 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
     return 1
   fi
   return 0
+}
+
+# Releases before the lock moved to .install-op/ kept it in run/. An installer
+# of such a release can still be running or can start; it only knows that file.
+# So the legacy lock is HELD for the whole operation, not looked at once:
+# a helper process takes BEGIN EXCLUSIVE on it (waiting up to 30 s) and keeps it
+# until agmsg_install_op_unlock (which every path through an operation ends in),
+# or until this process is gone. 0 = held, or there is no such file; 1 = another
+# holder kept it past the wait.
+# Liveness through the shared helper (a bare kill -0 is not one); without it,
+# the process table.
+_agmsg_install_op_pid_running() {   # <pid>
+  if _agmsg_install_op_load_pid_helper; then
+    _agmsg_pid_alive_local "$1"
+    return
+  fi
+  ps -p "$1" >/dev/null 2>&1
+}
+
+_AGMSG_LEGACY_LOCK_PID=""
+_AGMSG_LEGACY_LOCK_OUT=""
+agmsg_install_op_legacy_lock_hold() {   # <skill dir>
+  local old="${1%/}/run/install-op.lock.db" out owner=$$ waited=0 first="" wait_ms="${AGMSG_TEST_INSTALL_OP_LEGACY_WAIT_MS:-30000}"
+  [ -f "$old" ] || return 0
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-legacy-lock.XXXXXX")" || return 1
+  _AGMSG_LEGACY_LOCK_OUT="$out"
+  _agmsg_install_op_load_pid_helper || true
+  (
+    {
+      printf '.timeout %s\nBEGIN EXCLUSIVE;\nSELECT '"'"'agmsg-legacy-ok'"'"';\n' "$wait_ms"
+      while _agmsg_install_op_pid_running "$owner" && [ ! -e "$out.stop" ]; do sleep 1; done
+    } | sqlite3 "$old" > "$out" 2>&1
+  ) 3>&- 4>&- &
+  _AGMSG_LEGACY_LOCK_PID=$!
+  while [ "$waited" -lt "$((wait_ms + 6000))" ]; do
+    if [ -s "$out" ]; then
+      first="$(head -n 1 "$out")"
+      [ "${first%$'\r'}" = "agmsg-legacy-ok" ] && return 0
+      break
+    fi
+    _agmsg_install_op_pid_running "$_AGMSG_LEGACY_LOCK_PID" || break
+    sleep 0.2
+    waited=$((waited + 200))
+  done
+  _agmsg_install_op_legacy_lock_release
+  return 1
+}
+
+_agmsg_install_op_legacy_lock_release() {
+  [ -n "$_AGMSG_LEGACY_LOCK_PID" ] || return 0
+  : > "$_AGMSG_LEGACY_LOCK_OUT.stop" 2>/dev/null
+  wait "$_AGMSG_LEGACY_LOCK_PID" 2>/dev/null || true
+  command rm -f "$_AGMSG_LEGACY_LOCK_OUT" "$_AGMSG_LEGACY_LOCK_OUT.stop"
+  _AGMSG_LEGACY_LOCK_PID=""
+  _AGMSG_LEGACY_LOCK_OUT=""
 }
 
 # Preserve a short, shell-escaped first response so a caller can explain which
@@ -448,7 +504,13 @@ agmsg_install_op_run_writer() {
   writer_pid=$!
   if [ -n "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE:-}" ]; then
     printf '%s\n' "$writer_pid" > "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.pid"
-    while [ ! -e "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.release" ]; do sleep 0.02; done
+    # Bounded (about 2 minutes) so a test that fails before it releases the gate
+    # cannot leave this operation paused for good.
+    local gate_waits=0
+    while [ ! -e "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.release" ] && [ "$gate_waits" -lt 6000 ]; do
+      sleep 0.02
+      gate_waits=$((gate_waits + 1))
+    done
   fi
   AGMSG_INSTALL_OP_WRITER_PID="$writer_pid"
   AGMSG_INSTALL_OP_WRITER_STARTING=false
@@ -524,6 +586,7 @@ agmsg_install_op_unlock() {
   unset _AGMSG_LOCK_PID _AGMSG_LOCK_TMPDIR _AGMSG_INSTALL_OP_USE_COPROC _AGMSG_LOCK_CHANNELS_READY
   unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
   AGMSG_INSTALL_OP_PHASE_ACTIVE=false
+  _agmsg_install_op_legacy_lock_release
 }
 
 # Places <src>'s CONTENT at <dest> atomically: a reader of <dest> sees either
