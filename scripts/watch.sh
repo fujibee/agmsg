@@ -67,6 +67,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Polling and its child operations must never run the user-operation notice.
 export AGMSG_DAEMON_NOTICE_SKIP=1
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/down-notice.sh"
 agmsg_storage_load
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
 # not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
@@ -636,6 +638,8 @@ fi
 # watcher is currently receiving for that role.
 READY_FILES=""
 cleanup() {
+  # This watcher's own install-state notice goes with it.
+  [ -n "${_INSTALL_KEEP_NOTICE:-}" ] || down_notice_clear "watch-install.$$" 2>/dev/null || true
   # EXIT only removes the pidfile if it still records our pid. A successor
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
   # with its own pid before signalling us, so this read sees the successor's
@@ -768,7 +772,7 @@ _install_ready() {
 
 # How long an install that has started (changed files exist) but not yet
 # finished (not _install_ready) is tolerated before falling back to the
-# visible exit (review finding, round 4, #684 follow-up). install.sh writes
+# reported state (review finding, round 4, #684 follow-up). install.sh writes
 # scripts/ over many separate file operations before its own last write
 # (VERSION); a watcher's poll can land in that window on essentially any real
 # install, not just a rare half-written one, so committing to the visible
@@ -804,6 +808,14 @@ esac
 # clock change moves it exactly as it would move `date +%s`. The negative-
 # elapsed handling below stays in place because of this, not despite it.
 _INSTALL_INCOMPLETE_SINCE=""
+# Set once the grace has run out and that was said, so the line appears once.
+_INSTALL_STALL_REPORTED=""
+# Same, for the consecutive-restart cap.
+_INSTALL_CHURN_REPORTED=""
+# Set only once the matching degraded record is verified written, so a failed write
+# is tried again on the next pass while the report line above still appears once.
+_INSTALL_STALL_NOTICED=""
+_INSTALL_CHURN_NOTICED=""
 
 # Fixed, internal, non-negotiable (review finding: an env-supplied limit can
 # be forged or inherited from an unrelated process). Tagged with this exact
@@ -831,9 +843,58 @@ _install_restart_count() {
 }
 
 _install_restart_count_reset() {
+  if [ -n "$_INSTALL_CLEAR_PENDING" ] && [ "$SECONDS" -ge "$_INSTALL_NOTICE_RETRY_AT" ]; then
+    _install_notice_clear
+  fi
   [ -z "${AGMSG_WATCH_RESTART_COUNT:-}" ] && [ -z "${AGMSG_WATCH_RESTART_CHAIN:-}" ] && return 0
   unset AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+  # A run of restarts just ended: any "keeps changing" notice from it is over.
+  _install_notice_clear
 }
+
+# Degraded notice for an install that is not settling (shown by doctor, status
+# and the session-start hook). Keyed on the pid, which an exec keeps, so the
+# image that clears it is the one that set it.
+# A write or removal that did not verifiably happen (the helper returns non-zero) is
+# tried again, but not on every poll: no sooner than _INSTALL_NOTICE_RETRY seconds
+# after the last failure. Nothing here ever stops the watcher.
+_INSTALL_NOTICE_RETRY=10
+_INSTALL_NOTICE_RETRY_AT=0
+_INSTALL_CLEAR_PENDING=""
+# Returns 0 only when the record is verified written; 1 when it was not (or when it
+# is too soon to try again), so a caller records "written" only on 0.
+_install_notice_set() {   # <reason> <recovery>
+  [ "$SECONDS" -ge "$_INSTALL_NOTICE_RETRY_AT" ] || return 1
+  down_notice_set "watch-install.$$" degraded "$1" "$2" && return 0
+  _INSTALL_NOTICE_RETRY_AT=$((SECONDS + _INSTALL_NOTICE_RETRY))
+  return 1
+}
+# Removes the record; if that fails the removal stays pending and is retried from
+# the clean-cycle hook below until it works.
+_install_notice_clear() {
+  if down_notice_clear "watch-install.$$"; then
+    _INSTALL_CLEAR_PENDING=""
+  else
+    _INSTALL_CLEAR_PENDING=1
+    _INSTALL_NOTICE_RETRY_AT=$((SECONDS + _INSTALL_NOTICE_RETRY))
+  fi
+  return 0
+}
+
+# Past the consecutive-restart cap a restart is still allowed, but only once this
+# process image has lived this long: an install that never stops looking changed
+# (a VERSION stamped in the future, a clock that stepped back) then costs one
+# restart a minute instead of a tight exec loop, and delivery goes on between them.
+# Lower-only, like the install grace above: the environment can shorten it (tests),
+# never lengthen it or remove it.
+_WATCH_INSTALL_RESTART_MIN_AGE="${AGMSG_WATCH_INSTALL_RESTART_MIN_AGE:-60}"
+case "$_WATCH_INSTALL_RESTART_MIN_AGE" in
+  [1-9]|[1-5][0-9]|60) ;;
+  *) _WATCH_INSTALL_RESTART_MIN_AGE=60 ;;
+esac
+# Set just before the exec of a restart that is past the cap: the record that says
+# the install is not settling must survive the hand-over to the next image.
+_INSTALL_KEEP_NOTICE=""
 
 # Restart on the new code in place of exiting (#684 follow-up). `exec` replaces
 # this process image without forking, so there is never a moment with two
@@ -871,24 +932,32 @@ _install_restart_count_reset() {
 # message delivery, the sleep -- to run exactly as it would have if nothing
 # had changed. Delivery keeps working while an install is still in flight;
 # only once AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT seconds have passed
-# without ever becoming ready does this fall back to the ORIGINAL, unchanged
-# exit -- a still-changing-past-the-timeout or genuinely broken install still
-# produces the same clear stop it always has, rather than an indefinite wait.
+# without ever becoming ready does this say so (once, plus a degraded record) --
+# and it still keeps delivering with the code it has and re-asks every cycle, so
+# the restart onto the new code happens as soon as the install is complete and
+# watch.sh is executable. Nothing is exec'd before that.
 #
 # A negative elapsed reading (round 5: only possible if the system clock was
 # moved backward mid-wait, since $SECONDS is wall-clock-based, not monotonic
 # -- confirmed against bash's own manual) is treated the same as "timeout
 # elapsed", not as "keep waiting": an elapsed time that cannot be trusted is
-# exactly the case the visible exit exists for, the same reasoning as an
+# exactly the case the report exists for, the same reasoning as an
 # install that is taking implausibly long.
 _handle_install_changed() {
   local new_watch="$SCRIPT_DIR/watch.sh" restarts elapsed
 
   if _install_ready; then
     _INSTALL_INCOMPLETE_SINCE=""
+    if [ -n "$_INSTALL_STALL_REPORTED$_INSTALL_STALL_NOTICED" ]; then
+      _INSTALL_STALL_REPORTED=""
+      _INSTALL_STALL_NOTICED=""
+      _install_notice_clear
+    fi
     restarts="$(_install_restart_count)"
-    if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+    if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ] || [ "$SECONDS" -ge "$_WATCH_INSTALL_RESTART_MIN_AGE" ]; then
       watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
+      # A restart past the cap keeps the "not settling" record across the exec.
+      [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ] || _INSTALL_KEEP_NOTICE=1
       cleanup
       AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
       AGMSG_WATCH_RESTART_CHAIN="$_WATCH_INSTALL_RESTART_CHAIN"
@@ -906,8 +975,26 @@ _handle_install_changed() {
       watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
       exit 1
     fi
-    watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery.$(_agmsg_watch_agmsgd_note)"
-    exit 0
+    # Too many restarts in a row, and this image is young: keep delivering with the
+    # code it has and try again later (at most one restart a minute). Said once, in
+    # the image that reaches the cap.
+    if [ "$restarts" -ge "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+      # The line only when the cap is first reached, and once per image.
+      if [ -z "$_INSTALL_CHURN_REPORTED" ]; then
+        _INSTALL_CHURN_REPORTED=1
+        if [ "$restarts" -eq "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+          watch_report "the agmsg installation kept changing across $restarts restart(s) in a row. This watcher keeps delivering with the code it has and will try to restart onto the new code again, at most once a minute. If it keeps happening, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+        fi
+      fi
+      # The record in every image that is still past the cap (an image that
+      # restarted after the cap starts here again); retried until it is written.
+      if [ -z "$_INSTALL_CHURN_NOTICED" ]; then
+        if _install_notice_set "the installation kept changing across $restarts restarts in a row; the inbox watcher keeps delivering with older code and retries a restart at most once a minute" "restart this session or run /agmsg actas <name> if it does not settle"; then
+          _INSTALL_CHURN_NOTICED=1
+        fi
+      fi
+    fi
+    return 0
   fi
 
   if [ -z "$_INSTALL_INCOMPLETE_SINCE" ]; then
@@ -919,8 +1006,20 @@ _handle_install_changed() {
     return 0
   fi
 
-  watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery.$(_agmsg_watch_agmsgd_note)"
-  exit 0
+  # Still not ready after the grace: keep delivering with the code it has (it works
+  # for everything it does today) and keep asking every cycle, so the restart onto
+  # the new code happens the moment the install is complete and watch.sh is
+  # runnable. Said once. Nothing is exec'd until it is ready.
+  if [ -z "$_INSTALL_STALL_REPORTED" ]; then
+    _INSTALL_STALL_REPORTED=1
+    watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. It keeps delivering, and restarts onto the new code once the install is complete and watch.sh is runnable. If that does not happen, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+  fi
+  if [ -z "$_INSTALL_STALL_NOTICED" ]; then
+    if _install_notice_set "the installation was updated but the new watch.sh is not runnable or the install did not finish; the inbox watcher keeps delivering with older code" "repair the install (re-run the installer), then it restarts by itself; or restart this session / run /agmsg actas <name>"; then
+      _INSTALL_STALL_NOTICED=1
+    fi
+  fi
+  return 0
 }
 
 # Resolve subscription set.
