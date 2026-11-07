@@ -773,5 +773,7 @@ test('a cached pid that cannot be checked is unknown: the seat is degraded, not 
   assert.equal(f.calls.sets[0].st, 'degraded');
   assert.match(f.calls.sets[0].reason, /session_pid_unreadable/);
   assert.equal(f.calls.clears.length, clearsBefore);
-  assert.notEqual(f.db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'session_ended');
+  const seat = f.channel.seats().seats[0];
+  assert.notEqual(seat.reason, 'session_ended');
+  assert.equal(seat.state, 'unaddressable');
 });
