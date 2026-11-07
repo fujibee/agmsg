@@ -5,6 +5,7 @@
 # run the real install.sh / uninstall.sh against a throwaway HOME.
 
 load test_helper  # for refute
+load state_root_reap
 
 setup() {
   export FAKE_HOME="$(mktemp -d)"
@@ -15,54 +16,14 @@ setup() {
   export AGMSG_AGENT_PID=""
 }
 
-# Background processes this test started, recorded as "pid|start time". Teardown
-# signals one only while its pid still has that start time, so a pid that was
-# reaped and then reused by something else is never touched.
-TEST_BG=()
-track_bg() {   # <pid>
-  TEST_BG+=("$1|$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)")
-}
-
-# "pid|start time" of <pid> and of everything below it, found while <pid> is
-# still the verified owner.
-bg_family() {   # <pid>
-  local c
-  printf '%s|%s\n' "$1" "$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)"
-  for c in $(pgrep -P "$1" 2>/dev/null); do bg_family "$c"; done
-}
-
-# Ends the process in <record> if (and only if) it is still the recorded one:
-# a polite wait, TERM, then KILL, each bounded.
-bg_reap() {   # <pid|start time>
-  local pid="${1%%|*}" started="${1#*|}" now i
-  [ -n "$started" ] || return 0
-  now="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"
-  [ "$now" = "$started" ] || return 0
-  for ((i = 0; i < 10; i++)); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
-  kill "$pid" 2>/dev/null || true
-  for ((i = 0; i < 15; i++)); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
-  now="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"
-  if [ "$now" = "$started" ]; then kill -KILL "$pid" 2>/dev/null || true; fi
-  return 0
-}
-
 teardown() {
   # A test that pauses an update at the writer pid-publish gate or holds a lock
   # must never leave either behind when an assertion fails first: release the
   # gate, then end each background process the test started and what it started
-  # in turn (lock helpers), verified by pid AND start time, before the fixture
-  # is removed.
-  local rec fam sub
+  # (tests/state_root_reap.bash; every signal is preceded by a pid + start time
+  # check) before the fixture is removed.
   if [ -n "${LEGACY_GATE:-}" ]; then touch "$LEGACY_GATE.release" 2>/dev/null || true; fi
-  for rec in ${TEST_BG[@]+"${TEST_BG[@]}"}; do
-    [ "${rec#*|}" != "" ] || continue
-    fam="$(bg_family "${rec%%|*}")"
-    bg_reap "$rec"
-    while IFS= read -r sub; do
-      [ -n "$sub" ] && bg_reap "$sub"
-    done <<< "$fam"
-    wait "${rec%%|*}" 2>/dev/null || true
-  done
+  bg_reap_all
   [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] && command rm -rf "$FAKE_HOME"
 }
 
@@ -543,4 +504,91 @@ EOS
   wait "$updater"
   run sqlite3 -cmd '.timeout 5000' "$SK/run/install-op.lock.db" "BEGIN EXCLUSIVE; COMMIT;"
   [ "$status" -eq 0 ]
+}
+
+# --- the teardown's process handling, with every command stubbed: nothing here
+# --- touches a real process.
+
+reap_stubs() {
+  KILLS="$BATS_TEST_TMPDIR/kills"
+  : > "$KILLS"
+  sleep() { :; }
+  # alive pids: ALIVE_<pid>=<start time>; PS_CALLS_<pid> counts lookups
+  ps() {
+    local pid="$2" var="ALIVE_$2"
+    printf '%s\n' "${!var:-}"
+  }
+  kill() {
+    if [ "$1" = "-0" ]; then
+      local var="ALIVE_$2"
+      [ -n "${!var:-}" ]
+      return
+    fi
+    printf '%s %s\n' "$1" "$2" >> "$KILLS"
+    local var="ALIVE_$2"
+    # a TERM ends the process in the model
+    [ "$1" != "-TERM" ] || unset "$var"
+  }
+  # only 4242 has children
+  pgrep() { if [ "$1" = "-P" ] && [ "$2" = "4242" ]; then printf '%s\n' ${KIDS_OF_4242:-}; fi; }
+}
+
+@test "teardown: a reused parent pid is skipped, and a family is never collected below it" {
+  reap_stubs
+  ALIVE_4242="new-start"
+  ALIVE_4243="new-child-start"
+  KIDS_OF_4242="4243"
+  bg_reap_family "4242|old-start"
+  [ ! -s "$KILLS" ]
+}
+
+@test "teardown: a pid that is reused during the polite wait gets no TERM and no KILL" {
+  reap_stubs
+  ALIVE_4242="old-start"
+  # the first identity checks see the old process; after that the pid is someone else's
+  # (the counter is a file: ps runs inside command substitutions)
+  : > "$BATS_TEST_TMPDIR/ps-count"
+  ps() {
+    printf x >> "$BATS_TEST_TMPDIR/ps-count"
+    if [ "$(wc -c < "$BATS_TEST_TMPDIR/ps-count")" -le 3 ]; then printf 'old-start\n'; else printf 'other-start\n'; fi
+  }
+  kill() { if [ "$1" = "-0" ]; then return 0; fi; printf '%s %s\n' "$1" "$2" >> "$KILLS"; }
+  bg_reap "4242|old-start"
+  [ ! -s "$KILLS" ]
+}
+
+@test "teardown: the verified owner and its child get TERM, nothing else, and nothing is killed twice" {
+  reap_stubs
+  ALIVE_4242="old-start"
+  ALIVE_4243="child-start"
+  KIDS_OF_4242="4243"
+  bg_reap_family "4242|old-start"
+  [ "$(sort "$KILLS" | tr '\n' ',')" = "-TERM 4242,-TERM 4243," ]
+}
+
+@test "teardown: a process that ignores TERM is ended with KILL after a bounded wait" {
+  reap_stubs
+  ALIVE_4242="old-start"
+  kill() {
+    if [ "$1" = "-0" ]; then return 0; fi
+    printf '%s %s\n' "$1" "$2" >> "$KILLS"
+    # TERM is ignored; KILL ends it
+    [ "$1" != "-KILL" ] || unset ALIVE_4242
+  }
+  bg_reap "4242|old-start"
+  [ "$(tr '\n' ',' < "$KILLS")" = "-TERM 4242,-KILL 4242," ]
+}
+
+@test "teardown: a pid reused after the last wait check and before TERM gets no signal" {
+  reap_stubs
+  # eleven identity checks see the old process (ten polls and the final look); the
+  # one made right before TERM sees someone else
+  : > "$BATS_TEST_TMPDIR/ps-count"
+  ps() {
+    printf x >> "$BATS_TEST_TMPDIR/ps-count"
+    if [ "$(wc -c < "$BATS_TEST_TMPDIR/ps-count")" -le 11 ]; then printf 'old-start\n'; else printf 'other-start\n'; fi
+  }
+  kill() { if [ "$1" = "-0" ]; then return 0; fi; printf '%s %s\n' "$1" "$2" >> "$KILLS"; }
+  bg_reap "4242|old-start"
+  [ ! -s "$KILLS" ]
 }
