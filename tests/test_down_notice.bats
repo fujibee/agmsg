@@ -59,6 +59,63 @@ teardown() { teardown_test_env; }
   [ "$output" = 1 ]
   run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c2.json') AS TEXT), '\$.component');"
   [ "$output" = c2 ]
+  # The quote, the lone backslash AND the control characters are all
+  # JSON-escaped, not rewritten into other characters -- sqlite's own JSON
+  # decoder recovers the exact original text, newline/tab included.
+  run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c2.json') AS TEXT), '\$.reason');"
+  [ "$output" = $'two\nlines\tand "quotes" and \\ slash' ]
+}
+
+@test "set -> list/print round trip preserves space, apostrophe, backslash and double quote exactly (down-notice.sh escaping fix)" {
+  local reason
+  reason=$'a line with a space, an apostrophe (it'"'"'s), a "quote" and a \\backslash'
+  down_notice_set c3 down "$reason" "recover"
+  run sqlite_mem "SELECT json_valid(CAST(readfile('$DIR/c3.json') AS TEXT));"
+  [ "$output" = 1 ]
+  run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c3.json') AS TEXT), '\$.reason');"
+  [ "$output" = "$reason" ]
+  run down_notice_list
+  local field
+  field="$(printf '%s\n' "$output" | awk -F'\t' '{print $4}')"
+  [ "$field" = "$reason" ]
+}
+
+@test "a control character in free text is JSON-escaped and kept (not flattened to a space), but down_notice_list shows its literal escape text, not a raw control byte" {
+  down_notice_set c3b down $'a\tb\nc' "recover"
+  run sqlite_mem "SELECT json_valid(CAST(readfile('$DIR/c3b.json') AS TEXT));"
+  [ "$output" = 1 ]
+  # The RECORD holds the real control characters (sqlite's own JSON decoder,
+  # unescaping \t and \n, recovers the raw bytes) --
+  run sqlite_mem "SELECT json_extract(CAST(readfile('$DIR/c3b.json') AS TEXT), '\$.reason');"
+  [ "$output" = $'a\tb\nc' ]
+  # -- but down_notice_list is one-record-per-line TSV, so ITS OWN decoder
+  # leaves \t/\n as that literal two-character escape text rather than
+  # turning them back into a real tab/newline, which would break the
+  # framing. An install path (or any other free text) containing a literal
+  # control character is accordingly not a supported case for an
+  # executable saved recovery command -- nothing refuses or fails over it.
+  run down_notice_list
+  local field
+  field="$(printf '%s\n' "$output" | awk -F'\t' '{print $4}')"
+  [ "$field" = 'a\tb\nc' ]
+}
+
+@test "set -> list persists a single-quote-escaped recovery command for an apostrophe-containing path, executable as-is (down-notice.sh escaping fix)" {
+  local side path shq recovery
+  side="$BATS_TEST_TMPDIR/dn-test-side's install"
+  path="$side/scripts/agmsg"
+  shq="'$(printf '%s' "$path" | sed "s/'/'\\\\''/g")'"
+  recovery="$shq daemon start"
+  down_notice_set c4 down "stopped" "$recovery"
+  run down_notice_list
+  local decoded
+  decoded="$(printf '%s\n' "$output" | awk -F'\t' '{print $5}')"
+  [ "$decoded" = "$recovery" ]
+  mkdir -p "$side/scripts"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> %q\n' "$side/argv-log" > "$path"
+  chmod +x "$path"
+  eval "$decoded"
+  [ "$(cat "$side/argv-log")" = "2:daemon start" ]
 }
 
 @test "an invalid component or state is refused with status 2 and writes nothing" {
@@ -272,22 +329,82 @@ teardown() { teardown_test_env; }
 
 # Run on the system bash too: bash 3.2 differs from bash 5 in replacement
 # quoting and in how it reads a byte above 0x7f.
-@test "free text keeps a quoted recovery command intact (system bash and this bash)" {
+@test "free text JSON-escapes a quoted recovery command rather than rewriting it (system bash and this bash)" {
   local sh
   for sh in /bin/bash bash; do
     run "$sh" -c '. "$1"; _down_notice_clean "bash \"/tmp/a b/tool.sh\" restart"' _ "$SCRIPTS/lib/down-notice.sh"
-    [ "$output" = "bash '/tmp/a b/tool.sh' restart" ]
+    [ "$output" = 'bash \"/tmp/a b/tool.sh\" restart' ]
   done
 }
 
-@test "every control character in free text becomes a space, so the record is valid JSON" {
+@test "_down_notice_clean doubles an embedded backslash exactly (not silently halved by the replacement side of a parameter expansion)" {
+  local sh
+  for sh in /bin/bash bash; do
+    run "$sh" -c '. "$1"; _down_notice_clean "a\\b"' _ "$SCRIPTS/lib/down-notice.sh"
+    [ "$output" = 'a\\b' ]
+  done
+}
+
+@test "every control character in free text is \\u00XX-escaped, so the record is valid JSON and the raw byte round-trips" {
   local sh
   for sh in /bin/bash bash; do
     "$sh" -c '. "$1"; down_notice_set esc degraded $'"'"'colored\033[31m error\bx\001y'"'"' "agmsg doctor"' _ "$SCRIPTS/lib/down-notice.sh"
     run sqlite_mem "SELECT json_valid(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT));"
     [ "$output" = 1 ]
-    run sqlite_mem "SELECT json_extract(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT), '\$.reason');"
-    [ "$output" = "colored [31m error x y" ]
+    # Not sqlite3's own CLI output for the control-character byte check: the
+    # sqlite3 binary renders control characters as ^X caret notation in its
+    # own query output, which looks deceptively similar but is NOT the raw
+    # byte -- python's json module gives the actual decoded byte.
+    run python3 -I -c "
+import json
+with open('$TEST_SKILL_DIR/run/down/esc.json') as f:
+    d = json.load(f)
+print('MATCH' if d['reason'] == 'colored\x1b[31m error\bx\x01y' else repr(d['reason']))
+"
+    [ "$output" = MATCH ]
+  done
+}
+
+@test "every non-NUL ASCII control code (1-31, 127) round-trips through down_notice_set/list: valid JSON, exact decoded byte, no raw control byte in list output" {
+  # NUL (0x00) is excluded: bash cannot hold it in a variable at all, so there
+  # is nothing this helper's own text path could do differently for it -- a
+  # representational limit of the shell, not something to pretend to test.
+  local code
+  for code in $(seq 1 31) 127; do
+    local ch
+    # $() strips trailing newlines, which would silently drop code 10 (and
+    # only code 10) entirely -- append a sentinel byte and strip it back off,
+    # rather than lose the one byte this whole test exists to check.
+    ch="$(python3 -I -c "import sys; sys.stdout.buffer.write(bytes([$code]) + b'X')")"
+    ch="${ch%X}"
+    down_notice_set "cc$code" down "a${ch}b" "r"
+    local f="$DIR/cc$code.json"
+    run python3 -I -c "
+import json
+with open('$f', 'rb') as fh:
+    raw = fh.read()
+json.loads(raw)  # raises if invalid
+d = json.loads(raw)
+print('MATCH' if d['reason'] == 'a' + chr($code) + 'b' else repr(d['reason']))
+"
+    [ "$output" = MATCH ] || { echo "code=$code output=$output" >&2; false; }
+    run down_notice_list
+    # The TSV row must contain the ESCAPE TEXT (at least a literal backslash
+    # where the control char would be), never the raw control byte itself --
+    # list/print are one-record-per-line and a raw byte in 1-31/127 would
+    # either break that framing (newline/tab) or just not display.
+    printf '%s' "$output" > "$BATS_TEST_TMPDIR/cc-list-$code.raw"
+    run python3 -I -c "
+with open('$BATS_TEST_TMPDIR/cc-list-$code.raw', 'rb') as f:
+    raw = f.read()
+# The format's own field (tab) and record (newline) separators are not what
+# this checks for -- only a raw control byte WITHIN a field's content, which
+# a decoded escape sequence must never produce.
+fields = raw.split(b'\n')[0].split(b'\t')
+bad = [b for f in fields for b in f if b in range(1, 32) or b == 127]
+print('CLEAN' if not bad else repr(bad))
+"
+    [ "$output" = CLEAN ] || { echo "code=$code list=$output" >&2; false; }
   done
 }
 
