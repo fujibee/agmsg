@@ -285,14 +285,19 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   if [ "$start_rc" -eq 0 ]; then
     # A later run (another --update, or a manual `agmsg daemon start`)
     # may be recovering from an EARLIER failed attempt; this success
-    # clears that stale record. down-notice.sh resolves its own install
-    # root from where IT is sourced from, not from any variable -- so the
-    # copy that matters here is the one inside the install being updated
-    # ($skill), never this installer script's own location (can be a
-    # world away: an npx tarball, this dev repo, ...). Sourced in a
-    # subshell so its own include guard never suppresses a later, correct
-    # source of a different install's copy.
-    ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_clear agmsgd ) || true
+    # clears that stale record. The root that matters here is the one
+    # inside the install being updated ($skill), never this installer
+    # script's own location (can be a world away: an npx tarball, this
+    # dev repo, ...). AGMSG_DOWN_NOTICE_ROOT, not a re-source of a
+    # different copy of the file: #1928 added this script's own top-level
+    # `. "$SCRIPT_DIR/scripts/lib/down-notice.sh"`, which sets the file's
+    # include guard before this ever runs, so a later `. "$skill/..."`
+    # would be a silent no-op (the file's own top-level sourcing wins,
+    # and `_AGMSG_DOWN_NOTICE_ROOT` stays whatever IT resolved to) even
+    # from inside this subshell, which inherits that guard like any other
+    # variable. The override is the same convention this file already
+    # uses a few lines below for `state`.
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear agmsgd || true
   elif [ "$start_rc" -eq 3 ]; then
     : # guarded skip: desired/op_gen changed while waiting; nothing to report or record here
   else
@@ -314,9 +319,9 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     # not just read.
     local shq_agmsg
     shq_agmsg="'$(printf '%s' "$skill/scripts/agmsg" | sed "s/'/'\\\\''/g")'"
-    ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_set agmsgd down \
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_set agmsgd down \
       "agmsgd did not start after the update" \
-      "$shq_agmsg daemon start" ) || true
+      "$shq_agmsg daemon start" || true
   fi
   rm -f "$skill/run/agmsgd-updating"
 }
