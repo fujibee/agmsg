@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROLE_REMOVED_EXIT=75
+ROLE_REMOVAL_CONFIRMED=0
+normalize_launcher_exit_status() {
+  # Install this before startup probes too: an incidental dependency status
+  # must never impersonate a positive registration-removal result.
+  if [ "$1" -eq "$ROLE_REMOVED_EXIT" ] && [ "$ROLE_REMOVAL_CONFIRMED" != 1 ]; then exit 1; fi
+}
+exit_for_removed_role() {
+  ROLE_REMOVAL_CONFIRMED=1
+  exit "$ROLE_REMOVED_EXIT"
+}
+trap 'normalize_launcher_exit_status "$?"' EXIT
+
 # The launcher is detached from codex-monitor.sh and may outlive the shell that
 # invoked it. Never retain test-harness result/trace descriptors through the
 # dispatcher -> role child -> bridge process chain.
@@ -105,9 +118,12 @@ LIFETIME_PID="$PARENT_PID"
 HELD_LOCK_RESOURCE=""
 
 release_held_lock() {
+  local child_exit_status=$?
   rm -f "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
-  [ -n "$HELD_LOCK_RESOURCE" ] || return 0
-  agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$"
+  if [ -n "$HELD_LOCK_RESOURCE" ]; then
+    agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$" || true
+  fi
+  normalize_launcher_exit_status "$child_exit_status"
 }
 
 # Acquire <resource>, reclaiming it only from a provably dead owner. Returns 1
@@ -399,6 +415,58 @@ build_safety_state() {
   done <<< "$identity"
 }
 
+# Exit 75 is private to owned role children: positive registration-removal
+# proof, not a crash, give-up, signal, or failed observation. Consume it once
+# through wait on the exact direct child this dispatcher started. Job-table
+# membership includes stopped children, so an uncertain/live child is never
+# waited on synchronously or replaced. No PID probe authorizes a restart.
+owned_role_children=""
+forget_known_pair() {
+  local retired="$1" pair kept=""
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    [ "$pair" = "$retired" ] && continue
+    kept="${kept:+$kept$'\n'}$pair"
+  done <<< "$known_pairs"
+  known_pairs="$kept"
+}
+owned_role_child_completed() {
+  local wanted="$1" rows="$2" job_mark job_pid state rest
+  while read -r job_mark job_pid state rest; do
+    [ "$job_pid" = "$wanted" ] || continue
+    # C-locale Bash job state is an observation about our direct child,
+    # independent of PID reuse. Stopped/running/unrecognised rows stay pending.
+    case "$state" in Done|Exit|Killed*|Terminated*) return 0 ;; esac
+    return 1
+  done <<< "$rows"
+  return 1
+}
+reap_owned_role_children() {
+  local job_rows kept="" team name pid pair result
+  job_rows="$(LC_ALL=C jobs -l)"
+  while IFS="$TAB" read -r team name pid; do
+    [ -n "$pid" ] || continue
+    pair="$team$TAB$name"
+    if owned_role_child_completed "$pid" "$job_rows"; then
+      result=0
+      wait "$pid" 2>/dev/null || result=$?
+      if [ "$result" -eq "$ROLE_REMOVED_EXIT" ]; then forget_known_pair "$pair"; fi
+    else
+      kept="${kept:+$kept$'\n'}$pair$TAB$pid"
+    fi
+  done <<< "$owned_role_children"
+  owned_role_children="$kept"
+}
+
+owned_role_child_pending() {
+  local pair="$1" team name pid
+  while IFS="$TAB" read -r team name pid; do
+    [ -n "$pid" ] || continue
+    [ "$team$TAB$name" = "$pair" ] && return 0
+  done <<< "$owned_role_children"
+  return 1
+}
+
 # The role is claimed a moment after launch, so retry while the parent
 # (codex-monitor.sh) is alive. Never substitute the project's other identities
 # when this seat's own record is not available.
@@ -409,6 +477,7 @@ if [ -z "$ROLE_PAIR" ]; then
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
+    reap_owned_role_children
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
     seat_pairs=""
@@ -442,9 +511,16 @@ if [ -z "$ROLE_PAIR" ]; then
       [ -n "$child_team" ] || continue
       child_pair="$child_team"$'\t'"$child_name"
       pair_registered "$child_pair" "$known_pairs" && continue
+      # A request may have been temporarily unproven while its existing child
+      # stayed alive. Reuse that owned generation instead of starting a duplicate.
+      if owned_role_child_pending "$child_pair"; then
+        known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
+        continue
+      fi
       # Close bats' result fd when present; a detached child must not keep the
       # test harness pipe open after its test has completed.
       nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- 4>&- &
+      owned_role_children="${owned_role_children:+$owned_role_children$'\n'}$child_pair$TAB$!"
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
       poll_reset
     done <<< "$seat_pairs"
@@ -477,7 +553,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     identity_ready
     break
   fi
-  role_removed && { identity_ready; exit 0; }
+  role_removed && { identity_ready; exit_for_removed_role; }
   identity_pending "Codex identity discovery is unavailable; launcher is retrying"
   poll_sleep
 done
@@ -528,7 +604,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
   done <<< "$ids"
   if [ -n "$safe_ids" ]; then break; fi
-  role_removed && { identity_ready; exit 0; }
+  role_removed && { identity_ready; exit_for_removed_role; }
   identity_pending "Codex role has no matching thread record; launcher is retrying"
   poll_sleep
 done
@@ -537,7 +613,7 @@ ids="$safe_ids"
 SAFETY_STATE=""
 while _agmsg_pid_alive_local "$PARENT_PID"; do
   if build_safety_state "$ids"; then break; fi
-  role_removed && { identity_ready; exit 0; }
+  role_removed && { identity_ready; exit_for_removed_role; }
   identity_pending "Codex role record cannot be read; launcher is retrying"
   poll_sleep
 done
@@ -1020,7 +1096,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     if role_removed; then
       retire_recorded_bridge
       identity_ready
-      exit 0
+      exit_for_removed_role
     fi
     # Failed or empty observation cannot retire a live bridge or its owner.
     poll_sleep

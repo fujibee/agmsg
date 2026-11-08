@@ -757,6 +757,7 @@ EOF
   # test measures deregistration, not the intentionally blocking test adapter.
   export MOCK_BRIDGE_SLEEP=2
   sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
   local dispatcher=$!
   [ "$(wait_for_child_count 1)" -eq 1 ]
@@ -765,13 +766,22 @@ EOF
   run bash "$SCRIPTS/leave.sh" team alice
   [ "$status" -eq 0 ]
   [ "$(wait_for_child_count 0)" -eq 0 ]
+  local capture_before_rejoin=0
+  [ ! -f "$CAPTURE" ] || capture_before_rejoin="$(grep -c . "$CAPTURE")"
 
   # The dispatcher must have forgotten the pair. Otherwise known_pairs still
   # lists it, the re-spawn is suppressed, and the role silently never gets a
   # bridge again for the rest of the app-server's life.
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
-  [ "$(wait_for_child_count 1)" -eq 1 ]
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  local i captures=0
+  for i in {1..100}; do
+    [ ! -f "$CAPTURE" ] || captures="$(grep -c . "$CAPTURE")"
+    [ "$captures" -gt "$capture_before_rejoin" ] && break
+    sleep 0.1
+  done
+  [ "$captures" -gt "$capture_before_rejoin" ]
 
   agmsg_stop_pid "$dispatcher"
   agmsg_stop_pid "$parent"
@@ -1483,4 +1493,95 @@ identity_ready
 SH
   [ "$status" -eq 0 ]
   [ -f "$TEST_SKILL_DIR/identity-body-executed" ]
+}
+
+@test "launcher: a missed deregistration gap re-arms only after its owned child retirement" {
+  put_record team alice thread-alice "$PROJ" codex
+  # A custom bridge command is waited synchronously by its role launcher. Keep
+  # the mock lifetime below wait_for_child_count's 10-second ceiling so this
+  # test measures deregistration, not the intentionally blocking test adapter.
+  export MOCK_BRIDGE_SLEEP=30
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local dispatcher=$!
+  [ "$(wait_for_child_count 1)" -eq 1 ]
+  kill -STOP "$dispatcher"
+
+  # Deregistering the role retires its child through the existing re-exec path.
+  run bash "$SCRIPTS/leave.sh" team alice
+  local leave_status="$status"
+  local retired_count="$(wait_for_child_count 0)"
+  local capture_before_rejoin=0
+  [ ! -f "$CAPTURE" ] || capture_before_rejoin="$(grep -c . "$CAPTURE")"
+
+  # The dispatcher must have forgotten the pair. Otherwise known_pairs still
+  # lists it, the re-spawn is suppressed, and the role silently never gets a
+  # bridge again for the rest of the app-server's life.
+  run bash "$SCRIPTS/join.sh" team alice codex "$PROJ"
+  local join_status="$status"
+  run put_record team alice thread-alice "$PROJ" codex
+  local record_status="$status"
+  kill -CONT "$dispatcher"
+  [ "$leave_status" -eq 0 ]
+  [ "$retired_count" -eq 0 ]
+  [ "$join_status" -eq 0 ]
+  [ "$record_status" -eq 0 ]
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  local i captures=0
+  for i in {1..100}; do
+    [ ! -f "$CAPTURE" ] || captures="$(grep -c . "$CAPTURE")"
+    [ "$captures" -eq "$((capture_before_rejoin + 1))" ] && break
+    sleep 0.1
+  done
+  [ "$captures" -gt "$capture_before_rejoin" ]
+
+  agmsg_stop_pid "$dispatcher"
+  agmsg_stop_pid "$parent"
+}
+
+
+@test "launcher: only confirmed removal can emit the private retirement exit status" {
+  local probe="$TEST_SKILL_DIR/exit-status-probe.sh"
+  sed -n '/^normalize_launcher_exit_status() {/,/^}/p' "$LAUNCHER" > "$probe"
+  sed -n '/^release_held_lock() {/,/^}/p' "$LAUNCHER" >> "$probe"
+  local confirmed
+  for confirmed in 0 1; do
+    run bash -s -- "$probe" "$TEST_SKILL_DIR" "$confirmed" <<'SH'
+set -e
+source "$1"
+ROLE_REMOVED_EXIT=75
+IDENTITY_CACHE_MARKER="$2/probe-marker"
+HELD_LOCK_RESOURCE=""
+ROLE_REMOVAL_CONFIRMED="$3"
+trap release_held_lock EXIT
+exit 75
+SH
+    if [ "$confirmed" -eq 1 ]; then [ "$status" -eq 75 ]; else [ "$status" -eq 1 ]; fi
+  done
+}
+
+@test "launcher: running stopped foreign and unknown child jobs are not completion evidence" {
+  local probe="$TEST_SKILL_DIR/job-state-probe.sh"
+  sed -n '/^owned_role_child_completed() {/,/^}/p' "$LAUNCHER" > "$probe"
+  run bash -s -- "$probe" <<'SH'
+set -e
+source "$1"
+owned_role_child_completed 111 '[1]+ 111 Done launcher'
+owned_role_child_completed 111 '[1]+ 111 Exit 75 launcher'
+for state in Running Stopped Unknown; do
+  if owned_role_child_completed 111 "[1]+ 111 $state launcher"; then exit 11; fi
+done
+if owned_role_child_completed 111 '[1]+ 222 Exit 75 launcher'; then exit 12; fi
+SH
+  [ "$status" -eq 0 ]
+}
+
+@test "launcher: an incidental startup exit 75 cannot impersonate removal" {
+  local fake="$TEST_SKILL_DIR/fail-mkdir"
+  mkdir "$fake"
+  printf '%s\n' '#!/bin/bash' 'exit 75' > "$fake/mkdir"
+  chmod +x "$fake/mkdir"
+  run env PATH="$fake:$PATH" bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$$" $'team\talice'
+  [ "$status" -eq 1 ]
 }
