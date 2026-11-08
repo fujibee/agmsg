@@ -61,6 +61,167 @@ agmsg_codex_stale_writable_paths() {
   done
 }
 
+# agmsg_codex_roots_scan <config.toml>
+#
+# The one reader/editor of a Codex config.toml's writable_roots that install
+# (update) and uninstall share. It reads the whole file by the TOML string rules
+# (basic, literal and multi-line strings, comments, table headers), so only the
+# real writable_roots array is looked at or edited: the same text inside a
+# multi-line value elsewhere stays byte for byte. An element is compared by its
+# decoded value, in whichever string spelling it is written. The result goes to
+# stdout; the exit status says what changed: 10 nothing, 11 elements removed,
+# 12 roots added, 13 both. The caller decides about backups and replacing.
+#
+# Environment: AGMSG_STALE_ROOTS (newline separated, exact paths to drop),
+# AGMSG_STALE_PREFIXES (a path, or anything under it, is dropped),
+# AGMSG_WANT_ROOTS (paths to add to [sandbox_workspace_write]'s array, which is
+# created with the table when missing; arrays of other tables are never added
+# to), AGMSG_DROP_EMPTY=1 (uninstall: an array left without elements is removed,
+# and the sandbox table with it when nothing else is in it).
+agmsg_codex_roots_scan() {
+  awk '
+    # position just after the closing delimiter of a multi-line string, or 0
+    function msend(line, from, d,   k, ch) {
+      for (k = from; k <= length(line); k++) {
+        ch = substr(line, k, 1)
+        if (d == "\"\"\"" && ch == "\\") { k++; continue }
+        if (substr(line, k, 3) == d) return k + 3
+      }
+      return 0
+    }
+    # the value of a basic string body: \\ \" \t \n \r and \uXXXX for ASCII
+    function dec(b,   o, k, ch, nx, h) {
+      o = ""
+      for (k = 1; k <= length(b); k++) {
+        ch = substr(b, k, 1)
+        if (ch != "\\") { o = o ch; continue }
+        nx = substr(b, ++k, 1)
+        if (nx == "t") o = o "\t"
+        else if (nx == "n") o = o "\n"
+        else if (nx == "r") o = o "\r"
+        else if (nx == "u") {
+          h = substr(b, k + 1, 4); k += 4
+          if (h ~ /^00[0-7][0-9A-Fa-f]$/) o = o sprintf("%c", hexd(substr(h, 3, 1)) * 16 + hexd(substr(h, 4, 1)))
+          else o = o "\\u" h
+        }
+        else o = o nx
+      }
+      return o
+    }
+    function hexd(x) { return index("0123456789abcdef", tolower(x)) - 1 }
+    function isstale(v,   k) {
+      if (v in stale) return 1
+      for (k = 1; k <= np; k++) if (v == pre[k] || index(v, pre[k] "/") == 1) return 1
+      return 0
+    }
+    BEGIN {
+      n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n")
+      for (i = 1; i <= n; i++) if (st[i] != "") stale[st[i]] = 1
+      n = split(ENVIRON["AGMSG_STALE_PREFIXES"], sp, "\n")
+      for (i = 1; i <= n; i++) if (sp[i] != "") pre[++np] = sp[i]
+      m = split(ENVIRON["AGMSG_WANT_ROOTS"], wa, "\n")
+      for (i = 1; i <= m; i++) if (wa[i] != "") want[++nw] = wa[i]
+    }
+    {
+      gone = 0
+      ed = 0
+      start = 1
+      # a table header outside any string or array
+      if (!inr && ms == "" && $0 ~ /^[ \t]*\[\[?[^],=\[]+\]\]?[ \t\r]*(#.*)?$/) {
+        intable = ($0 ~ /^[ \t]*\[[ \t]*sandbox_workspace_write[ \t]*\][ \t\r]*(#.*)?$/)
+        if (intable && !basehdr) basehdr = nl + 1
+      }
+      if (inr) ed = 1
+      else if (ms == "" && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) {
+        inr = 1; ed = 1; start = RLENGTH + 1
+        narr++; arrbase[narr] = intable; arrline[narr] = nl + 1; arrpos[narr] = start - 1
+      }
+      len = length($0); out = substr($0, 1, start - 1); c = start
+      while (c <= len) {
+        if (ms != "") {
+          p = msend($0, c, ms)
+          if (p == 0) { out = out substr($0, c); break }
+          out = out substr($0, c, p - c); c = p; ms = ""
+          continue
+        }
+        ch = substr($0, c, 1)
+        if (ch == "\"" || ch == "\x27") {
+          if (substr($0, c, 3) == ch ch ch) {
+            # a multi-line string; when it closes on this line it is one element too
+            p = msend($0, c + 3, ch ch ch)
+            if (p == 0) { ms = ch ch ch; out = out substr($0, c); break }
+            tok = substr($0, c, p - c)
+            body = substr(tok, 4, length(tok) - 6)
+            val = (ch == "\"") ? dec(body) : body
+            e = p - 1
+          } else {
+            # one whole string element; an escaped quote does not end a double-quoted one
+            e = c + 1
+            while (e <= len) {
+              ec = substr($0, e, 1)
+              if (ch == "\"" && ec == "\\") e++
+              else if (ec == ch) break
+              e++
+            }
+            tok = substr($0, c, e - c + 1)
+            body = substr(tok, 2, length(tok) - 2)
+            val = (ch == "\"") ? dec(body) : body
+          }
+          if (ed && isstale(val)) {
+            c = e + 1
+            if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
+            else if (substr($0, c) ~ /^[ \t]*\]/) sub(/[ \t]*,[ \t]*$/, "", out)   # the last one: no dangling comma
+            gone = 1; removed = 1; rem[narr]++
+            continue
+          }
+          if (ed) { present[narr SUBSEP val] = 1; kept[narr]++ }
+          out = out tok; c = e + 1
+        } else if (ch == "#") {
+          out = out substr($0, c); break
+        } else if (ch == "]" && ed) {
+          out = out substr($0, c); inr = 0; arrend[narr] = nl + 1; break
+        } else { out = out ch; c++ }
+      }
+      if (!(gone && out ~ /^[ \t]*$/)) L[++nl] = out
+    }
+    END {
+      # the array to add to: the one under [sandbox_workspace_write], and no other
+      # (a profile table is left alone); without one it is created
+      t = 0
+      for (i = 1; i <= narr; i++) if (arrbase[i]) { t = i; break }
+      for (i = 1; i <= nw; i++) if (!t || !((t SUBSEP want[i]) in present)) miss[++nm] = want[i]
+      if (nm > 0) {
+        added = 1
+        if (t > 0) {
+          ins = ""
+          for (j = 1; j <= nm; j++) ins = ins "\"" miss[j] "\", "
+          L[arrline[t]] = substr(L[arrline[t]], 1, arrpos[t]) ins substr(L[arrline[t]], arrpos[t] + 1)
+        } else {
+          ent = ""
+          for (j = 1; j <= nm; j++) ent = ent (j > 1 ? ", " : "") "\"" miss[j] "\""
+          if (basehdr) L[basehdr] = L[basehdr] "\nwritable_roots = [" ent "]"
+          else { L[++nl] = ""; L[++nl] = "[sandbox_workspace_write]"; L[++nl] = "writable_roots = [" ent "]" }
+        }
+      }
+      # uninstall: an array that held only this installs roots goes, and the
+      # sandbox table with it when nothing else is left in it
+      if (ENVIRON["AGMSG_DROP_EMPTY"] == "1") {
+        for (i = 1; i <= narr; i++)
+          if (rem[i] > 0 && kept[i] == 0 && arrend[i] > 0) {
+            for (k = arrline[i]; k <= arrend[i]; k++) del[k] = 1
+            if (arrbase[i]) dropped_base = 1
+          }
+        if (dropped_base && basehdr) {
+          for (k = basehdr + 1; k <= nl && (k in del); k++) ;
+          if (k > nl || L[k] ~ /^[ \t]*$/ || L[k] ~ /^[ \t]*\[/) del[basehdr] = 1
+        }
+      }
+      for (i = 1; i <= nl; i++) if (!(i in del)) print L[i]
+      exit 10 + (removed ? 1 : 0) + (added ? 2 : 0)
+    }
+  ' "$1"
+}
+
 # agmsg_codex_writable_roots_notice <skill_dir>
 #
 # Prints ONE line to stdout when a Codex config this install would write to

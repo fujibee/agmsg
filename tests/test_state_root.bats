@@ -290,6 +290,7 @@ EOF
 drop_stale_alone() {   # <config.toml> <stale path> [path to add]
   run env STALE_PATH="$2" bash -c '
     SKILL_DIR=/fixture/skill
+    . "$1/scripts/lib/codex-config.sh"
     eval "$(sed -n "/^_sync_codex_roots()/,/^}/p" "$1/install.sh")"
     agmsg_install_op_require() { return 0; }
     move_into_place() { mv "$1" "$2"; }
@@ -473,6 +474,38 @@ EOF
   [ "$(cd "$ST" && find . -mindepth 1 | sort | grep -vE 'install-op.lock.db|^\./run$' | wc -l | tr -d ' ')" -eq 0 ]
   # the entries carry the resolved spelling (/private/var for /var on macOS)
   ! grep -q '/\.agmsg/agmsg' "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "uninstall reads the config by the same TOML rules: a writable_roots example in a multi-line string is kept, and an install then uninstall restores the file byte for byte" {
+  mkdir -p "$FAKE_HOME/.codex"
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  cat > "$cfg" <<EOF
+developer_instructions = """
+Keep this note exactly: writable_roots = ["$SK/db"] was configured by hand.
+"""
+
+[sandbox_workspace_write]
+writable_roots = ["/unrelated/keep-me"]
+EOF
+  cp "$cfg" "$BATS_TEST_TMPDIR/original.toml"
+  inst
+  grep -qF "$ST" "$cfg" || grep -qF "install-op" "$cfg"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  cmp "$cfg" "$BATS_TEST_TMPDIR/original.toml"
+}
+
+@test "uninstall removes an array that held only this install's roots, and the sandbox table with it, and keeps a multi-line example" {
+  mkdir -p "$FAKE_HOME/.codex"
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  printf 'developer_instructions = """\nKeep: writable_roots = ["x"]\n"""\n' > "$cfg"
+  inst
+  grep -qxF '[sandbox_workspace_write]' "$cfg"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qxF 'Keep: writable_roots = ["x"]' "$cfg"
+  refute grep -q '^writable_roots' "$cfg"
+  refute grep -qxF '[sandbox_workspace_write]' "$cfg"
 }
 
 @test "uninstall --keep-data keeps the state and drops the backup copies" {
