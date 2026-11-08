@@ -3776,7 +3776,12 @@ export { collectInstallBaseline, installChangedAgainst };
 // else restarted it). An "already running" under the predecessor's own pid only
 // means it has not exited yet, so that attempt is retried. A start that fails --
 // the update is still copying files, say -- is just another attempt; `sync
-// start` itself refuses a team that is disconnected or owned by systemd. An
+// start` itself refuses a team that is disconnected or owned by systemd. While an
+// install or update holds the install lock (the SQLite lock in .install-op/) the
+// helper does not start anything: it polls the lock every two seconds, for at
+// most five minutes per attempt, and starts once, in the layout the update leaves.
+// The installer starts the engines it stopped itself after letting the lock go; a
+// start that finds one already running under another pid ends the helper. An
 // engine it starts too early stands down again and asks again. The attempts are
 // bounded: the waits add up to 1110 seconds (about 18.5 minutes), after which a
 // person has to run `remote.sh sync start`, as the stand-down event says.
@@ -3787,6 +3792,8 @@ const STAND_DOWN_RESTART_SCRIPT = [
   'old="$(cat "$root/run/remote-sync.$team.pid" 2>/dev/null)"',
   'for delay in "$@"; do',
   '  sleep "$delay"',
+  '  lock="$root/.install-op/lock.db"; held=0',
+  '  while [ "$held" -lt 150 ] && [ -f "$lock" ] && ! sqlite3 -cmd ".timeout 200" "$lock" "SELECT count(*) FROM sqlite_master;" >/dev/null 2>&1; do sleep 2; held=$((held + 1)); done',
   '  out="$(bash "$remote" sync start "$team" 2>&1)"; rc=$?',
   '  [ "$rc" = 0 ] || continue',
   '  case "$out" in',

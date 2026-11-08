@@ -32,6 +32,10 @@ AGENTS_DIR="$HOME/.agents"
 . "$SCRIPT_DIR/scripts/lib/install-manifest.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/agmsg-launcher.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/down-notice.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/update-command.sh"
 
 # Type registry — resolve each type's SKILL command template from its manifest
 # (scripts/drivers/types/<name>/template.md) instead of a hardcoded templates/ path. Read-only
@@ -282,6 +286,35 @@ agmsg_install_daemon_active() {   # <skill_dir>
   return 2
 }
 
+# 0 = the pidfile of this install names a live process that is this team's sync
+# engine (the same two conditions remote.sh's engine status asks: the command
+# line names remote-sync.mjs and ends with this team's arguments); 1 = no such
+# engine. An engine that stood down on its own when the update began (it sees the
+# completion record move) is already gone, and is not a failure to stop it.
+# Where the command line cannot be read (no ps), a live pid counts as the engine.
+agmsg_install_engine_alive() {   # <skill_dir> <team>
+  local pid command
+  pid="$(cat "$1/run/remote-sync.$2.pid" 2>/dev/null || true)"
+  pid="${pid%$'\r'}"
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  if agmsg_install_pid_gone "$pid"; then return 1; fi
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [ -n "$command" ] || return 0
+  case "$command" in
+    *"remote-sync.mjs"*" run --team $2") return 0 ;;
+  esac
+  return 1
+}
+
+# A state that stays where Codex watches is shown where a person already looks
+# (agmsg status, doctor, the start of a session), not only in this run's output.
+# The record is cleared once the state has moved.
+agmsg_install_state_notice() {   # <skill_dir> <reason>
+  AGMSG_DOWN_NOTICE_ROOT="$1" down_notice_set state degraded \
+    "the state of '${1##*/}' is still in $1, a directory Codex watches (not moved: $2)" \
+    "$(agmsg_update_command "$1") (the next update tries the move again)" || true
+}
+
 agmsg_install_move_state() {
   local skill="$1" teams="$2" root name part moved_any=false need=false team
   name="${skill##*/}"
@@ -296,11 +329,13 @@ agmsg_install_move_state() {
     linked="$(readlink "$skill/run" 2>/dev/null)"
     case "$linked" in /*/run) root="${linked%/run}" ;; esac
     agmsg_state_adopt "$skill" "$root" || true
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear state || true
     [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
     return 0
   fi
   if ! agmsg_state_preflight "$skill" "$root"; then
     echo "  ! state of '$name' is not moved; it keeps working in place (Codex rescans its skills on writes there)" >&2
+    agmsg_install_state_notice "$skill" "${AGMSG_STATE_REASON:-the target could not be prepared}"
     [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
     return 0
   fi
@@ -323,7 +358,8 @@ agmsg_install_move_state() {
     else
       while IFS= read -r team; do
         [ -n "$team" ] || continue
-        if bash "$skill/scripts/remote.sh" sync stop "$team" >/dev/null 2>&1; then
+        if bash "$skill/scripts/remote.sh" sync stop "$team" >/dev/null 2>&1 \
+            || ! agmsg_install_engine_alive "$skill" "$team"; then
           stopped="$stopped
 $team"
         else
@@ -336,6 +372,7 @@ $team"
       # shellcheck disable=SC2034  # read by agmsg_state_marker_write
       AGMSG_STATE_REASON="$stop_failed"
       echo "  ! state of '$name' is not moved: $stop_failed; it keeps working in place (Codex rescans its skills on writes there)" >&2
+      agmsg_install_state_notice "$skill" "$stop_failed"
       agmsg_install_restart_daemon "$skill"
       while IFS= read -r team; do
         [ -n "$team" ] || continue
@@ -354,6 +391,9 @@ $team"
   agmsg_state_link "$skill" "$root" && link_ok=true
   if [ "$link_ok" != true ]; then
     echo "  ! the state of '$name' was only partly moved; fix the lines above, then run the update again" >&2
+    agmsg_install_state_notice "$skill" "the move stopped part way"
+  else
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear state || true
   fi
   [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
   return 0
@@ -1465,20 +1505,6 @@ $_agmsg_running_team"
   agmsg_install_restart_guidance
   agmsg_install_daemon_hint "$SKILL_DIR"
   echo ""
-  # #963: a sync engine has no equivalent self-detection, so this update
-  # restarts one itself for every team the snapshot above found running.
-  if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
-    while IFS= read -r _agmsg_team; do
-      [ -n "$_agmsg_team" ] || continue
-      if ! agmsg_install_op_run_phase "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
-        echo "  ! could not restart the sync engine for '$_agmsg_team'; run:" >&2
-        echo "      bash $SKILL_DIR/scripts/remote.sh sync restart $_agmsg_team" >&2
-      fi
-    done <<< "$AGMSG_RUNNING_TEAMS"
-    unset _agmsg_team
-  else
-    echo "  ~ no sync engine was running before this update; nothing to restart"
-  fi
   echo ""
   echo "    'engine stale' after this is not proof a restart above failed on its"
   echo "    own -- check: remote.sh status <team> (#963, #954)."
@@ -1490,6 +1516,24 @@ $_agmsg_running_team"
   echo "    Check with 'delivery.sh status <type> <project>'. (#133)"
   echo ""
   agmsg_install_operation_finish || exit 1
+  # After the completion record is written and the lock is let go: an engine
+  # started earlier takes the old record as its baseline, sees the new one appear
+  # and stands down again a few seconds later. A stood-down engine's own restart
+  # helper waits for the install lock, so exactly one of the two starts it.
+  # #963: a sync engine has no equivalent self-detection, so this update
+  # restarts one itself for every team the snapshot above found running.
+  if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
+    while IFS= read -r _agmsg_team; do
+      [ -n "$_agmsg_team" ] || continue
+      if ! bash "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
+        echo "  ! could not restart the sync engine for '$_agmsg_team'; run:" >&2
+        echo "      bash $SKILL_DIR/scripts/remote.sh sync restart $_agmsg_team" >&2
+      fi
+    done <<< "$AGMSG_RUNNING_TEAMS"
+    unset _agmsg_team
+  else
+    echo "  ~ no sync engine was running before this update; nothing to restart"
+  fi
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""

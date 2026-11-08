@@ -5,7 +5,7 @@ import { EventEmitter, once } from "node:events";
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5604,6 +5604,56 @@ test("the restart helper retries a failed start, never takes the predecessor's o
   result = run();
   assert.equal(result.status, 1);
   assert.equal(await calls(), 5);
+});
+
+test("the restart helper does not start an engine while an install holds the install lock, then starts once (and not at all if the installer already did)", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-lock-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(join(root, "run"));
+  await mkdir(join(root, ".install-op"));
+  await writeFile(join(root, "run", "remote-sync.demo.pid"), "111\n");
+  const lockDb = join(root, ".install-op", "lock.db");
+  const remote = join(root, "remote.sh");
+  const log = join(root, "calls");
+  const holdLock = async () => {
+    // The installer's lock: BEGIN EXCLUSIVE kept open until the holder is told to let go.
+    const holder = spawn("sqlite3", [lockDb], { stdio: ["pipe", "ignore", "ignore"] });
+    holder.stdin.write(".timeout 5000\nBEGIN EXCLUSIVE;\nSELECT 1;\n");
+    for (let i = 0; i < 50; i++) {
+      const probe = spawnSync("sqlite3", ["-cmd", ".timeout 100", lockDb, "SELECT count(*) FROM sqlite_master;"], { encoding: "utf8" });
+      if (probe.status !== 0) return holder;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("the lock holder never took the lock");
+  };
+  const helper = (startOutput) => {
+    rmSync(log, { force: true });
+    writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${shellQuote(log)}\n${startOutput}\n`, { mode: 0o755 });
+    return spawn("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0]).map((a) => a === join(root, "remote.sh") ? remote : a),
+      { stdio: "ignore", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root } });
+  };
+  const callCount = () => { try { return readFileSync(log, "utf8").trim().split("\n").length; } catch { return 0; } };
+  const exited = (child) => new Promise((resolve) => child.on("exit", resolve));
+
+  // Lock held: nothing is started, however long the helper looks.
+  const holder = await holdLock();
+  const waiting = helper('echo "Sync engine started for demo (pid 2)."');
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  assert.equal(callCount(), 0, "no start while the install holds the lock");
+  // Lock let go: exactly one start, and the helper is done.
+  holder.kill();
+  assert.equal(await exited(waiting), 0);
+  assert.equal(callCount(), 1);
+
+  // The installer started the engine while the helper waited: the helper's start
+  // reports it running under another pid and ends, so no second engine is made.
+  const holder2 = await holdLock();
+  const second = helper('echo "Sync engine already running (pid 222)."');
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(callCount(), 0);
+  holder2.kill();
+  assert.equal(await exited(second), 0);
+  assert.equal(callCount(), 1);
 });
 
 test("a roster state file the driver set aside is reported in the engine log, not in the result", async (t) => {

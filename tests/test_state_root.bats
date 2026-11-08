@@ -738,22 +738,119 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -z "$(ls -A "$ST" 2>/dev/null)" ]
 }
 
-@test "a sync engine that cannot be stopped keeps the state where it is, visibly, and the engine is started again" {
-  inst
-  demote
-  cat > "$SK/scripts/remote.sh" <<'EOS'
+# A process whose command line is what remote.sh's engine check looks for.
+fake_engine() {   # <team> -> sets ENGINE_PID, writes the pidfile
+  printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$BATS_TEST_TMPDIR/node"
+  chmod +x "$BATS_TEST_TMPDIR/node"
+  "$BATS_TEST_TMPDIR/node" "$SK/scripts/internal/remote-sync.mjs" run --team "$1" &
+  ENGINE_PID=$!
+  track_bg "$ENGINE_PID"
+  printf '%s\n' "$ENGINE_PID" > "$SK/run/remote-sync.$1.pid"
+  sleep 0.3
+}
+
+stub_remote() {   # <sync stop exit code>
+  cat > "$SK/scripts/remote.sh" <<EOS
 #!/usr/bin/env bash
-case "$1 $2" in
+case "\$1 \$2" in
   "status --json") echo '{"local_team":"t1","engine_state":"running"}' ;;
-  "sync stop") exit 1 ;;
-  "sync restart") echo "$3" >> "$(dirname "$0")/../restarted.txt" ;;
+  "sync stop") exit $1 ;;
+  "sync restart") echo "\$3" >> "\$(dirname "\$0")/../restarted.txt" ;;
 esac
 EOS
+}
+
+@test "a live sync engine that cannot be stopped keeps the state where it is, visibly, and the next update tries the move again" {
+  inst
+  demote
+  fake_engine t1
+  stub_remote 1
   run inst --update
   grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
   [ -z "$(ls -A "$ST" 2>/dev/null)" ]
   [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = in-place ]
+  # shown where a person looks, with the command that moves it
+  [ -f "$SK/run/down/state.json" ]
+  grep -qF "is still in $SK" "$SK/run/down/state.json"
+  grep -qF "the next update tries the move again" "$SK/run/down/state.json"
+  grep -qF "npx agmsg@latest install --update" "$SK/run/down/state.json"
+  run bash "$SK/scripts/doctor.sh"
+  grep -qF "state is degraded since" <<<"$output"
+  # the engine is gone by the next update: it moves, and the record is cleared
+  kill "$ENGINE_PID"; wait "$ENGINE_PID" 2>/dev/null || true
+  run inst --update
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$SK/db")" = "$ST/db" ]
+  [ ! -e "$SK/run/down/state.json" ]
+  [ ! -e "$ST/run/down/state.json" ]
+}
+
+@test "an engine that already stood down on its own is a stopped engine: a failing 'sync stop' does not keep the state in place" {
+  inst
+  demote
+  printf '99999999\n' > "$SK/run/remote-sync.t1.pid"
+  stub_remote 1
+  run inst --update
+  [ "$status" -eq 0 ]
+  refute grep -qF "could not be stopped" <<<"$output"
+  [ "$(readlink "$SK/db")" = "$ST/db" ]
+  # a live process that is not this team's engine is not the engine either
+  printf '%s\n' "$$" > "$ST/run/remote-sync.t1.pid"
+  demote
+  printf '%s\n' "$$" > "$SK/run/remote-sync.t1.pid"
+  stub_remote 1
+  run inst --update
+  [ "$(readlink "$SK/db")" = "$ST/db" ]
+}
+
+@test "the sync engine is started after the completion record is written and the lock is let go, once per team" {
+  inst
+  demote
+  local src="$BATS_TEST_TMPDIR/src"
+  mkdir -p "$src"
+  tar -C "$REPO_ROOT" --exclude=.git --exclude=node_modules --exclude=worktrees -cf - . | tar -C "$src" -xf -
+  cat > "$src/scripts/remote.sh" <<EOS
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "status --json") echo '{"local_team":"t1","engine_state":"running"}' ;;
+  "sync stop") exit 0 ;;
+  "sync restart")
+    m=no; [ -f "$SK/run/install-manifest.json" ] && m=yes
+    l=held; sqlite3 -cmd '.timeout 200' "$SK/.install-op/lock.db" 'SELECT count(*) FROM sqlite_master;' >/dev/null 2>&1 && l=free
+    echo "restart \$3 manifest=\$m lock=\$l" >> "$BATS_TEST_TMPDIR/restarts.txt"
+    ;;
+esac
+EOS
+  # the installed (old) remote.sh answers the first status question
+  printf '#!/usr/bin/env bash\n[ "$1 $2" = "status --json" ] && echo %s\nexit 0\n' "'{\"local_team\":\"t1\",\"engine_state\":\"running\"}'" > "$SK/scripts/remote.sh"
+  run env HOME="$FAKE_HOME" bash "$src/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/restarts.txt")" = "restart t1 manifest=yes lock=free" ]
+}
+
+@test "agmsg daemon start during an update says the update is running; otherwise it names the update command for the install's own channel" {
+  inst
+  # the record does not match install.db
+  printf '{"install_id":"other","gen":1}\n' > "$SK/run/install-manifest.json"
+  printf '1.7.1\n' > "$SK/VERSION"
+  run env HOME="$FAKE_HOME" bash "$SK/scripts/daemon.sh" start
+  grep -qF "Repair it with: npx agmsg@latest install --update, then try again." <<<"$output"
+  refute grep -qF "agmsg@next" <<<"$output"
+  printf '1.8.0-rc.1\n' > "$SK/VERSION"
+  run env HOME="$FAKE_HOME" bash "$SK/scripts/daemon.sh" start
+  grep -qF "Repair it with: npx agmsg@next install --update, then try again." <<<"$output"
+  # an operation that is alive: not a repair
+  sleep 60 &
+  local op=$!; track_bg "$op"
+  printf '{"operation":"install","actor_pid":%s,"state":"in_progress"}\n' "$op" > "$SK/run/install-op-incomplete.json"
+  run env HOME="$FAKE_HOME" bash "$SK/scripts/daemon.sh" start
+  grep -qF "another agmsg install or update is running; agmsgd will start when it finishes." <<<"$output"
+  refute grep -qF "Repair it with" <<<"$output"
+  # a record left by an operation that is gone is not "running"
+  kill "$op"; wait "$op" 2>/dev/null || true
+  run env HOME="$FAKE_HOME" bash "$SK/scripts/daemon.sh" start
+  grep -qF "Repair it with" <<<"$output"
 }
 
 @test "while another operation holds the install lock the update moves nothing; it moves once the lock is released" {
