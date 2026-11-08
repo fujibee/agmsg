@@ -120,6 +120,7 @@ export function connect(options = {}) {
     const data = event.data;
     if (!data || data.agmsg !== PROTOCOL || data.type !== "port" || !event.ports || !event.ports[0]) return;
     port = event.ports[0];
+    reportPort = port;
     port.onmessage = onPortMessage;
     port.start();
     window.removeEventListener("message", onWindowMessage);
@@ -205,13 +206,43 @@ function safe(fn) {
 // ---- error overlay: an add-on never fails as a blank pane ----
 
 let overlay = null;
+// The pane's port, once the app handed it over: errors are also sent to the app, which writes them to its log.
+let reportPort = null;
+const reported = new Set();
+const MAX_REPORTS = 20;
+function reportToApp(text, stack) {
+  if (!reportPort || reported.size >= MAX_REPORTS || reported.has(text)) return;
+  reported.add(text);
+  try {
+    reportPort.postMessage({ agmsg: PROTOCOL, type: "error", message: text.slice(0, 500), ...(stack ? { stack: String(stack).slice(0, 2000) } : {}) });
+  } catch {}
+}
+
+/**
+ * Wraps a function so an error in it (a thrown one, or a rejected promise it returns) goes to the pane's error
+ * overlay and the app's log with its own message and stack, instead of the browser's opaque "Script error." that
+ * a sandboxed page gets for an error nothing caught. Use it for callbacks the browser calls: observers, frame
+ * and timer callbacks, event handlers. The return value passes through; after an error it is undefined.
+ */
+export function guard(fn) {
+  return function guarded(...args) {
+    try {
+      const r = fn.apply(this, args);
+      return r && typeof r.catch === "function" ? r.catch(showError) : r;
+    } catch (e) {
+      showError(e);
+    }
+  };
+}
+
 function installErrorOverlay() {
-  window.addEventListener("error", (e) => showError(e.error || e.message));
+  window.addEventListener("error", (e) => showError(e.error || (e.filename ? `${e.message} (${e.filename}:${e.lineno}:${e.colno})` : e.message)));
   window.addEventListener("unhandledrejection", (e) => showError(e.reason));
 }
 function showError(err) {
   const text = err && err.code ? `${err.code}: ${err.message}` : String((err && err.message) || err);
   console.error("[agmsg-addon]", err);
+  reportToApp(text, err && err.stack);
   if (!document.body) return;
   if (!overlay) {
     overlay = document.createElement("div");

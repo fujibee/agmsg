@@ -491,6 +491,53 @@ pub fn addon_notice_typed<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<Add
     }
 }
 
+/// At most this many error reports are logged per pane generation, and each is cut to these lengths.
+const MAX_PANE_ERRORS: u32 = 20;
+const MAX_PANE_ERROR_MESSAGE: usize = 500;
+const MAX_PANE_ERROR_STACK: usize = 2000;
+
+/// One log line for an error an add-on's page reported. Control characters become spaces so the add-on cannot
+/// write more than the one line it is given, and the text is cut to a fixed size.
+fn pane_error_line(addon: &str, message: &str, stack: Option<&str>) -> String {
+    let clean = |s: &str, max: usize| -> String { s.chars().take(max).map(|c| if c.is_control() { ' ' } else { c }).collect() };
+    match stack.filter(|s| !s.is_empty()) {
+        Some(st) => format!("[addons] {addon} pane error: {} | {}", clean(message, MAX_PANE_ERROR_MESSAGE), clean(st, MAX_PANE_ERROR_STACK)),
+        None => format!("[addons] {addon} pane error: {}", clean(message, MAX_PANE_ERROR_MESSAGE)),
+    }
+}
+
+/// An add-on's page hit an error it caught (the kit's overlay shows it in the pane); write it to the app's log so it
+/// can be read without opening the web inspector. Only the pane's current generation counts, and a page can log
+/// `MAX_PANE_ERRORS` lines per load, so a loop in the page cannot fill the log. No process is started.
+#[tauri::command]
+pub fn addon_pane_error(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, message: String, stack: Option<String>) {
+    static COUNTS: std::sync::Mutex<Vec<((PaneId, u64), u32)>> = std::sync::Mutex::new(Vec::new());
+    let addon = {
+        let reg = host.panes.registry.lock().unwrap();
+        if reg.authorize(id, generation, Need::Current).is_err() {
+            return;
+        }
+        match reg.addon_of(id) {
+            Some(a) => a,
+            None => return,
+        }
+    };
+    {
+        let mut counts = COUNTS.lock().unwrap();
+        counts.retain(|((p, g), _)| *p != id || *g == generation);
+        match counts.iter_mut().find(|(k, _)| *k == (id, generation)) {
+            Some((_, n)) => {
+                if *n >= MAX_PANE_ERRORS {
+                    return;
+                }
+                *n += 1;
+            }
+            None => counts.push(((id, generation), 1)),
+        }
+    }
+    eprintln!("{}", pane_error_line(&addon, &message, stack.as_deref()));
+}
+
 /// The watcher's `Message` has exactly the feed fields; keep only those.
 fn strip_to_feed(payload: &str) -> String {
     payload.to_string()
@@ -517,6 +564,17 @@ mod tests {
 
     fn args(path: Option<&str>, url: Option<&str>, base: Option<&str>) -> OpenArgs {
         OpenArgs { path: path.map(Into::into), url: url.map(Into::into), base: base.map(Into::into) }
+    }
+
+    #[test]
+    fn pane_error_line_is_one_cut_line() {
+        let l = pane_error_line("a/b", "boom\nfake line\u{1b}[31m", Some("at f (x.js:1:2)\nat g"));
+        assert_eq!(l, "[addons] a/b pane error: boom fake line [31m | at f (x.js:1:2) at g");
+        assert!(!l.contains('\n'));
+        let long = "x".repeat(5000);
+        let l = pane_error_line("a/b", &long, Some(&long));
+        assert_eq!(l.chars().count(), "[addons] a/b pane error: ".len() + 500 + 3 + 2000);
+        assert_eq!(pane_error_line("a/b", "m", Some("")), "[addons] a/b pane error: m");
     }
 
     #[test]

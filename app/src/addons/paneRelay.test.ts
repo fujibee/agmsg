@@ -338,4 +338,24 @@ describe("pane relay: the app's language", () => {
     await s.relay.onFrameLoad();
     expect(s.ports[0].sent).toEqual([]);
   });
+
+  it("sends an error the page reported to the host with this pane's identity, and does not answer it", async () => {
+    const s = setup();
+    await s.relay.onFrameLoad();
+    const port = s.ports[0];
+    send(port, { agmsg: 1, type: "error", message: "boom", stack: "at f", id: 99, generation: 99 });
+    await tick();
+    const call = s.calls.find(([c]) => c === "addon_pane_error");
+    expect(call?.[1]).toEqual({ id: 7, generation: 1, message: "boom", stack: "at f" });
+    expect(port.sent.filter((m) => (m as { type?: string }).type === "response")).toHaveLength(0);
+  });
+
+  it("drops a malformed error report", async () => {
+    const s = setup();
+    await s.relay.onFrameLoad();
+    send(s.ports[0], { agmsg: 1, type: "error", message: 5 });
+    send(s.ports[0], { agmsg: 1, type: "error", message: "x", stack: 3 });
+    await tick();
+    expect(s.calls.some(([c]) => c === "addon_pane_error")).toBe(false);
+  });
 });
