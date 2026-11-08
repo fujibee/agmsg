@@ -365,6 +365,7 @@ _agmsg_install_engine_stop_locked() {   # <skill_dir> <team>
     current="$(agmsg_install_engine_owned_pid "$skill" "$team")" || rc=$?
     [ "$rc" -eq 0 ] || break
     [ "$current" = "$pid" ] || return 1
+    [ "$signal" != KILL ] || echo "  ~ the sync engine for '$team' (pid $pid) did not exit within 5 s after TERM; stopping it with KILL"
     kill "-$signal" "$pid" 2>/dev/null || true
     attempt=0
     while [ "$attempt" -lt 100 ]; do

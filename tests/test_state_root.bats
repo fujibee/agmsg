@@ -857,6 +857,7 @@ EOS
   stub_remote running "$ENGINE_PID"
   run inst --update
   [ "$status" -eq 0 ]
+  grep -qF "the sync engine for 't1' (pid $ENGINE_PID) did not exit within 5 s after TERM; stopping it with KILL" <<<"$output"
   grep -qF "stopped the sync engine for 't1' (pid $ENGINE_PID)" <<<"$output"
   [ "$(readlink "$SK/db")" = "$ST/db" ]
   run kill -0 "$ENGINE_PID"
@@ -1025,6 +1026,7 @@ EOS
   run inst --update
   [ "$status" -eq 0 ]
   grep -qF "stopped the sync engine for 't1' (pid $ENGINE_PID)" <<<"$output"
+  refute grep -qF "stopping it with KILL" <<<"$output"
   refute grep -qF "could not be stopped" <<<"$output"
   [ "$(readlink "$SK/db")" = "$ST/db" ]
   run kill -0 "$ENGINE_PID"
