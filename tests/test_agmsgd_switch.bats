@@ -94,7 +94,17 @@ setup() {
   mkdir -p "$TEST_SKILL_DIR/no-node"
   printf '#!/usr/bin/env bash\necho unexpected-node >> "$CALL_LOG"\nexit 1\n' > "$TEST_SKILL_DIR/no-node/node"
   chmod +x "$TEST_SKILL_DIR/no-node/node"
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  # Through the REAL failure path once (not a hand-simulated row): this is
+  # what records the Node-resolution signature self-heal's later guard
+  # compares against (#1904 review), so this test's own "no usable Node"
+  # situation is the genuine article, not a stand-in for one.
+  PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/daemon.sh" start
+  [ "$status" -eq 1 ]
+  [ -f "$TEST_SKILL_DIR/run/agmsgd-node-failure-signature" ]
+  # That attempt legitimately executed the stub once (it IS a real start
+  # attempt) -- reset before the calls actually under test, which must
+  # add nothing further.
+  rm -f "$CALL_LOG"
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   [ "$status" -eq 0 ]
   assert_contains 'Node >= 22.13.0'
@@ -104,6 +114,9 @@ setup() {
   [ "$status" -eq 0 ]
   assert_lacks 'stopped while enabled'
   [ -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+  # Give a real (not skipped) self-heal spawn the same window other
+  # self-heal tests here wait up to, so a slow-to-land call is not missed.
+  sleep 1
   [ ! -f "$CALL_LOG" ]
 }
 
@@ -482,28 +495,55 @@ WRAPPER
   [ -f "$TEST_SKILL_DIR/selfheal-called2" ]
 }
 
-@test "self-heal does not retry, and does not shell out to resolve Node, when the known reason is 'no usable Node'" {
+@test "self-heal does not retry, and does not shell out to resolve Node, when the recorded failure signature still matches" {
   # Regression: _agmsg_daemon_self_heal used to spawn unconditionally,
   # which meant resolving Node again -- including actually EXECUTING
-  # whatever is on PATH named "node" to check its usability. When the
-  # last known reason is already "no usable Node", nothing about that
-  # has changed, so retrying only repeats the same failure and that one
-  # execution is a real side effect worth skipping on its own (CI caught
-  # this via "ordinary operations warn once per install without Node and
-  # keep stdout clean" above, intermittently, since the spawn is async).
+  # whatever is on PATH named "node" to check its usability. Decision
+  # 11-04 class C rules out going permanently quiet instead (a repaired
+  # Node must still recover, see the sibling "review:" test below), so
+  # this is checked cheaply: the recorded failure signature (path/mtime
+  # of each Node candidate at the time it last failed, see
+  # _agmsg_node_signature) is seeded here to match exactly what the
+  # broken stub would produce right now -- "unchanged" -- so self-heal
+  # is skipped without ever running the stub.
   mkdir -p "$TEST_SKILL_DIR/no-node"
   printf '#!/usr/bin/env bash\necho unexpected-node >> "$CALL_LOG"\nexit 1\n' > "$TEST_SKILL_DIR/no-node/node"
   chmod +x "$TEST_SKILL_DIR/no-node/node"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  PATH="$TEST_SKILL_DIR/no-node:$PATH" env -u AGMSG_NODE bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _agmsg_node_signature' \
+    > "$TEST_SKILL_DIR/run/agmsgd-node-failure-signature"
   # Not "always": self-heal is only ever reached from the ordinary,
   # cooldown-claiming branch (never the "always" branch, used only by
   # already-failing commands), same as every other self-heal test here.
-  PATH="$TEST_SKILL_DIR/no-node:$PATH" run env -u AGMSG_DAEMON_SELF_HEAL bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped'
+  PATH="$TEST_SKILL_DIR/no-node:$PATH" run env -u AGMSG_DAEMON_SELF_HEAL -u AGMSG_NODE bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped'
   [ "$status" -eq 0 ]
   # Give a real (not skipped) self-heal spawn the same window the positive
   # control above waits up to, so a slow-to-land call is not missed.
   sleep 1
   [ ! -f "$CALL_LOG" ]
+}
+
+@test "review: repaired Node PATH must not be blocked by the historical no-Node reason" {
+  # The review finding this and the sibling test above both answer: a
+  # stale "no usable Node" reason must not
+  # block self-heal forever once Node is actually fixed. No failure
+  # signature is seeded here at all (as a record from before this
+  # mechanism existed, or after self-heal's own detached child cleared
+  # it on success, would have none) -- "cannot compare" earns the one
+  # try decision 11-04 class C requires, same as a signature that no
+  # longer matches would.
+  mkdir -p "$TEST_SKILL_DIR/good-node"
+  printf '#!/bin/bash\nprintf "v22.13.0\\n"\n' > "$TEST_SKILL_DIR/good-node/node"
+  chmod +x "$TEST_SKILL_DIR/good-node/node"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run env PATH="$TEST_SKILL_DIR/good-node:$PATH" bash -c '
+    [ "$(node --version)" = v22.13.0 ] || exit 80
+    source "$SCRIPTS/lib/daemon-state.sh"
+    _agmsg_daemon_self_heal() { : > "$TEST_SKILL_DIR/recovery-permitted"; }
+    agmsg_daemon_warn_if_stopped
+    [ -f "$TEST_SKILL_DIR/recovery-permitted" ]
+  '
+  [ "$status" -eq 0 ]
 }
 
 @test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {
