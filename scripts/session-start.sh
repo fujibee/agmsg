@@ -98,8 +98,13 @@ rm -f "$RUN_DIR/seat-pending.$_pending_sid"
 # scripts/drivers/types/<type>/_session-start.sh defining agmsg_session_start to override the
 # default no-op — codex uses it to hand the session off to the bridge. The plug
 # is sourced in this script's context so it sees PROJECT / RUN_DIR / SKILL_DIR /
-# PAIRS / INPUT / SESSION_ID and the helpers sourced above; it may exit 0
-# (codex does, having no Monitor tool) to skip the Monitor-directive path below.
+# PAIRS / INPUT / SESSION_ID and the helpers sourced above; it may set
+# AGMSG_SESSION_START_SKIP_DIRECTIVE=1 and return (codex does, having no
+# Monitor tool) to skip the Monitor-directive path below -- checked just
+# before that path starts (#1941), not here: the type-agnostic blocks
+# between here and there (cc-instance cleanup, the #774 sync-autostart
+# trigger, the down_notice print) must run whichever way the plug decides.
+AGMSG_SESSION_START_SKIP_DIRECTIVE=0
 agmsg_session_start_default() { :; }
 
 _tdir="$(agmsg_type_dir "$TYPE" 2>/dev/null || true)"
@@ -346,6 +351,11 @@ if [ -r "$SKILL_DIR/scripts/lib/down-notice.sh" ]; then
   . "$SKILL_DIR/scripts/lib/down-notice.sh"
   down_notice_print_once || true
 fi
+
+# #1941: equivalent to the plug's own old `exit 0` (same outcome, same
+# point in the script) now that the type-agnostic blocks above have run
+# regardless of what the plug decided.
+[ "$AGMSG_SESSION_START_SKIP_DIRECTIVE" != 1 ] || exit 0
 
 # --- Skip directive when a watcher is already alive for this instance. ---
 # /compact re-fires SessionStart within the same CC process and session_id, so

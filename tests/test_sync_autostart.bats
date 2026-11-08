@@ -624,3 +624,64 @@ SH
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q 'is disconnected'
 }
+
+# Marks agmsgd confirmed ready, the same way
+# test_session_start_claude_code_native_channel.bats does: a session whose
+# project's delivery is agmsgd (the production default once agmsgd is turned
+# on) takes the native-channel branch of the claude-code SessionStart plug,
+# not the generic Monitor-directive branch these other cases in this file
+# exercise.
+_mark_daemon_ready_for_native_channel() {
+  sqlite3 "$RUN_DIR/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$RUN_DIR/install.db" "UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+}
+
+# #1941: the claude-code SessionStart plug (scripts/drivers/types/claude-code/
+# _session-start.sh) takes the native-channel branch above by calling `exit 0`
+# from inside `agmsg_session_start` -- a function this script SOURCES and
+# CALLS in its own top-level shell, not in a subshell. `exit 0` there ends
+# session-start.sh itself, never returning to the caller, so every block
+# written below the plug call (the #774 sync-autostart trigger among them)
+# is unreachable for the entire time a project's delivery is agmsgd: not a
+# flake, not conditional on timing, every single session start.
+#
+# Measured against the real production install's log (read-only) during this
+# investigation: a sync engine fatal at 02:38:34Z was never retried by any of
+# the many SessionStart/compact events in the 18h45m before someone ran
+# `sync start` by hand at 21:21:26Z -- `remote.sh status` kept reporting the
+# team as `connected (engine stale ...)` the whole time, which is what the
+# #774 trigger reads to decide which teams to (re)start.
+@test "session-start: agmsgd native-channel branch still starts a connected team's dead engine (#1941)" {
+  local fake calls="$TEST_SKILL_DIR/calls.txt"
+  fake="$(write_fake_remote starts)"
+  cp "$fake" "$SCRIPTS/remote.sh"
+  : > "$calls"
+  _mark_daemon_ready_for_native_channel
+  # actas-claim.sh has its OWN #774 trigger call (scripts/actas-claim.sh:315-324),
+  # separate from session-start.sh's. Not exercising it here, so its own
+  # unrelated sync-autostart call must not be mistaken for session-start.sh's:
+  # claim WITHOUT the fake's call-log var, then clear the log session-start.sh's
+  # own call will write to, right before invoking it.
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" /tmp/project-a claude-code alice "sid-1941" >/dev/null
+  : > "$calls"
+
+  run env AGMSG_AGENT_PID=$$ AGMSG_FAKE_REMOTE_CALLS="$calls" AGMSG_RESOLVE_PROJECT=0 \
+    CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-1941.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code /tmp/project-a <<< '{"session_id":"sid-1941"}'
+  [ "$status" -eq 0 ]
+  # The native-channel branch itself still ran (this case is not about
+  # breaking that): the plug's own success line is present, same as the
+  # existing native-channel tests pin.
+  grep -qF "agmsgd is running and will deliver" <<<"$output"
+  # The actual bug: the connected team's dead engine was never (re)started,
+  # so `calls` -- the fake remote.sh's own record of every `sync start`
+  # invocation it received -- stays empty.
+  wait_for_call "$calls" testteam
+}

@@ -18,6 +18,16 @@
 #     to ~/.claude, since this machine's own accounts live elsewhere.
 
 agmsg_session_start() {
+  # #1941: every branch below this point that decides "no Monitor directive"
+  # sets this and RETURNS rather than exiting. `agmsg_session_start` is a
+  # function this script SOURCES and CALLS in session-start.sh's own
+  # top-level shell, not in a subshell -- `exit 0` there used to end
+  # session-start.sh itself, silently skipping everything written below the
+  # plug call (the #774 sync-autostart trigger and the down_notice print
+  # among them) for the entire time a project's delivery is agmsgd. The flag
+  # preserves this plug's own behavior exactly (no Monitor directive) while
+  # letting the caller run its later, type-agnostic blocks first.
+  AGMSG_SESSION_START_SKIP_DIRECTIVE=0
   if ! declare -F agmsg_claude_code_native_target >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/lib/role-session.sh"
@@ -57,7 +67,8 @@ agmsg_session_start() {
   local target socket config_dir
   if ! target="$(agmsg_claude_code_native_target)"; then
     echo "AGMSG delivery: this project's delivery is agmsgd, but this session has no usable messaging destination (CLAUDE_CODE_MESSAGING_SOCKET is missing or invalid, or the Claude config directory is not usable), so agmsgd cannot deliver to it and no Monitor is armed. Next: use Claude Code 2.1.302 or later, or choose another mode with: agmsg delivery monitor"
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
   socket="${target%%$'\t'*}"
   config_dir="${target#*$'\t'}"
@@ -72,7 +83,8 @@ agmsg_session_start() {
   fi
   if ! agmsg_claude_code_native_storage_ready; then
     echo "AGMSG delivery: its Claude channel only reads the sqlite storage and this install's storage config is not usable for it, so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
 
   # Claim ONLY the single role this session is actually resuming as -- never
@@ -98,7 +110,8 @@ agmsg_session_start() {
   my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
   if [ -z "$bare_sid" ]; then
     echo "AGMSG delivery: this session's id was not given to the hook, so its messaging destination was not recorded and agmsgd cannot deliver to it. Next: run /agmsg actas <name>."
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
   # An instance id without a process id cannot claim the seat's lock; that is
   # reported below, once the seat is known, rather than skipped silently.
@@ -131,11 +144,13 @@ ${PAIRS:-}
 EOF
     else
       echo "AGMSG delivery: this project has several registered seats and none is recorded for this session, so the native channel is not used and no Monitor is armed. Next: run /agmsg actas <name> (it switches to direct delivery)."
-      exit 0
+      AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+      return 0
     fi
   elif [ "$_n" -gt 1 ]; then
     echo "AGMSG delivery: this session is recorded under $_n registered seats, so the native channel is not used and no Monitor is armed. Next: run /agmsg actas <name> for the seat to use; the extra records stay until they are cleaned up."
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
 
   if [ "$pid_unresolved" = 1 ]; then
@@ -149,7 +164,8 @@ EOF
     else
       echo "AGMSG delivery: this session's own process could not be identified, so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
     fi
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
 
   # actas_lock_claim is the write gate -- the SAME primitive watch.sh uses to
@@ -167,7 +183,8 @@ EOF
   [ -n "$claim_result" ] || claim_result="unknown:claim_failed"
   if [ "$claim_result" != ok ]; then
     echo "AGMSG delivery: seat $pair_agent@$pair_team could not be claimed ($claim_result), so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
 
   # Write, then read back: this is the SAME check the daemon itself applies
@@ -188,8 +205,10 @@ EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF
     fi
-    exit 0
+    AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+    return 0
   fi
   echo "AGMSG delivery: the delivery record for $pair_agent@$pair_team did not take, so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
-  exit 0
+  AGMSG_SESSION_START_SKIP_DIRECTIVE=1
+  return 0
 }
