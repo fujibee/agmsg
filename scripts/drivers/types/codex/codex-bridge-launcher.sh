@@ -119,7 +119,7 @@ HELD_LOCK_RESOURCE=""
 
 release_held_lock() {
   local child_exit_status=$?
-  rm -f "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
+  rm -f "$IDENTITY_CACHE_MARKER" "${OWNED_ROLE_JOBS_FILE:-$IDENTITY_CACHE_MARKER}" 2>/dev/null || true
   if [ -n "$HELD_LOCK_RESOURCE" ]; then
     agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$" || true
   fi
@@ -421,6 +421,7 @@ build_safety_state() {
 # membership includes stopped children, so an uncertain/live child is never
 # waited on synchronously or replaced. No PID probe authorizes a restart.
 owned_role_children=""
+OWNED_ROLE_JOBS_FILE="$RUN_DIR/.codex-role-jobs.$SEAT_KEY.$$"
 forget_known_pair() {
   local retired="$1" pair kept=""
   while IFS= read -r pair; do
@@ -431,23 +432,27 @@ forget_known_pair() {
   known_pairs="$kept"
 }
 owned_role_child_completed() {
-  local wanted="$1" rows="$2" job_mark job_pid state rest
+  local wanted="$1" rows_file="$2" job_mark job_pid state rest
+  [ -r "$rows_file" ] || return 1
   while read -r job_mark job_pid state rest; do
     [ "$job_pid" = "$wanted" ] || continue
     # C-locale Bash job state is an observation about our direct child,
     # independent of PID reuse. Stopped/running/unrecognised rows stay pending.
     case "$state" in Done|Exit|Killed*|Terminated*) return 0 ;; esac
     return 1
-  done <<< "$rows"
+  done < "$rows_file"
   return 1
 }
 reap_owned_role_children() {
-  local job_rows kept="" team name pid pair result
-  job_rows="$(LC_ALL=C jobs -l)"
+  local kept="" team name pid pair result
+  [ -n "$owned_role_children" ] || return 0
+  # Direct builtin output/read avoids a fork on every dispatcher tick. Never
+  # parse an old snapshot after a failed write; lack of evidence stays pending.
+  if ! LC_ALL=C jobs -l > "$OWNED_ROLE_JOBS_FILE"; then return 0; fi
   while IFS="$TAB" read -r team name pid; do
     [ -n "$pid" ] || continue
     pair="$team$TAB$name"
-    if owned_role_child_completed "$pid" "$job_rows"; then
+    if owned_role_child_completed "$pid" "$OWNED_ROLE_JOBS_FILE"; then
       result=0
       wait "$pid" 2>/dev/null || result=$?
       if [ "$result" -eq "$ROLE_REMOVED_EXIT" ]; then forget_known_pair "$pair"; fi

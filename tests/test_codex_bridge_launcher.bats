@@ -1496,10 +1496,10 @@ SH
 }
 
 @test "launcher: a missed deregistration gap re-arms only after its owned child retirement" {
+  skip_on_windows "uses SIGSTOP/CONT to fix dispatcher observation order"
   put_record team alice thread-alice "$PROJ" codex
-  # A custom bridge command is waited synchronously by its role launcher. Keep
-  # the mock lifetime below wait_for_child_count's 10-second ceiling so this
-  # test measures deregistration, not the intentionally blocking test adapter.
+  # Keep the leased mock bridge alive until positive removal retires it.
+  # Only the dispatcher is frozen; its child can still observe registration loss.
   export MOCK_BRIDGE_SLEEP=30
   sleep 180 3>&- & local parent=$!
   TEST_LIFETIME_PIDS="$parent"
@@ -1534,7 +1534,7 @@ SH
     [ "$captures" -eq "$((capture_before_rejoin + 1))" ] && break
     sleep 0.1
   done
-  [ "$captures" -gt "$capture_before_rejoin" ]
+  [ "$captures" -eq "$((capture_before_rejoin + 1))" ]
 
   agmsg_stop_pid "$dispatcher"
   agmsg_stop_pid "$parent"
@@ -1564,15 +1564,19 @@ SH
 @test "launcher: running stopped foreign and unknown child jobs are not completion evidence" {
   local probe="$TEST_SKILL_DIR/job-state-probe.sh"
   sed -n '/^owned_role_child_completed() {/,/^}/p' "$LAUNCHER" > "$probe"
-  run bash -s -- "$probe" <<'SH'
+  run bash -s -- "$probe" "$TEST_SKILL_DIR/job-rows" <<'SH'
 set -e
 source "$1"
-owned_role_child_completed 111 '[1]+ 111 Done launcher'
-owned_role_child_completed 111 '[1]+ 111 Exit 75 launcher'
+printf '%s\n' '[1]+ 111 Done launcher' > "$2"
+owned_role_child_completed 111 "$2"
+printf '%s\n' '[1]+ 111 Exit 75 launcher' > "$2"
+owned_role_child_completed 111 "$2"
 for state in Running Stopped Unknown; do
-  if owned_role_child_completed 111 "[1]+ 111 $state launcher"; then exit 11; fi
+  printf '%s\n' "[1]+ 111 $state launcher" > "$2"
+  if owned_role_child_completed 111 "$2"; then exit 11; fi
 done
-if owned_role_child_completed 111 '[1]+ 222 Exit 75 launcher'; then exit 12; fi
+printf '%s\n' '[1]+ 222 Exit 75 launcher' > "$2"
+if owned_role_child_completed 111 "$2"; then exit 12; fi
 SH
   [ "$status" -eq 0 ]
 }
@@ -1584,4 +1588,60 @@ SH
   chmod +x "$fake/mkdir"
   run env PATH="$fake:$PATH" bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$$" $'team\talice'
   [ "$status" -eq 1 ]
+}
+
+@test "launcher: actual Bash job states distinguish running stopped and completed children" {
+  skip_on_windows "requires Unix stop/continue job states"
+  local probe="$TEST_SKILL_DIR/actual-job-probe.sh" shell ran=0
+  sed -n '/^owned_role_child_completed() {/,/^}/p' "$LAUNCHER" > "$probe"
+  for shell in /bin/bash /opt/homebrew/bin/bash; do
+    [ -x "$shell" ] || continue
+    ran=$((ran + 1))
+    run "$shell" -s -- "$probe" "$TEST_SKILL_DIR" <<'SH'
+set -e
+source "$1"
+release="$2/release-job-$BASHPID-$$"
+child=""
+cleanup() {
+  local pid
+  for pid in $(jobs -pr; jobs -ps); do
+    if [ "$pid" = "$child" ]; then
+      kill -CONT "$pid" 2>/dev/null || true
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  [ -z "$child" ] || wait "$child" 2>/dev/null || true
+}
+trap cleanup EXIT
+( while [ ! -f "$release" ]; do sleep 0.01; done; exit 75 ) & child=$!
+rows_file="$2/actual-job-rows-$$"
+LC_ALL=C jobs -l > "$rows_file"
+if owned_role_child_completed "$child" "$rows_file"; then exit 11; fi
+kill -STOP "$child"
+for i in {1..100}; do
+  LC_ALL=C jobs -l > "$rows_file"
+  if grep -q Stopped "$rows_file"; then break; fi
+  sleep 0.01
+done
+stopped_result=0
+owned_role_child_completed "$child" "$rows_file" || stopped_result=$?
+kill -CONT "$child"
+[ "$stopped_result" -eq 1 ]
+: > "$release"
+finished=0
+for i in {1..100}; do
+  LC_ALL=C jobs -l > "$rows_file"
+  if owned_role_child_completed "$child" "$rows_file"; then finished=1; break; fi
+  sleep 0.01
+done
+[ "$finished" -eq 1 ]
+result=0
+wait "$child" || result=$?
+child=""
+[ "$result" -eq 75 ]
+printf 'Bash %s completion: %s\n' "$BASH_VERSION" "$(cat "$rows_file")"
+SH
+    [ "$status" -eq 0 ]
+  done
+  [ "$ran" -gt 0 ]
 }
