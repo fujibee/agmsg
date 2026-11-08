@@ -24,11 +24,20 @@ bg_is_running_job() {   # <pid>
   return 1
 }
 
-# Holds BEGIN EXCLUSIVE on <db> for <seconds> in a background job of this shell.
+# Holds BEGIN EXCLUSIVE on <db> for <seconds> in a background job of this shell,
+# and returns once the lock is really held (the SELECT after it has answered),
+# so a loaded machine cannot start the test's next step before the holder has it.
 hold_lock() {   # <db> <seconds>
-  ( ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep "$2" ) | sqlite3 "$1" >/dev/null 2>&1 ) &
+  local seen="${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}/hold-lock.$$.$RANDOM" i
+  : > "$seen"
+  ( ( printf 'BEGIN EXCLUSIVE;\nSELECT 1;\n'; sleep "$2" ) | sqlite3 "$1" >"$seen" 2>&1 ) &
   HOLD_PID=$!
   track_bg "$HOLD_PID"
+  for ((i = 0; i < 500; i++)); do
+    [ -s "$seen" ] && break
+    sleep 0.02
+  done
+  [ "$(head -n1 "$seen")" = 1 ]
 }
 
 # Ends the tracked jobs: wait for them to finish by themselves, then TERM, then

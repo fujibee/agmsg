@@ -222,6 +222,27 @@ EOF
   refute grep -qE 'writable_roots = \[[^]]*"'"$SK"'/db"' "$cfg"
 }
 
+@test "--update removes only whole stale elements: an escaped quote or a literal string holding the same text stays" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  cat > "$FAKE_HOME/.codex/config.toml" <<EOF
+[sandbox_workspace_write]
+writable_roots = ["$FAKE_HOME/mine/\\"$SK/db", "$SK/db", '$SK/db', "$FAKE_HOME/mine"]
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  run python3 -I -c '
+import sys, tomllib
+roots = tomllib.load(open(sys.argv[1], "rb"))["sandbox_workspace_write"]["writable_roots"]
+home, sk = sys.argv[2], sys.argv[3]
+assert home + "/mine/\"" + sk + "/db" in roots, roots
+assert home + "/mine" in roots, roots
+assert roots.count(sk + "/db") == 1, roots   # the literal string only
+' "$FAKE_HOME/.codex/config.toml" "$FAKE_HOME" "$SK"
+  [ "$status" -eq 0 ]
+}
+
 @test "uninstall removes the state root too, and its Codex entries" {
   mkdir -p "$FAKE_HOME/.codex"
   printf 'model = "m"\n' > "$FAKE_HOME/.codex/config.toml"

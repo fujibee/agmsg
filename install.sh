@@ -865,38 +865,47 @@ _drop_stale_codex_roots() {
   # Scans the writable_roots array character by character so that a quoted
   # string, a comment or any other key outside that array is never touched.
   AGMSG_STALE_ROOTS="$(printf '%s\n' "${stale[@]}")" awk '
-    BEGIN { n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n") }
+    BEGIN {
+      n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n")
+      for (i = 1; i <= n; i++) if (st[i] != "") stale["\"" st[i] "\""] = 1
+    }
     {
       gone = 0
       start = 0
       if (!inr && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) { inr = 1; start = RLENGTH + 1 }
       else if (inr) start = 1
       if (start > 0) {
-        len = length($0); instr = 0; endpos = len + 1; closed = 0
-        for (c = start; c <= len; c++) {
+        len = length($0); out = substr($0, 1, start - 1); c = start
+        while (c <= len) {
           ch = substr($0, c, 1)
-          if (instr) {
-            if (ch == "\\") c++
-            else if (ch == "\"") instr = 0
-          } else if (ch == "\"") instr = 1
-          else if (ch == "#") { endpos = c; break }
-          else if (ch == "]") { endpos = c; closed = 1; break }
+          if (ch == "\"") {
+            # one whole string element; an escaped quote does not end it
+            e = c + 1
+            while (e <= len) {
+              ec = substr($0, e, 1)
+              if (ec == "\\") e++
+              else if (ec == "\"") break
+              e++
+            }
+            tok = substr($0, c, e - c + 1)
+            if (tok in stale) {
+              c = e + 1
+              if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
+              gone = 1
+              continue
+            }
+            out = out tok; c = e + 1
+          } else if (ch == "\x27") {
+            e = index(substr($0, c + 1), "\x27")
+            e = (e == 0) ? len : c + e
+            out = out substr($0, c, e - c + 1); c = e + 1
+          } else if (ch == "#") {
+            out = out substr($0, c); break
+          } else if (ch == "]") {
+            out = out substr($0, c); inr = 0; break
+          } else { out = out ch; c++ }
         }
-        pre = substr($0, 1, start - 1)
-        reg = substr($0, start, endpos - start)
-        post = substr($0, endpos)
-        for (i = 1; i <= n; i++) {
-          if (st[i] == "") continue
-          q = "\"" st[i] "\""
-          while ((k = index(reg, q)) > 0) {
-            rest = substr(reg, k + length(q))
-            sub(/^[ \t]*,[ \t]*/, "", rest)
-            reg = substr(reg, 1, k - 1) rest
-            gone = 1
-          }
-        }
-        $0 = pre reg post
-        if (closed) inr = 0
+        $0 = out
       }
       if (!(gone && $0 ~ /^[ \t]*$/)) print
     }
