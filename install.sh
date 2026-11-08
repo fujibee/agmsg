@@ -286,36 +286,63 @@ agmsg_install_daemon_active() {   # <skill_dir>
   return 2
 }
 
-# 0 = the sync engine of <team> is not proven stopped; 1 = it is. The proof is
-# the installed remote.sh's own answer (`status --json`), which looks at the
-# supervisor first (a systemd-owned engine is running, starting, inactive or
-# unknown, and has no pidfile of ours) and then at the pidfile's process with the
-# engine command-line comparison: only "stopped" and "stale" count. An engine
-# that stood down on its own when the update began (it sees the completion record
-# move) reads "stale" here, and is not a failure to stop it. An answer that
-# cannot be read, or has no row for the team, is not proof.
-agmsg_install_engine_alive() {   # <skill_dir> <team>
-  local row state
-  command -v python3 >/dev/null 2>&1 || return 0
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    state="$(printf '%s' "$row" | python3 -c '
+# Stops the sync engine of <team> of the install that is on disk now. The
+# installer cannot rely on the installed remote.sh to do it: releases up to 1.7.1
+# have no `sync stop`, so it asks that script only what every release answers
+# (`status --json`, which looks at the supervisor first and then at the pidfile's
+# process with the engine command-line comparison) and does the stopping itself.
+#   0 = the engine is stopped (it was already: "stopped" or "stale", which is what
+#       an engine that stood down on its own when the update began reads as)
+#   1 = it is running and could not be stopped, or its supervisor (systemd) owns
+#       it, or its state could not be read: none of those is proof of stopped.
+agmsg_install_engine_stop() {   # <skill_dir> <team>
+  local skill="$1" team="$2" row line state pid="" load attempt signal
+  command -v python3 >/dev/null 2>&1 || return 1
+  state=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    row="$(printf '%s' "$line" | python3 -c '
 import json, sys
 try:
     r = json.loads(sys.stdin.read())
 except Exception:
     sys.exit(0)
 if isinstance(r, dict) and r.get("local_team") == sys.argv[1]:
-    print(r.get("engine_state", ""))
-' "$2" 2>/dev/null || true)"
-    state="${state%$'\r'}"
-    case "$state" in
-      stopped|stale) return 1 ;;
-      '') ;;
-      *) return 0 ;;
-    esac
-  done < <(bash "$1/scripts/remote.sh" status --json 2>/dev/null || true)
-  return 0
+    print("%s %s" % (r.get("engine_state", ""), r.get("engine_pid") or ""))
+' "$team" 2>/dev/null || true)"
+    row="${row%$'\r'}"
+    [ -n "$row" ] || continue
+    state="${row%% *}"
+    pid="${row#* }"
+    [ "$pid" != "$row" ] || pid=""
+    break
+  done < <(bash "$skill/scripts/remote.sh" status --json 2>/dev/null || true)
+  case "$state" in
+    stopped|stale) return 0 ;;
+    running) ;;
+    *) return 1 ;;
+  esac
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  # The pidfile must name that process: a supervisor's engine is not ours to stop.
+  [ "$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)" = "$pid" ] || return 1
+  load="$("${AGMSG_SYSTEMCTL:-systemctl}" --user show "agmsg-remote-sync-$team.service" -p LoadState 2>/dev/null || true)"
+  case "$load" in ''|*not-found*) ;; *) return 1 ;; esac
+  # TERM first, up to about five seconds for it to leave; only then KILL, up to
+  # five more; the process is confirmed gone before anything is reported stopped.
+  for signal in TERM KILL; do
+    kill "-$signal" "$pid" 2>/dev/null || true
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+      if agmsg_install_pid_gone "$pid"; then
+        rm -f "$skill/run/remote-sync.$team.pid"
+        echo "  ~ stopped the sync engine for '$team' (pid $pid); the update starts it again"
+        return 0
+      fi
+      attempt=$((attempt + 1))
+      sleep 0.05
+    done
+  done
+  return 1
 }
 
 # A state that stays where Codex watches is shown where a person already looks
@@ -370,8 +397,7 @@ agmsg_install_move_state() {
     else
       while IFS= read -r team; do
         [ -n "$team" ] || continue
-        if bash "$skill/scripts/remote.sh" sync stop "$team" >/dev/null 2>&1 \
-            || ! agmsg_install_engine_alive "$skill" "$team"; then
+        if agmsg_install_engine_stop "$skill" "$team"; then
           stopped="$stopped
 $team"
         else
@@ -385,12 +411,18 @@ $team"
       AGMSG_STATE_REASON="$stop_failed"
       echo "  ! state of '$name' is not moved: $stop_failed; it keeps working in place (Codex rescans its skills on writes there)" >&2
       agmsg_install_state_notice "$skill" "$stop_failed"
-      agmsg_install_restart_daemon "$skill"
-      while IFS= read -r team; do
-        [ -n "$team" ] || continue
-        bash "$skill/scripts/remote.sh" sync restart "$team" >/dev/null 2>&1 \
-          || echo "  ! could not restart the sync engine for '$team'; run: bash $skill/scripts/remote.sh sync restart $team" >&2
-      done <<< "$stopped"
+      # An update goes on from here and starts agmsgd and the engines it found
+      # running itself once the new files and the completion record are in
+      # place; starting them now would run the old scripts against a record that
+      # is aside. Anything else (a plain install) puts back what it stopped.
+      if [ "$UPDATE_ONLY" != true ]; then
+        agmsg_install_restart_daemon "$skill"
+        while IFS= read -r team; do
+          [ -n "$team" ] || continue
+          bash "$skill/scripts/remote.sh" sync restart "$team" >/dev/null 2>&1 \
+            || echo "  ! could not restart the sync engine for '$team'; run: bash $skill/scripts/remote.sh sync restart $team" >&2
+        done <<< "$stopped"
+      fi
       [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
       return 0
     fi
