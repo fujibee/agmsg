@@ -4,9 +4,13 @@
 //   {"component":..,"state":"down|degraded","reason":..,"recovery":..,"since":..,"updated":..}
 //
 // The shell helper is the reference; tests/down_notice_node.test.mjs checks that
-// the key and the record this writes are the ones it reads and writes. Quotes and
-// backslashes in free text become ' and /, control characters become spaces, so
-// every field is a plain string the shell reads back with parameter expansion.
+// the key and the record this writes are the ones it reads and writes. Quotes,
+// backslashes and control characters in free text are JSON-escaped (via
+// JSON.stringify, not rewritten into other characters -- see down-notice.sh's
+// own header for why a shell-quoted recovery command needs this). JSON.stringify
+// does not escape DEL (0x7f) on its own -- not a JSON control character by the
+// spec, but the shell writer's [[:cntrl:]] class (and this record's own "stay
+// printable" intent) treats it as one -- so it is escaped explicitly afterward.
 // No process is started.
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -28,8 +32,14 @@ export function downNoticeKey(prefix, text) {
   return `${prefix}.${slug.slice(0, room)}-${h.toString(16).padStart(8, "0")}`;
 }
 
+// JSON.stringify already produces exactly the escaped string BODY a hand-rolled
+// `"..."` field needs -- slice off the quotes it wraps the body in itself --
+// except for DEL (0x7f), which JSON.stringify leaves raw since it is not a
+// JSON control character; escape it the same way the shell writer does.
 function clean(text) {
-  return String(text ?? "").replace(/"/g, "'").replace(/\\/g, "/").replace(/[\u0000-\u001f\u007f]/g, " ");
+  return JSON.stringify(String(text ?? ""))
+    .slice(1, -1)
+    .replace(/\x7f/g, "\\u007f");
 }
 
 export function downNoticePath(installRoot, key) {
