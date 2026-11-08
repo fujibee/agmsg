@@ -282,7 +282,16 @@ agmsg_daemon_warn_if_stopped() {
     # window. Only for a CONFIRMED stopped daemon -- unchecked/unverifiable
     # never reach here (the "unchecked" skip above already excluded them,
     # and this whole branch is guarded by AGMSGD_HEALTH=stopped below).
-    [ "$AGMSGD_HEALTH" != stopped ] || _agmsg_daemon_self_heal
+    # A reason already known to be "no usable Node" is not retried here
+    # either: node resolution would only repeat the same failure, and
+    # doing so EXECUTES whatever is on PATH named "node" to check its
+    # usability -- worth skipping on its own, not just for the wasted
+    # spawn, until something (a fresh install --update, PATH changing)
+    # gives a reason to try again.
+    case "$AGMSGD_REASON" in
+      *'no usable Node'*) ;;
+      *) [ "$AGMSGD_HEALTH" != stopped ] || _agmsg_daemon_self_heal ;;
+    esac
   fi
   # The claimed window remains as an empty directory. Only past windows are
   # removed; none of them can grant a fresh claim in the current window.

@@ -482,6 +482,30 @@ WRAPPER
   [ -f "$TEST_SKILL_DIR/selfheal-called2" ]
 }
 
+@test "self-heal does not retry, and does not shell out to resolve Node, when the known reason is 'no usable Node'" {
+  # Regression: _agmsg_daemon_self_heal used to spawn unconditionally,
+  # which meant resolving Node again -- including actually EXECUTING
+  # whatever is on PATH named "node" to check its usability. When the
+  # last known reason is already "no usable Node", nothing about that
+  # has changed, so retrying only repeats the same failure and that one
+  # execution is a real side effect worth skipping on its own (CI caught
+  # this via "ordinary operations warn once per install without Node and
+  # keep stdout clean" above, intermittently, since the spawn is async).
+  mkdir -p "$TEST_SKILL_DIR/no-node"
+  printf '#!/usr/bin/env bash\necho unexpected-node >> "$CALL_LOG"\nexit 1\n' > "$TEST_SKILL_DIR/no-node/node"
+  chmod +x "$TEST_SKILL_DIR/no-node/node"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  # Not "always": self-heal is only ever reached from the ordinary,
+  # cooldown-claiming branch (never the "always" branch, used only by
+  # already-failing commands), same as every other self-heal test here.
+  PATH="$TEST_SKILL_DIR/no-node:$PATH" run env -u AGMSG_DAEMON_SELF_HEAL bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped'
+  [ "$status" -eq 0 ]
+  # Give a real (not skipped) self-heal spawn the same window the positive
+  # control above waits up to, so a slow-to-land call is not missed.
+  sleep 1
+  [ ! -f "$CALL_LOG" ]
+}
+
 @test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','digest verification failed: digest mismatch: scripts/daemon/schema.sql',0);"
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
