@@ -80,9 +80,13 @@ fi
 # The CR-strip decision and agmsg_sqlite_mem live in their own file so the small
 # libraries that read a config through sqlite3 can use them without the storage
 # facade.
+# (Path by expansion, not $(cd ...; dirname): no subshell and no process.)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  _agmsg_crlf_d="${BASH_SOURCE[0]}"
+  case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
   # shellcheck disable=SC1091
-  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sqlite-crlf.sh"
+  source "$_agmsg_crlf_d/sqlite-crlf.sh"
+  unset _agmsg_crlf_d
 elif [ -n "${SKILL_DIR:-}" ]; then
   # shellcheck disable=SC1091
   source "$SKILL_DIR/scripts/lib/sqlite-crlf.sh"
@@ -91,9 +95,11 @@ fi
 # A message body as a row-builder SELECT over json_each(...) shows it. A body may
 # hold a NUL byte (it is stored byte for byte), and sqlite3 prints a text value
 # only up to its first NUL -- which cut the whole row there (the time, the id)
-# and, in the inbox, dropped the message without ever marking it read. Each NUL
-# is shown as U+2400 instead; a body without one comes through unchanged.
-_AGMSG_SQL_BODY_DISPLAY="CAST((WITH RECURSIVE s(rest,acc) AS (SELECT CAST(json_extract(value,'\$.body') AS BLOB), X'' UNION ALL SELECT substr(rest, instr(rest,X'00')+1), acc || substr(rest,1,instr(rest,X'00')-1) || X'E29080' FROM s WHERE instr(rest,X'00')>0) SELECT acc || rest FROM s ORDER BY length(acc) DESC LIMIT 1) AS TEXT)"
+# and, in the inbox, dropped the message without ever marking it read. A body
+# with a NUL is shown with each NUL as U+2400, for its first 4096 bytes (then
+# " ...[N bytes]"): the work is bounded however many NULs it has. A body without
+# a NUL comes through whole and unchanged.
+_AGMSG_SQL_BODY_DISPLAY="CASE WHEN instr(CAST(json_extract(value,'\$.body') AS BLOB), X'00') > 0 THEN CAST((WITH RECURSIVE s(rest,acc) AS (SELECT substr(CAST(json_extract(value,'\$.body') AS BLOB), 1, 4096), X'' UNION ALL SELECT substr(rest, instr(rest,X'00')+1), acc || substr(rest,1,instr(rest,X'00')-1) || X'E29080' FROM s WHERE instr(rest,X'00')>0) SELECT acc || rest FROM s ORDER BY length(acc) DESC LIMIT 1) AS TEXT) || CASE WHEN length(CAST(json_extract(value,'\$.body') AS BLOB)) > 4096 THEN ' ...[' || length(CAST(json_extract(value,'\$.body') AS BLOB)) || ' bytes]' ELSE '' END ELSE json_extract(value,'\$.body') END"
 
 # Echo the directory that holds (or will hold) the message store.
 #

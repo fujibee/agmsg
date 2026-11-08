@@ -212,19 +212,22 @@ storage_sync_reprocess() {
 storage_send() {
   _JSONL_TEAM="$1"
   local team="$1" from="$2" to="$3" body="$4"
-  # A body with a NUL byte arrives as a file (5th argument). This driver keeps
-  # bodies as JSON strings built in the shell and cannot hold one; refuse it
-  # rather than store a different body.
-  if [ -n "${5:-}" ]; then
-    echo "agmsg: this storage driver (jsonl) cannot hold a message body that contains a NUL byte; nothing was sent" >&2
-    return 1
-  fi
   local id at line; id="$(compat_uuid7)"; at="$(_jsonl_now)"
   _jsonl_init_file
-  line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \
-    --arg to "$to" --arg body "$body" --arg at "$at" \
-    '{type:"message_sent",id:$id,team:$team,from:$from,to:$to,body:$body,at:$at}')" \
-    || return 1
+  if [ -n "${5:-}" ]; then
+    # A body with a NUL byte arrives as a file (5th argument; a shell variable
+    # cannot hold one). jq reads it whole and writes the NUL as its JSON escape
+    # (\u0000), which every reader of the log reads back as the same byte.
+    line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \
+      --arg to "$to" --rawfile body "$5" --arg at "$at" \
+      '{type:"message_sent",id:$id,team:$team,from:$from,to:$to,body:$body,at:$at}')" \
+      || { echo "agmsg: could not write a message body that contains a NUL byte (needs jq 1.6 or newer for --rawfile)" >&2; return 1; }
+  else
+    line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \
+      --arg to "$to" --arg body "$body" --arg at "$at" \
+      '{type:"message_sent",id:$id,team:$team,from:$from,to:$to,body:$body,at:$at}')" \
+      || return 1
+  fi
   _jsonl_with_lock _jsonl_append "$line" || return 1
   printf '%s\n' "$id"
 }

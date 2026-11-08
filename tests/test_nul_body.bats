@@ -4,7 +4,7 @@
 # shell variable, so send.sh keeps it in a file and the store reads it from
 # there), and every place that shows a body shows the message instead of cutting
 # the row at the NUL (the cut used to drop the message from the inbox and leave
-# it unread forever). The jsonl driver cannot hold one and says so.
+# it unread forever). The jsonl driver carries it as the JSON escape for it.
 
 load test_helper
 
@@ -86,11 +86,16 @@ stored_body_hex() {
   grep -qF "a␀b" <<<"$output"
 }
 
-@test "send with the jsonl driver: a body with a NUL is refused by name and nothing is stored" {
+@test "send with the jsonl driver: the NUL body is carried and read back as the same bytes" {
   export AGMSG_STORAGE_DRIVER=jsonl
   run bash "$SCRIPTS/send.sh" team alice bob --body-file "$NULBODY"
-  [ "$status" -ne 0 ]
-  grep -qF "cannot hold a message body that contains a NUL byte" <<<"$output"
+  [ "$status" -eq 0 ]
+  # What the log hands back for that body, byte for byte.
+  bash "$SCRIPTS/export.sh" --team team | jq -j 'select(.type=="message_sent") | .body' > "$BATS_TEST_TMPDIR/back"
+  cmp "$NULBODY" "$BATS_TEST_TMPDIR/back"
+  run bash "$SCRIPTS/inbox.sh" team bob
+  [ "$status" -eq 0 ]
+  grep -qF "a␀b" <<<"$output"
   run bash "$SCRIPTS/inbox.sh" team bob
   grep -qF "No new messages." <<<"$output"
 }
@@ -117,4 +122,15 @@ stored_body_hex() {
   run bash "$SCRIPTS/export.sh" --team team
   [ "$status" -eq 0 ]
   grep -qF 'a\u0000b' <<<"$output"
+}
+
+@test "a body of many NULs is sent and shown in linear time: the display is bounded and says how big the body is" {
+  head -c 100000 /dev/zero > "$BATS_TEST_TMPDIR/many-nul"
+  bash "$SCRIPTS/send.sh" team alice bob --body-file "$BATS_TEST_TMPDIR/many-nul" >/dev/null
+  [ "$(stored_body_hex | wc -c | tr -d ' ')" -eq 200001 ]
+  run bash "$SCRIPTS/inbox.sh" team bob
+  [ "$status" -eq 0 ]
+  grep -qF "[100000 bytes]" <<<"$output"
+  run bash "$SCRIPTS/inbox.sh" team bob
+  grep -qF "No new messages." <<<"$output"
 }
