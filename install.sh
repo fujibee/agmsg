@@ -850,33 +850,54 @@ _drop_stale_codex_roots() {
   done < <(agmsg_codex_stale_writable_paths "$SKILL_DIR")
   [ ${#stale[@]} -gt 0 ] || return 0
 
-  local hit=0
+  local pats=()
   for _s in "${stale[@]}"; do
-    if grep -qF "\"$_s\"" "$code_config" 2>/dev/null; then hit=1; fi
+    pats+=(-e "\"$_s\"")
   done
-  [ "$hit" -eq 1 ] || return 0
+  grep -qF "${pats[@]}" "$code_config" 2>/dev/null || return 0
 
   agmsg_install_op_require || return 1
+  # One pre-edit snapshot for the whole update: the addition below must not
+  # copy the already-cleaned file over it.
   cp "$code_config" "$code_config.bak"
+  AGMSG_CODEX_BAK_DONE="$code_config"
   agmsg_install_op_require || return 1
+  # Scans the writable_roots array character by character so that a quoted
+  # string, a comment or any other key outside that array is never touched.
   AGMSG_STALE_ROOTS="$(printf '%s\n' "${stale[@]}")" awk '
     BEGIN { n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n") }
-    /writable_roots[[:space:]]*=[[:space:]]*\[/ { inr = 1 }
     {
       gone = 0
-      if (inr) {
+      start = 0
+      if (!inr && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) { inr = 1; start = RLENGTH + 1 }
+      else if (inr) start = 1
+      if (start > 0) {
+        len = length($0); instr = 0; endpos = len + 1; closed = 0
+        for (c = start; c <= len; c++) {
+          ch = substr($0, c, 1)
+          if (instr) {
+            if (ch == "\\") c++
+            else if (ch == "\"") instr = 0
+          } else if (ch == "\"") instr = 1
+          else if (ch == "#") { endpos = c; break }
+          else if (ch == "]") { endpos = c; closed = 1; break }
+        }
+        pre = substr($0, 1, start - 1)
+        reg = substr($0, start, endpos - start)
+        post = substr($0, endpos)
         for (i = 1; i <= n; i++) {
           if (st[i] == "") continue
           q = "\"" st[i] "\""
-          while ((k = index($0, q)) > 0) {
-            rest = substr($0, k + length(q))
+          while ((k = index(reg, q)) > 0) {
+            rest = substr(reg, k + length(q))
             sub(/^[ \t]*,[ \t]*/, "", rest)
-            $0 = substr($0, 1, k - 1) rest
+            reg = substr(reg, 1, k - 1) rest
             gone = 1
           }
         }
+        $0 = pre reg post
+        if (closed) inr = 0
       }
-      if (inr && $0 ~ /\]/) inr = 0
       if (!(gone && $0 ~ /^[ \t]*$/)) print
     }
   ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
@@ -894,7 +915,7 @@ _configure_codex_sandbox_file() {
     return 0
   fi
 
-  _drop_stale_codex_roots "$code_config"
+  _drop_stale_codex_roots "$code_config" || return 1
 
   local missing=()
   local p
@@ -910,7 +931,9 @@ _configure_codex_sandbox_file() {
   fi
 
   agmsg_install_op_require || return 1
-  cp "$code_config" "$code_config.bak"
+  if [ "${AGMSG_CODEX_BAK_DONE:-}" != "$code_config" ]; then
+    cp "$code_config" "$code_config.bak"
+  fi
   agmsg_install_op_require || return 1
   echo "  ~ backed up $code_config → $code_config.bak"
 

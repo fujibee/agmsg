@@ -168,9 +168,12 @@ writable_roots = [
   "$FAKE_HOME/.agents/skills/other/db"
 ]
 EOF
+  cp "$FAKE_HOME/.codex/config.toml" "$BATS_TEST_TMPDIR/original.toml"
   run inst --update
   [ "$status" -eq 0 ]
   local cfg="$FAKE_HOME/.codex/config.toml" p
+  # the backup is the file as it was before the update touched it
+  cmp "$cfg.bak" "$BATS_TEST_TMPDIR/original.toml"
   # no writable root is, or contains, a link
   for p in $(grep -o '"[^"]*"' "$cfg" | tr -d '"' | grep '^/'); do
     [ ! -L "$p" ]
@@ -192,6 +195,31 @@ EOF
   run inst --update
   [ "$status" -eq 0 ]
   cmp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+}
+
+@test "--update only edits the writable_roots array: comments, other keys and text after the array keep a stale path" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  cat > "$FAKE_HOME/.codex/config.toml" <<EOF
+model = "$SK/db"
+[sandbox_workspace_write]
+writable_roots = ["$FAKE_HOME/mine", "$SK/db"] # was "$SK/run"
+note = "$SK/teams"
+# writable_roots = [
+#   "$SK/ext-tools",
+# ]
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  grep -qxF "model = \"$SK/db\"" "$cfg"
+  grep -qxF "#   \"$SK/ext-tools\"," "$cfg"
+  grep -qxF "note = \"$SK/teams\"" "$cfg"
+  grep -qF "# was \"$SK/run\"" "$cfg"
+  grep -qF "\"$FAKE_HOME/mine\"" "$cfg"
+  # inside the array the stale entry is gone
+  refute grep -qE 'writable_roots = \[[^]]*"'"$SK"'/db"' "$cfg"
 }
 
 @test "uninstall removes the state root too, and its Codex entries" {
