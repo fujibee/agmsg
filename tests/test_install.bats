@@ -949,6 +949,49 @@ EOF
   [ "$(cat "$fake/agmsg-argv-log")" = "2:daemon start" ]
 }
 
+# #1941/#1928 regression: install.sh's own top-level `. "$SCRIPT_DIR/scripts/
+# lib/down-notice.sh"` (added by #1928, line ~36, ABOVE the "# --- Defaults
+# ---" marker `_install_fns` cuts at) sets down-notice.sh's include guard and
+# resolves its root to wherever THIS sourcing happens to run from. The two
+# tests above only ever exercise agmsg_install_restart_daemon's FAILURE
+# branch (down_notice_set) -- this one targets its SUCCESS branch
+# (down_notice_clear) instead, the one the apostrophe/space tests above
+# cannot reach because their fake daemon.sh always fails. Caught directly
+# (not via real daemon.sh, so a real Node/nvm resolution on the test machine
+# can never mask it the way it masked the end-to-end install/update tests
+# in a review): a `( . "$fake/..." )` re-source inherits that guard
+# like any other variable, so without AGMSG_DOWN_NOTICE_ROOT the clear would
+# silently act on the WRONG root (wherever $fns was sourced from, never
+# `$fake`) instead of returning an error -- this must be caught by checking
+# the RIGHT root was touched, not just that the call did not fail.
+@test "agmsg_install_restart_daemon: a successful restart clears THIS install's own down_notice, not the sourcing root's" {
+  local fns fake="$FAKE_HOME/fake-skill-clear"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',5); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  # A pre-existing down_notice, as if an earlier restart attempt had failed.
+  ( . "$fake/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$fake/run/down/agmsgd.json" ]
+  fns="$(_install_fns)"
+  # A stub daemon.sh that always reports a successful start, unconditionally
+  # -- real Node resolution (nvm, AGMSG_CODEX_NODE, ...) plays no part here,
+  # so this result cannot be an accident of what happens to be on this
+  # machine's PATH.
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+echo "agmsg daemon start: running"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  # The bug: the sourcing root's OWN run/down/agmsgd.json (never created by
+  # anything in this test) would exist here if the clear silently hit the
+  # wrong root instead of $fake's.
+  [ ! -f "$BATS_TEST_TMPDIR/run/down/agmsgd.json" ]
+  [ ! -f "$fake/run/down/agmsgd.json" ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.
