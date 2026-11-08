@@ -300,11 +300,11 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     # happens to own that name on PATH (same reasoning as #1927). Quoted
     # with single quotes (same scheme as lib/shquote.sh, inlined rather
     # than sourced since this function runs before this script is known
-    # to be the up-to-date tree), NOT %q: down_notice_set's own text
-    # sanitizer turns every backslash into a slash (review round 3),
-    # which corrupts a %q backslash-escaped space rather than preserving
-    # it, and this recorded command is meant to actually be run, not just
-    # read (review round 3's own case executes it).
+    # to be the up-to-date tree) -- down_notice_set now JSON-escapes free
+    # text rather than rewriting it (#1929), so this would also survive
+    # %q, but single quotes need no bash-version-dependent escaping of
+    # their own and this recorded command is meant to actually be run,
+    # not just read.
     local shq_agmsg
     shq_agmsg="'$(printf '%s' "$skill/scripts/agmsg" | sed "s/'/'\\\\''/g")'"
     ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_set agmsgd down \

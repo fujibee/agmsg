@@ -425,6 +425,27 @@ WRAPPER
   [ "$(cat "$side/agmsg-argv-log")" = "2:daemon start" ]
 }
 
+@test "warn_if_stopped persists a recovery command that tokenizes and resolves for an install path containing an apostrophe" {
+  # Same setup as the space-path case above, but for the install-path
+  # character that down_notice_set's own sanitizer used to corrupt by
+  # destroying the backslash a single-quote escape needs (#1929) -- this
+  # is the regression test for that fix, exercised through this caller.
+  local side="$TEST_SKILL_DIR/side's install"
+  mkdir -p "$side/run" "$side/scripts/lib"
+  cp "$SCRIPTS/lib/daemon-state.sh" "$SCRIPTS/lib/down-notice.sh" "$SCRIPTS/lib/shquote.sh" "$SCRIPTS/lib/instance-id.sh" "$side/scripts/lib/"
+  sqlite3 "$side/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$side/run/install.db" "UPDATE daemon_intent SET desired='on'; DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$side" > "$side/scripts/agmsg"
+  chmod +x "$side/scripts/agmsg"
+  run bash -c 'source "$1/scripts/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always' _ "$side"
+  [ "$status" -eq 0 ]
+  [ -f "$side/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(bash -c 'source "$1/scripts/lib/down-notice.sh"; down_notice_list' _ "$side" | awk -F'\t' '{print $5}')"
+  eval "$recovery"
+  [ "$(cat "$side/agmsg-argv-log")" = "2:daemon start" ]
+}
+
 @test "self-heal never re-triggers itself (AGMSG_DAEMON_SELF_HEAL guard, no recursion)" {
   # Point daemon.sh at a shim that would record a call if one ever happened,
   # so the guard's effect is checked by its absence, not just the function's

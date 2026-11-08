@@ -254,10 +254,11 @@ agmsg_daemon_warn_if_stopped() {
   # word "agmsg" would name whichever install owns that name on PATH, not
   # necessarily this one -- a --cmd side install's own copy is the one
   # that must actually recover it (same reasoning as #1927). Quoted with
-  # agmsg_shq (single quotes), NOT %q: down_notice_set's own text
-  # sanitizer turns every backslash into a slash (review round 3), which
-  # corrupts a %q backslash-escaped space rather than preserving it, and
-  # this recorded command is meant to actually be run, not just read.
+  # agmsg_shq (single quotes): down_notice_set now JSON-escapes free text
+  # rather than rewriting it (#1929), so a backslash-escaped path survives
+  # the round trip either way -- single quotes are kept here for their own
+  # sake (one escape rule, portable across bash versions), not to dodge a
+  # sanitizer bug.
   [ "$AGMSGD_HEALTH" != stopped ] || down_notice_set agmsgd down "$AGMSGD_REASON" \
     "$(agmsg_shq "$_AGMSG_DAEMON_ROOT/scripts/agmsg") daemon start" || :
   if [ "${1:-}" = always ]; then
