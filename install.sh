@@ -889,9 +889,13 @@ _drop_stale_codex_roots() {
     }
     {
       gone = 0
-      start = 0
-      if (!inr && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) { inr = 1; start = RLENGTH + 1 }
-      else if (inr) start = 1
+      ed = 0
+      start = 1
+      # every line is scanned so that a multi-line string anywhere in the file
+      # is known before a line is taken for the writable_roots key; only the
+      # array itself is edited
+      if (inr) ed = 1
+      else if (ms == "" && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) { inr = 1; ed = 1; start = RLENGTH + 1 }
       if (start > 0) {
         len = length($0); out = substr($0, 1, start - 1); c = start
         while (c <= len) {
@@ -924,7 +928,7 @@ _drop_stale_codex_roots() {
               body = substr(tok, 2, length(tok) - 2)
               val = (ch == "\"") ? dec(body) : body
             }
-            if (val in stale) {
+            if (ed && (val in stale)) {
               c = e + 1
               if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
               gone = 1
@@ -933,7 +937,7 @@ _drop_stale_codex_roots() {
             out = out tok; c = e + 1
           } else if (ch == "#") {
             out = out substr($0, c); break
-          } else if (ch == "]") {
+          } else if (ch == "]" && ed) {
             out = out substr($0, c); inr = 0; break
           } else { out = out ch; c++ }
         }

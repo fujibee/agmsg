@@ -285,6 +285,62 @@ EOF
   refute grep -qF "replaced Codex writable_roots entries" <<<"$output"
 }
 
+# The removal on its own, without the addition that follows it in an update
+# (which reads the file by lines and is changed separately).
+drop_stale_alone() {   # <config.toml> <stale path>
+  run env STALE_PATH="$2" bash -c '
+    SKILL_DIR=/fixture/skill
+    eval "$(sed -n "/^_drop_stale_codex_roots()/,/^}/p" "$1/install.sh")"
+    agmsg_install_op_require() { return 0; }
+    move_into_place() { mv "$1" "$2"; }
+    agmsg_codex_stale_writable_paths() { echo "$STALE_PATH"; }
+    _drop_stale_codex_roots "$2"
+  ' _ "$REPO_ROOT" "$1"
+}
+
+@test "the removal reads only the real array: writable_roots text inside a multi-line string elsewhere is kept byte for byte" {
+  local cfg="$BATS_TEST_TMPDIR/c.toml"
+  cat > "$cfg" <<'EOF'
+developer_instructions = """
+Keep this example literally:
+writable_roots = ["/fixture/skill/db"]
+"""
+other = '''
+writable_roots = ["/fixture/skill/db"]
+'''
+[sandbox_workspace_write]
+writable_roots = ["/fixture/skill/db", "/mine"]
+EOF
+  drop_stale_alone "$cfg" /fixture/skill/db
+  [ "$status" -eq 0 ]
+  [ "$(cat "$cfg")" = "$(printf '%s\n' \
+    'developer_instructions = """' \
+    'Keep this example literally:' \
+    'writable_roots = ["/fixture/skill/db"]' \
+    '"""' \
+    "other = '''" \
+    'writable_roots = ["/fixture/skill/db"]' \
+    "'''" \
+    '[sandbox_workspace_write]' \
+    'writable_roots = ["/mine"]')" ]
+}
+
+@test "the removal changes nothing when only text outside the array mentions the path" {
+  local cfg="$BATS_TEST_TMPDIR/c.toml"
+  cat > "$cfg" <<'EOF'
+developer_instructions = """
+writable_roots = ["/fixture/skill/db"]
+"""
+[sandbox_workspace_write]
+writable_roots = ["/mine"]
+EOF
+  cp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+  drop_stale_alone "$cfg" /fixture/skill/db
+  [ "$status" -eq 0 ]
+  cmp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+  [ ! -e "$cfg.bak" ] && [ ! -e "$cfg.tmp" ]
+}
+
 @test "--update follows the TOML string rules across lines: a multi-line string is one value, not array elements" {
   inst
   demote
