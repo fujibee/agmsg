@@ -145,7 +145,7 @@ _plugin_fetch() {
 # Read one key from agmsg-plugin.conf as data (never sourced).
 _plugin_conf_get() {
   local file="$1" key="$2" line v
-  line="$( { tr -d '\r' < "$file" | grep -E "^[[:space:]]*${key}[[:space:]]*=" || true; } | head -1)"
+  line="$( { LC_ALL=C tr -d '\r' < "$file" | grep -E "^[[:space:]]*${key}[[:space:]]*=" || true; } | head -1)"
   v="${line#*=}"
   v="${v#"${v%%[![:space:]]*}"}"
   v="${v%"${v##*[![:space:]]}"}"
@@ -743,7 +743,7 @@ _plugin_next_steps() {  # dir drivers
   local dir="$1" drivers="$2" ref axis name d scripts teams
   [ -n "$drivers" ] || return 0
   scripts="$(printf '%q' "$PLUGIN_ROOT/scripts")"
-  teams="$(ls -1 "$PLUGIN_ROOT/teams" 2>/dev/null | paste -sd, - | sed 's/,/, /g' || true)"
+  teams="$(ls -1 "$PLUGIN_ROOT/teams" 2>/dev/null | LC_ALL=C paste -sd, - | sed 's/,/, /g' || true)"
   case $'\n'"$drivers" in *$'\n'ext-tools/*) _plugin_load_ext_members ;; esac
   echo
   echo "Next:"

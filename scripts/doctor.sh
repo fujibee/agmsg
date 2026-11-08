@@ -471,7 +471,7 @@ fi
 # generic "no registrations match this scope" exit 2 below instead, which
 # reaches the same exit code by the same means every other empty scope does.
 if [ -n "$FILTER_TYPE" ] && ! agmsg_is_known_type "$FILTER_TYPE"; then
-  echo "doctor: unknown agent type: '$FILTER_TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g'))" >&2
+  echo "doctor: unknown agent type: '$FILTER_TYPE' (supported: $(agmsg_known_types | sort -u | LC_ALL=C paste -sd, - | sed 's/,/, /g'))" >&2
   exit 2
 fi
 if [ -n "$FILTER_TEAM" ]; then

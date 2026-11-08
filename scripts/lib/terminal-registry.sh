@@ -1025,12 +1025,12 @@ _agmsg_placement_retire_previous() {
   dir="$(dirname "$mine")"
   cfg="$(dirname "$dir")/teams/$team/config.json"
   [ -f "$cfg" ] || return 0
-  esc="$(sed "s/'/''/g" "$cfg" 2>/dev/null)" || return 0
+  esc="$(LC_ALL=C sed "s/'/''/g" "$cfg" 2>/dev/null)" || return 0
   while IFS= read -r m; do
     [ -n "$m" ] && [ "$m" != "$agent" ] || continue
     cand="${cand}$(agmsg_spawn_path "$team" "$m" 2>/dev/null)"$'\n'
   done <<EOF
-$(sqlite3 :memory: "SELECT key FROM json_each(json_extract('$esc', '\$.agents'));" 2>/dev/null | tr -d '\r')
+$(sqlite3 :memory: "SELECT key FROM json_each(json_extract('$esc', '\$.agents'));" 2>/dev/null | LC_ALL=C tr -d '\r')
 EOF
   [ -n "$cand" ] || return 0
   while IFS= read -r s; do

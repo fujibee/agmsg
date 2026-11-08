@@ -245,7 +245,7 @@ agmsg_install_op_run_phase() {
 }
 
 _agmsg_install_op_sql_quote() {
-  printf '%s' "$1" | sed "s/'/''/g"
+  printf '%s' "$1" | LC_ALL=C sed "s/'/''/g"
 }
 
 _agmsg_install_op_pending_fields() {

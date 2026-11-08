@@ -52,6 +52,6 @@ agmsg_sql_readfile_ok() {
   local path="$1" seen
   seen="$(sqlite3 :memory: \
     "SELECT readfile('$(agmsg_sql_readfile_path "$path")') IS NOT NULL;" \
-    2>/dev/null | tr -d '\r')"
+    2>/dev/null | LC_ALL=C tr -d '\r')"
   [ "$seen" = "1" ]
 }

@@ -75,7 +75,7 @@ _herdr_pane_for_session() {
   [ "$rc" -eq 0 ] || return 2
   [ -n "$json" ] || return 2
   local jesc valid vrc=0
-  jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  jesc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   # POSITIVE PROOF the list is something we could actually read: exit-0 bytes are
   # not proof of a live-agent set. Invalid JSON, a bad schema, or an unavailable
   # sqlite all mean "could not answer" (return 2), NOT "answered, no match".
@@ -83,7 +83,7 @@ _herdr_pane_for_session() {
   [ "$vrc" -eq 0 ] || return 2
   [ "$valid" = 1 ] || return 2
   local q pane sesc jtype jtrc alen det badhit out orc
-  sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
+  sesc="$(printf '%s' "$sid" | LC_ALL=C sed "s/'/''/g")"
   # The claim "not among" is a claim about the WHOLE set, so it is only honest when
   # every entry's membership is DECIDABLE. The trap (over several review rounds, then
   # the live measurement) is grabbing a proxy for "decidable":
@@ -456,7 +456,7 @@ _herdr_cli() {   # <id> <herdr args...>
 
 _herdr_new_pane_id() {
   local json="$1" q pane esc
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   for q in '$.result.pane.pane_id' '$.result.root_pane.pane_id' '$.pane.pane_id' '$.root_pane.pane_id'; do
     # A usable pane id must match the pane-id grammar, not merely be non-empty text:
     # a numeric/null pane_id (malformed/partial response) OR a text one carrying a
@@ -502,7 +502,7 @@ _herdr_pane_input_ready() {
   local pane="$1" info rc=0 sp fg jesc
   info="$(_herdr_cli "$pane" pane process-info --pane "$(_herdr_bare_of "$pane")" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || return 2
-  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  jesc="$(printf '%s' "$info" | LC_ALL=C sed "s/'/''/g")"
   # Require the JSON TYPE to be integer, in the SAME payload, BEFORE reading the value:
   # a JSON string "123" extracts as 123 and would pass a digit check, but a pid that
   # arrives as a string is not a validated pid. The CASE yields the value only when
@@ -623,7 +623,7 @@ terminal_pane_state() {
   [ -n "$json" ] || { echo unknown; return 10; }
 
   local jesc valid vrc=0
-  jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  jesc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
   [ "$vrc" -eq 0 ] || { echo unknown; return 10; }
   [ "$valid" = 1 ] || { echo unknown; return 10; }
@@ -648,7 +648,7 @@ terminal_pane_state() {
   # The asymmetry is the point — the cheap answer is permissive, the destructive
   # one is not.
   local iesc q jtype jtrc out orc alen det hit
-  iesc="$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")"   # responses carry the BARE pane
+  iesc="$(printf '%s' "$(_herdr_bare_of "$id")" | LC_ALL=C sed "s/'/''/g")"   # responses carry the BARE pane
   for q in '$.result.agents' '$' '$.agents' '$.result'; do
     jtrc=0
     jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
@@ -709,8 +709,8 @@ terminal_where() {
   _herdr_pane_id_ok "$id" || { echo unsupported; return 13; }
   json="$(_herdr_cli "$id" pane layout --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$json" ] || { echo unknown; return 10; }
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")'" 2>/dev/null)" \
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
+  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$(_herdr_bare_of "$id")" | LC_ALL=C sed "s/'/''/g")'" 2>/dev/null)" \
     || { echo unknown; return 10; }
   container="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.layout.tab_id')" 2>/dev/null)" \
     || { echo unknown; return 10; }
@@ -727,9 +727,9 @@ terminal_where() {
 # Output: unchanged, different, ambiguous_layout, or runtime_error.
 _herdr_arrange_state() {
   local json="$1" source="$2" intent="$3" target="$4" esc sesc tesc dir result rc=0
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  sesc="$(printf '%s' "$source" | sed "s/'/''/g")"
-  tesc="$(printf '%s' "$target" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
+  sesc="$(printf '%s' "$source" | LC_ALL=C sed "s/'/''/g")"
+  tesc="$(printf '%s' "$target" | LC_ALL=C sed "s/'/''/g")"
   case "$intent" in place_below) dir=down ;; place_right) dir=right ;; *) echo unsupported; return 13 ;; esac
   # A candidate split must contain both panes, have the requested direction,
   # and agree with their rectangle order. Among those, the smallest area is the
@@ -769,20 +769,20 @@ _herdr_arrange_state() {
 
 _herdr_move_changed() {
   local json="$1" esc
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   [ "$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.move_result.changed')" 2>/dev/null)" = 1 ]
 }
 
 _herdr_move_created_tab() {
   local json="$1" esc
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   sqlite3 :memory: "SELECT json_extract('$esc','\$.result.move_result.created_tab.tab_id')" 2>/dev/null
 }
 
 _herdr_layout_has_pane() {
   local json="$1" id="$2" esc iesc count
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
+  iesc="$(printf '%s' "$id" | LC_ALL=C sed "s/'/''/g")"
   count="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id')='$iesc'" 2>/dev/null)" \
     || return 1
   [ "$count" = 1 ]
@@ -790,7 +790,7 @@ _herdr_layout_has_pane() {
 
 _herdr_swap_changed() {
   local json="$1" esc changed
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   changed="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.swap_result.changed')" 2>/dev/null)" \
     || return 2
   case "$changed" in
@@ -854,7 +854,7 @@ terminal_arrange() {
     unknown) echo unknown; return 10 ;;
     *) echo runtime_error; [ "$rc" -ne 0 ] && return "$rc"; return 10 ;;
   esac
-  tab="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$layout" | sed "s/'/''/g")','\$.result.layout.tab_id')" 2>/dev/null)" \
+  tab="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$layout" | LC_ALL=C sed "s/'/''/g")','\$.result.layout.tab_id')" 2>/dev/null)" \
     || { echo runtime_error; return 10; }
   [ -n "$tab" ] || { echo runtime_error; return 10; }
   first="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --new-tab --no-focus 2>/dev/null)" || { echo runtime_error; echo "herdr: failed before moving '$source' to a temporary tab" >&2; return 12; }
@@ -990,7 +990,7 @@ _herdr_peek_impl() {
     # about another pane: all of those are 11, with the body forwarded above.
     local _code="" _pane="" _esc
     if [ -n "$stdout_body" ] && command -v sqlite3 >/dev/null 2>&1; then
-      _esc="$(printf '%s' "$stdout_body" | sed "s/'/''/g")"
+      _esc="$(printf '%s' "$stdout_body" | LC_ALL=C sed "s/'/''/g")"
       _code="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.code')='text' THEN json_extract('$_esc','\$.error.code') ELSE '' END" 2>/dev/null || true)"
       _pane="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.pane')='text' THEN json_extract('$_esc','\$.error.pane') ELSE '' END" 2>/dev/null || true)"
     fi
@@ -1018,8 +1018,8 @@ terminal_team_observe() {
   _herdr_pane_id_ok "$id" || return 13
   pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
   agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
-  pesc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
-  aesc="$(printf '%s' "$agents_json" | sed "s/'/''/g")"
+  pesc="$(printf '%s' "$pane_json" | LC_ALL=C sed "s/'/''/g")"
+  aesc="$(printf '%s' "$agents_json" | LC_ALL=C sed "s/'/''/g")"
   activity="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing')" 2>/dev/null)" || return 10
   label="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.label'),'unknown:pane_label_missing')" 2>/dev/null)" || return 10
   title="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.terminal_title'),'unknown:terminal_title_missing')" 2>/dev/null)" || return 10
@@ -1045,7 +1045,7 @@ terminal_team_observe() {
   #
   # The nesting does the split: the inner COALESCE fires only when a row matched,
   # the outer one only when none did.
-  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
+  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$(_herdr_bare_of "$id")" | LC_ALL=C sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
   case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
   printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
 }
@@ -1066,7 +1066,7 @@ terminal_team_input_ready() {
       *) printf 'unknown:agent_query_failed\n'; return 2 ;;
     esac
   fi
-  escaped="$(printf '%s' "$raw" | sed "s/'/''/g")"
+  escaped="$(printf '%s' "$raw" | LC_ALL=C sed "s/'/''/g")"
   kind="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent')='text' THEN json_extract('$escaped','$.result.agent.agent') ELSE '' END" 2>/dev/null)" \
     || { printf 'unknown:agent_response_invalid\n'; return 2; }
   status="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent_status')='text' THEN json_extract('$escaped','$.result.agent.agent_status') ELSE '' END" 2>/dev/null)" \
@@ -1134,11 +1134,11 @@ terminal_pane_focused() {   # <id>
   bare="$(_herdr_bare_of "$id")"
   json="$(_herdr_cli "$id" pane list 2>/dev/null)" || return 10
   [ -n "$json" ] || return 10
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   local valid
   valid="$(sqlite3 :memory: "SELECT json_valid('$esc')" 2>/dev/null)" || vrc=$?
   [ "$vrc" -eq 0 ] && [ "$valid" = 1 ] || return 10
-  besc="$(printf '%s' "$bare" | sed "s/'/''/g")"
+  besc="$(printf '%s' "$bare" | LC_ALL=C sed "s/'/''/g")"
   val="$(sqlite3 :memory: "
     SELECT json_extract(value,'\$.focused') FROM json_each('$esc','\$.result.panes')
     WHERE json_extract(value,'\$.pane_id') = '$besc' LIMIT 1" 2>/dev/null)"
@@ -1302,10 +1302,10 @@ terminal_find_by_label() {   # <label>
   command -v herdr >/dev/null 2>&1 || return 10
   json="$(herdr pane list 2>/dev/null)" || return 10
   [ -n "$json" ] || return 10
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   local rows id
   rows="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
-                    WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | sed "s/'/''/g")'
+                    WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | LC_ALL=C sed "s/'/''/g")'
                       AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null)" || return 10
   # EMITTER HALF (#1134): print only pane ids in this driver's grammar. herdr's
   # listing is trusted for labels, not for the shape of its ids, and a row that
@@ -1338,7 +1338,7 @@ terminal_label_of() {   # <id>
   command -v herdr >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
   pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
-  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$pane_json" | LC_ALL=C sed "s/'/''/g")"
   # NULLIF: json_extract returns SQL NULL for a missing key and '' for a key set
   # to the empty string, and both mean "this pane carries no label" -- neither is
   # a label to confirm against. COALESCE alone would let '' through and an empty
@@ -1411,8 +1411,8 @@ terminal_name() {
       echo "herdr: 'agent get' for pane '$id' failed${json:+: $json}" >&2
       return 13
     fi
-    esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-    bare="$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")"
+    esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
+    bare="$(printf '%s' "$(_herdr_bare_of "$id")" | LC_ALL=C sed "s/'/''/g")"
     current="$(sqlite3 :memory: "SELECT CASE
       WHEN json_type('$esc','\$.result.agent')='object'
         AND json_extract('$esc','\$.result.agent.pane_id')='$bare'
@@ -1533,7 +1533,7 @@ terminal_pane_process_observe() {   # <candidate>
   command -v sqlite3 >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
   info="$(_herdr_cli "$id" pane process-info --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
-  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  jesc="$(printf '%s' "$info" | LC_ALL=C sed "s/'/''/g")"
   seen="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.pane_id')='text' THEN json_extract('$jesc','\$.result.process_info.pane_id') ELSE '' END" 2>/dev/null)" || return 10
   [ "$seen" = "$(_herdr_bare_of "$id")" ] || return 10   # the response names the BARE pane
   # Both of these are part of the schema this op reads. Absent, or present with
@@ -1618,7 +1618,7 @@ terminal_enumerate_panes() {
   command -v sqlite3 >/dev/null 2>&1 || return 10
   sessions="$(herdr session list --json 2>/dev/null)" || return 10
   [ -n "$sessions" ] || return 10
-  jesc="$(printf '%s' "$sessions" | sed "s/'/''/g")"
+  jesc="$(printf '%s' "$sessions" | LC_ALL=C sed "s/'/''/g")"
   n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.sessions')='array' THEN json_array_length('$jesc','\$.sessions') ELSE -1 END" 2>/dev/null)" || return 10
   case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
   n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running') IN ('true','false') AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
@@ -1650,7 +1650,7 @@ EOF
 # a named hole rather than into "that instance has fewer panes".
 _herdr_panes_of() {   # <socket> <pane-list-json>
   local sock="$1" jesc n_all n_ok ids
-  jesc="$(printf '%s' "$2" | sed "s/'/''/g")"
+  jesc="$(printf '%s' "$2" | LC_ALL=C sed "s/'/''/g")"
   n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.panes')='array' THEN json_array_length('$jesc','\$.result.panes') ELSE -1 END" 2>/dev/null)" || return 1
   case "$n_all" in ''|*[!0-9]*) return 1 ;; esac
   n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
@@ -1687,7 +1687,7 @@ terminal_fence() {   # <id>
   command -v herdr >/dev/null 2>&1 || { printf '%s\tunknown:terminal_unreachable\n' "$instance"; return 2; }
   _herdr_pane_id_ok "$id" || { printf '%s\tunknown:invalid_pane_id\n' "$instance"; return 2; }
   pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }
-  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$pane_json" | LC_ALL=C sed "s/'/''/g")"
   tid="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','\$.result.pane.terminal_id')='text' THEN json_extract('$esc','\$.result.pane.terminal_id') ELSE '' END" 2>/dev/null)" \
     || { printf '%s\tunknown:pane_response_invalid\n' "$instance"; return 2; }
   [ -n "$tid" ] || { printf '%s\tunknown:terminal_id_missing\n' "$instance"; return 2; }

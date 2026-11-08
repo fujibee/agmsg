@@ -271,9 +271,9 @@ _jsonl_unread_duckdb() {
   # SQL-escape every value spliced into the query (team/agent are not apostrophe-
   # free per validate.sh, and the path may contain one) so a legal team/agent that
   # the jq path handles can't break — or silently misbehave on — the duckdb path.
-  tl="$(printf '%s' "$team"  | sed "s/'/''/g")"
-  al="$(printf '%s' "$agent" | sed "s/'/''/g")"
-  lg="$(printf '%s' "$log"   | sed "s/'/''/g")"
+  tl="$(printf '%s' "$team"  | LC_ALL=C sed "s/'/''/g")"
+  al="$(printf '%s' "$agent" | LC_ALL=C sed "s/'/''/g")"
+  lg="$(printf '%s' "$log"   | LC_ALL=C sed "s/'/''/g")"
   # Read the query from the companion .sql DATA file and fill placeholders with
   # plain bash substitution (literal, so a value with sed-special / regex chars is
   # safe). Keeping the SQL out of this shell file is what makes the driver parse

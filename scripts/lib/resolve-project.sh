@@ -206,7 +206,7 @@ agmsg_project_path_variants() {
 agmsg_project_sql_in_list() {
   local path="$1" candidate escaped out=""
   while IFS= read -r candidate; do
-    escaped=$(printf '%s' "$candidate" | sed "s/'/''/g")
+    escaped=$(printf '%s' "$candidate" | LC_ALL=C sed "s/'/''/g")
     out="${out:+$out,}'$escaped'"
   done < <(agmsg_project_path_variants "$path")
   printf '%s' "$out"
@@ -471,7 +471,7 @@ _agmsg_msys_ancestor_pid() {   # <image>
   case "$winpid" in ''|*[!0-9]*) return 1 ;; esac
   found="$(powershell.exe -NoProfile -Command \
     "\$id=$winpid; for(\$i=0;\$i -lt 16 -and \$id;\$i++){ \$p=Get-CimInstance Win32_Process -Filter \"ProcessId=\$id\"; if(-not \$p){break}; if(\$p.Name -ieq '$image'){\$p.ProcessId;break}; \$id=\$p.ParentProcessId }" \
-    2>/dev/null | tr -d '\r')"
+    2>/dev/null | LC_ALL=C tr -d '\r')"
   case "$found" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$found"
 }
@@ -587,7 +587,7 @@ agmsg_registered_projects() {
   # `.param set` dot-command — the sqlite3 shell tokenizer doesn't honour SQL ''
   # escaping, so a config value with a single quote breaks the bind (#112). The
   # path and type are interpolated as SQL string literals with '' doubling.
-  type_sql=$(printf '%s' "$type" | sed "s/'/''/g")
+  type_sql=$(printf '%s' "$type" | LC_ALL=C sed "s/'/''/g")
   local -a configs
   if [ -n "$team" ]; then
     configs=("$teams_dir/$team/config.json")
@@ -610,7 +610,7 @@ agmsg_registered_projects() {
       SELECT DISTINCT json_extract(r.value, '\$.project')
       FROM agents, json_each(agents.registrations) AS r
       WHERE json_extract(r.value, '\$.type') = '$type_sql';
-    " | tr -d '\r'
+    " | LC_ALL=C tr -d '\r'
   done
 }
 
@@ -635,7 +635,7 @@ agmsg_registered_type() {
   # same command).
   config_file="${SKILL_DIR:-}/teams/$team/config.json"
   [ -n "$team" ] && [ -n "$agent" ] && [ -f "$config_file" ] || return 1
-  agent_sql=$(printf '%s' "$agent" | sed "s/'/''/g")
+  agent_sql=$(printf '%s' "$agent" | LC_ALL=C sed "s/'/''/g")
   cfg_sql=$(agmsg_sql_readfile_path "$config_file")
   out="$(sqlite3 :memory: "
     WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
@@ -651,7 +651,7 @@ agmsg_registered_type() {
     SELECT DISTINCT json_extract(r.value, '\$.type')
     FROM agent, json_each(agent.registrations) AS r
     WHERE json_extract(r.value, '\$.type') IS NOT NULL;
-  " 2>/dev/null | tr -d '\r')"
+  " 2>/dev/null | LC_ALL=C tr -d '\r')"
   n=$(printf '%s\n' "$out" | sed '/^$/d' | wc -l | tr -d '[:space:]')
   [ "$n" -eq 1 ] || return 1
   printf '%s\n' "$out"

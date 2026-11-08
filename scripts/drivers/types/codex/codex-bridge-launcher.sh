@@ -514,10 +514,10 @@ _start_token() {
   local -a a
   if _agmsg_is_windows; then
     for bin in powershell.exe pwsh; do
-      # `tr -d '\r'` because PowerShell writes CRLF and Node's .trim() on the
+      # `LC_ALL=C tr -d '\r'` because PowerShell writes CRLF and Node's .trim() on the
       # writer side strips it there, so both end up with the bare digits.
       tok="$("$bin" -NoProfile -NonInteractive -Command \
-        "(Get-Process -Id $pid).StartTime.Ticks" 2>/dev/null | tr -d '\r' | head -n 1)"
+        "(Get-Process -Id $pid).StartTime.Ticks" 2>/dev/null | LC_ALL=C tr -d '\r' | head -n 1)"
       tok="${tok#"${tok%%[![:space:]]*}"}"
       tok="${tok%"${tok##*[![:space:]]}"}"
       case "$tok" in ''|*[!0-9]*) continue ;; esac
@@ -850,12 +850,12 @@ bridge_stop_retrying() {
   # launcher's own lines do not count, and an older refusal is not picked over a
   # newer different failure. The bridge's closing "stopping after N consecutive
   # failures" line follows every such failure and says nothing about its cause.
-  cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . || true)"
+  cause="$(tail -n 60 "$log" 2>/dev/null | LC_ALL=C grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | LC_ALL=C grep . || true)"
   # A failure is one stamped line ("[pid] ... codex-bridge: ...") that the
   # watcher's own detail lines follow unstamped; the stamped line is the cause.
   # A log with no stamped line falls back to its last line.
-  cause="$(printf '%s\n' "$cause" | { grep -E '^\[[0-9]+\] ' || true; } | tail -n 1 | cut -c1-300)"
-  [ -n "$cause" ] || cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . | tail -n 1 | cut -c1-300 || true)"
+  cause="$(printf '%s\n' "$cause" | { LC_ALL=C grep -E '^\[[0-9]+\] ' || true; } | tail -n 1 | LC_ALL=C cut -c1-300)"
+  [ -n "$cause" ] || cause="$(tail -n 60 "$log" 2>/dev/null | LC_ALL=C grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | LC_ALL=C grep . | tail -n 1 | LC_ALL=C cut -c1-300 || true)"
   case "$cause" in
     *'not serving these pairs'*|*'was claimed by session'*)
       lead="another session holds this role (last bridge message: $cause)"

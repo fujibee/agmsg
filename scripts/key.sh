@@ -45,7 +45,7 @@ CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
 
 # Escape interpolated identifiers as SQL string literals (parity with
 # rename.sh/send.sh): a value with a single quote would break the query.
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+_agmsg_sqlesc() { printf %s "$1" | LC_ALL=C sed "s/'/''/g"; }
 
 _key_team_config() {
   printf '%s' "$TEAMS_DIR/$1/config.json"
@@ -83,7 +83,7 @@ _key_require_age() {
 _key_read_config_field() {
   local cfg="$1" path="$2" escaped
   [ -f "$cfg" ] || { echo "null"; return; }
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   agmsg_sqlite_mem "SELECT json_extract('$escaped', '$path');"
 }
 
@@ -137,7 +137,7 @@ _key_epoch_json() {
 # epoch and appends it to remote_key.epochs.
 _key_write_epoch_locked() {
   local cfg="$1" epoch_expr="$2" escaped updated
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   # <escaped> is spliced as a genuine SQL string literal, NOT bound via
   # `.param set` (same tokenizer caveat as `_key_read_config_field` above).
   updated=$(agmsg_sqlite_mem \
@@ -167,7 +167,7 @@ _key_write_epoch_locked() {
 # out-of-band replacement only after its fingerprint is announced".
 _key_stage_epoch_locked() {
   local cfg="$1" epoch_expr="$2" escaped updated
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$escaped',
        '\$.remote_key.epochs',
@@ -237,7 +237,7 @@ _key_promote_confirmed_locked() {
   cur_revision="$(_key_read_config_field "$cfg" '$.remote_key.current.epoch_revision')"
   case "$cur_revision" in ''|null|*[!0-9]*) return 0 ;; esac
   [ "$confirmed_rev" -gt "$cur_revision" ] 2>/dev/null || return 0
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$escaped', '\$.remote_key.current',
        (SELECT value FROM json_each(json_extract('$escaped', '\$.remote_key.epochs'))
