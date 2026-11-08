@@ -738,21 +738,22 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -z "$(ls -A "$ST" 2>/dev/null)" ]
 }
 
-# A process whose command line is what the engine check looks for. <mode> says
-# what it does on TERM: leave (default), ignore it, put another engine in its
-# place (replace), or leave a foreign process under the pidfile (foreign).
+# A process whose command line is what the engine check looks for, a direct job
+# of this shell (so teardown reaps it). <mode> says what it does on TERM: leave
+# (default), ignore it, or point the pidfile at the process in FAKE_ENGINE_SUCCESSOR
+# (a job the test started beforehand, another engine or a foreign process) and
+# leave. Nothing is forked from inside the trap.
 fake_engine() {   # <team> [mode] -> sets ENGINE_PID, writes the pidfile
   cat > "$BATS_TEST_TMPDIR/node" <<'EOS'
 #!/bin/sh
 case "$FAKE_ENGINE_MODE" in
   ignore) trap '' TERM ;;
-  replace) trap 'FAKE_ENGINE_MODE= "$0" "$@" & echo $! > "$FAKE_ENGINE_PIDFILE"; exit 0' TERM ;;
-  foreign) trap 'sleep 300 & echo $! > "$FAKE_ENGINE_PIDFILE"; echo $! > "$FAKE_ENGINE_PIDFILE.foreign"; exit 0' TERM ;;
+  successor) trap 'echo "$FAKE_ENGINE_SUCCESSOR" > "$FAKE_ENGINE_PIDFILE"; exit 0' TERM ;;
 esac
 while :; do sleep 1; done
 EOS
   chmod +x "$BATS_TEST_TMPDIR/node"
-  FAKE_ENGINE_MODE="${2:-}" FAKE_ENGINE_PIDFILE="$SK/run/remote-sync.$1.pid" \
+  FAKE_ENGINE_MODE="${2:-}" FAKE_ENGINE_PIDFILE="$SK/run/remote-sync.$1.pid" FAKE_ENGINE_SUCCESSOR="${FAKE_ENGINE_SUCCESSOR:-}" \
     "$BATS_TEST_TMPDIR/node" "$SK/scripts/internal/remote-sync.mjs" run --team "$1" &
   ENGINE_PID=$!
   track_bg "$ENGINE_PID"
@@ -838,30 +839,87 @@ EOS
 @test "an engine that takes the place of the stopped one is left alone and the state stays where it is" {
   inst
   demote
-  fake_engine t1 replace
-  stub_remote running "$ENGINE_PID"
+  # the successor is another engine, started by the test and tracked
+  fake_engine t1
+  local successor=$ENGINE_PID
+  FAKE_ENGINE_SUCCESSOR=$successor fake_engine t1 successor
+  local first=$ENGINE_PID
+  printf '%s\n' "$first" > "$SK/run/remote-sync.t1.pid"
+  stub_remote running "$first"
   run inst --update
   grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
-  # the update goes on and its own restart deals with whatever engine runs then;
-  # nothing of the replacement is left behind
-  local replacement
-  replacement="$(cat "$SK/run/remote-sync.t1.pid" 2>/dev/null || true)"
-  [ -z "$replacement" ] || kill "$replacement" 2>/dev/null || true
+  run kill -0 "$first"
+  [ "$status" -ne 0 ]
 }
 
-@test "a process that took over the pid of the stopped engine is never signalled" {
+@test "a foreign process the pidfile names after the stop is never signalled" {
   inst
   demote
-  fake_engine t1 foreign
+  sleep 300 &
+  local foreign=$!
+  track_bg "$foreign"
+  FAKE_ENGINE_SUCCESSOR=$foreign fake_engine t1 successor
   stub_remote running "$ENGINE_PID"
   run inst --update
   [ "$status" -eq 0 ]
-  local foreign
-  foreign="$(cat "$SK/run/remote-sync.t1.pid.foreign")"
-  kill -0 "$foreign"
-  kill "$foreign"
   [ "$(readlink "$SK/db")" = "$ST/db" ]
+  # still running: nothing was sent to it
+  kill -0 "$foreign"
+}
+
+# The locked stop, with the machine mocked out: signals, liveness and the
+# ownership answer are replaced so a pid that is reused, a supervisor that appears
+# or an unreadable command line can be staged exactly.
+stop_locked_with() {   # <ownership answers, one per call, "rc[:pid]" separated by spaces> -> sets SIGNALS, STOP_RC
+  eval "$(sed -n '/^_agmsg_install_engine_stop_locked() {/,/^}/p' "$REPO_ROOT/install.sh")"
+  OWNED_FILE="$BATS_TEST_TMPDIR/owned-answers"
+  printf '%s\n' $1 > "$OWNED_FILE"
+  SIGNALS=""
+  # one answer per call; the calls run in command substitutions, so the queue is a file
+  agmsg_install_engine_owned_pid() {
+    local answer rest
+    answer="$(sed -n 1p "$OWNED_FILE")"
+    rest="$(sed 1d "$OWNED_FILE")"
+    printf '%s\n' "$rest" > "$OWNED_FILE"
+    case "$answer" in *:*) printf '%s\n' "${answer#*:}" ;; esac
+    return "${answer%%:*}"
+  }
+  agmsg_install_pid_gone() { [ "${PID_GONE:-no}" = yes ]; }
+  kill() { SIGNALS="$SIGNALS $*"; }
+  sleep() { :; }
+  STOP_RC=0
+  _agmsg_install_engine_stop_locked "$BATS_TEST_TMPDIR/sk" t1 >/dev/null || STOP_RC=$?
+}
+
+@test "locked stop: a pid that stops being the engine after TERM (reused) is never KILLed" {
+  mkdir -p "$BATS_TEST_TMPDIR/sk/run"
+  PID_GONE=no stop_locked_with "0:4242 0:4242 1"
+  [ "$STOP_RC" -eq 1 ]
+  [ "$SIGNALS" = " -TERM 4242" ]
+}
+
+@test "locked stop: an engine that cannot be inspected is not a stopped engine" {
+  mkdir -p "$BATS_TEST_TMPDIR/sk/run"
+  PID_GONE=no stop_locked_with "3"
+  [ "$STOP_RC" -eq 1 ]
+  [ -z "$SIGNALS" ]
+}
+
+@test "locked stop: nothing positively found afterwards (a supervisor, unknown, a new owner) keeps the state and the newer pidfile" {
+  mkdir -p "$BATS_TEST_TMPDIR/sk/run"
+  local after
+  for after in 2 3 "0:5555"; do
+    printf '5555\n' > "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid"
+    PID_GONE=yes stop_locked_with "0:4242 0:4242 $after"
+    [ "$STOP_RC" -eq 1 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid")" = 5555 ]
+  done
+  # positively no engine: stopped, and the pidfile that still names the old pid goes
+  printf '4242\n' > "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid"
+  PID_GONE=yes stop_locked_with "0:4242 0:4242 1"
+  [ "$STOP_RC" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid" ]
 }
 
 @test "an engine that already stood down on its own is a stopped engine: the state moves" {

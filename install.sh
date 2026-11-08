@@ -291,9 +291,12 @@ agmsg_install_daemon_active() {   # <skill_dir>
 # live process whose command line is this install's engine script ending in
 # "run --team <team>" (the comparison remote.sh's engine status makes, through
 # the same compat functions), and the team has no systemd unit (a supervisor's
-# engine is the supervisor's). Prints the pid and returns 0; returns 1 when there
-# is no such engine; returns 2 when there is a systemd unit for the team, which
-# is not ours to stop and not proof of anything.
+# engine is the supervisor's). Prints the pid and returns:
+#   0 = that engine is running and is ours
+#   1 = positively no engine of ours: no pidfile, no valid pid, the process is
+#       gone, or its command line was read and is not the engine
+#   2 = the team has a systemd unit: not ours to stop, not proof of anything
+#   3 = unknown: the process is alive but its command line could not be read
 agmsg_install_engine_owned_pid() {   # <skill_dir> <team>
   local skill="$1" team="$2" pid command load
   load="$("${AGMSG_SYSTEMCTL:-systemctl}" --user show "agmsg-remote-sync-$team.service" -p LoadState 2>/dev/null || true)"
@@ -303,6 +306,7 @@ agmsg_install_engine_owned_pid() {   # <skill_dir> <team>
   _agmsg_pid_valid "$pid" || return 1
   _agmsg_pid_alive_local "$pid" || return 1
   command="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  [ -n "$command" ] || return 3
   agmsg_cmdline_names_path "$command" "$skill/scripts/internal/remote-sync.mjs" || return 1
   case "$command" in *" run --team $team") ;; *) return 1 ;; esac
   printf '%s\n' "$pid"
@@ -343,7 +347,9 @@ _agmsg_install_engine_stop_locked() {   # <skill_dir> <team>
   pid="$(agmsg_install_engine_owned_pid "$skill" "$team")" || rc=$?
   case "$rc" in 0) ;; 1) return 0 ;; *) return 1 ;; esac
   for signal in TERM KILL; do
-    current="$(agmsg_install_engine_owned_pid "$skill" "$team")" || break
+    rc=0
+    current="$(agmsg_install_engine_owned_pid "$skill" "$team")" || rc=$?
+    [ "$rc" -eq 0 ] || break
     [ "$current" = "$pid" ] || return 1
     kill "-$signal" "$pid" 2>/dev/null || true
     attempt=0
@@ -354,8 +360,12 @@ _agmsg_install_engine_stop_locked() {   # <skill_dir> <team>
     done
   done
   agmsg_install_pid_gone "$pid" || return 1
-  # Gone is not enough: an engine that took its place has to be left alone.
-  current="$(agmsg_install_engine_owned_pid "$skill" "$team")" && return 1
+  # Gone is not enough: it has to be positively "no engine of ours" now. An
+  # engine that took its place, a supervisor, or something that cannot be read
+  # leaves the state where it is and the pidfile alone.
+  rc=0
+  agmsg_install_engine_owned_pid "$skill" "$team" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || return 1
   [ "$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)" != "$pid" ] || rm -f "$skill/run/remote-sync.$team.pid"
   echo "  ~ stopped the sync engine for '$team' (pid $pid); the update starts it again"
   return 0
