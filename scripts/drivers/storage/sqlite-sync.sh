@@ -738,6 +738,8 @@ storage_sync_prepare_push() {
   _sqlite_sync_require_jq_binary || return 10
 
   local prepare generation db tl input_ok version cipher key_json key_id recipients max_blob allow_new
+  local skip_positions skip_filter="" skipped=0
+  local -a skip_lines
   prepare=$(cat)
   input_ok=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r \
     'select(.type=="sync_prepare" and (.envelope_v|type)=="number" and
@@ -750,7 +752,15 @@ storage_sync_prepare_push() {
   key_id=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.key_id // empty')
   recipients=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -c '.recipients // []')
   max_blob=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.max_blob_bytes')
-  allow_new=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r 'if .allow_new then 1 else 0 end')
+  # allow_new, and the positions the engine asked to leave out of this page
+  # (rows it already found unsendable), come out of one jq as one line.
+  allow_new=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '[(if .allow_new then 1 else 0 end),
+    ((.skip_positions // []) | map(tostring) | join(","))] | join("|")')
+  skip_positions="${allow_new#*|}"; allow_new="${allow_new%%|*}"
+  case "$skip_positions" in
+    '') ;;
+    *[!0-9,]*|,*|*,|*,,*) _sqlite_sync_why; return 13 ;;
+  esac
   [ "$version" = 1 ] || { _sqlite_sync_why; return 13; }
   case "$cipher" in
     none) [ "$key_json" = null ] && [ "$recipients" = '[]' ] || { _sqlite_sync_why; return 13; } ;;
@@ -767,6 +777,7 @@ storage_sync_prepare_push() {
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
   _sqlite_sync_rewind_to_legacy "$team" || { _sqlite_sync_why; return 13; }
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
+  [ -z "$skip_positions" ] || skip_filter="AND e.seq NOT IN ($skip_positions)"
 
   local rows uuids
   local pos local_id wire idx status blob q cipher_lit chunk_sql="" chunk_count=0
@@ -793,6 +804,7 @@ storage_sync_prepare_push() {
      WHERE e.type='message_sent' AND e.team='$tl' AND e.seq>b.push_cursor
        AND m.server_seq IS NULL
        AND ($allow_new=1 OR m.wire_id IS NOT NULL)
+       $skip_filter
      ORDER BY e.seq LIMIT $limit;
   ") || { _sqlite_sync_why; return 13; }
 
@@ -849,6 +861,12 @@ storage_sync_prepare_push() {
         else
           printf 'agmsg: cipher helper did not seal message %s (%s)\n' "$idx" "$status" >&2
         fi
+        # Left out of this page and reported (below) rather than failing it: a
+        # row the wire cannot carry must not stop every row behind it. It has no
+        # reservation, so push_cursor stays under it and a later prepare offers
+        # it again once it can be sealed.
+        skip_lines[$skipped]="${seal_pos[$idx]}"$'\x1f'"${seal_local[$idx]}"$'\x1f'"$status"$'\x1f'"$reason"
+        skipped=$((skipped + 1))
         continue
       fi
       if [ "${AGMSG_SYNC_TEST_ABORT_AFTER_SEAL:-}" = 1 ]; then
@@ -890,8 +908,7 @@ storage_sync_prepare_push() {
         --argjson version "$version" --argjson protocol "$protocol" \
         --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
         split("\t") as $pair | ($pair[1] | fromjson) as $row
-        | (if ($row.body_hex | length) == 0 then error("empty message body") else . end)
-        | (if ($row.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+        | (if (($row.at // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
              then ($row.at | .[0:19] + ".000000Z") else $row.at end) as $created
         | {type:"sync_seal",envelope_v:$version,cipher:$cipher,
            key_id:(if $key=="" then null else $key end),max_blob_bytes:$max_blob,
@@ -919,10 +936,9 @@ storage_sync_prepare_push() {
       _sqlite_sync_commit_chunk "$db" "$chunk_sql" || { _sqlite_sync_why; return 13; }
       sealed=$((sealed + chunk_count))
     fi
-    # A message the helper could not seal stays unsealed and is retried by the
-    # next prepare; failing here keeps that identical to the pre-batch driver,
-    # which also aborted the call while keeping what it had committed.
-    [ "$sealed" -eq "$pending" ] || { _sqlite_sync_why; return 13; }
+    # Every request is either sealed or reported as skipped; anything else (a
+    # helper that died, a result lost) fails the call and is retried whole.
+    [ $((sealed + skipped)) -eq "$pending" ] || { _sqlite_sync_why; return 13; }
   fi
 
   # db_path: the store THIS call actually opened, reported back rather than
@@ -948,7 +964,15 @@ storage_sync_prepare_push() {
     WHERE m.local_team='$tl' AND m.server_instance_id='$server'
       AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
       AND m.driver_generation='$generation' AND m.local_position>b.push_cursor
-      AND m.server_seq IS NULL ORDER BY m.local_position LIMIT $limit;"
+      AND m.server_seq IS NULL ORDER BY m.local_position LIMIT $limit;" || return $?
+  # One record per row left out, from ONE jq however many there are. No body: the
+  # position, the local id and the helper's own (fixed-text) reason.
+  if [ "$skipped" -gt 0 ]; then
+    printf '%s\n' "${skip_lines[@]}" | _sqlite_sync_jq -cR 'split("\u001f")
+      | {type:"sync_skipped",local_position:.[0],id:.[1],
+         reason:(.[2] + (if (.[3] // "") != "" then ": " + .[3] else "" end))}' \
+      || { _sqlite_sync_why; return 13; }
+  fi
 }
 
 # Reads complete server acknowledgements and advances only the contiguous prefix.
