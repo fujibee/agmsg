@@ -83,23 +83,58 @@ function requireName(value, label) {
   return value;
 }
 
+// A message body is data: whatever bytes the sender's store holds, the receiver's
+// store must end up holding the same bytes. The envelope's inside is JSON, which
+// can only carry text, so a body that is valid UTF-8 travels as `body` (a string,
+// byte-identical to every release before this one) and a body that is not travels
+// as `body_b64`, its bytes in canonical base64. Exactly one of the two is ever
+// present, and a body that IS valid UTF-8 is refused as `body_b64`: one body has
+// one wire form, so the same message can never hash or compare two ways.
+//
+// A sender that has the bytes rather than a string (the storage driver, which
+// reads them out of SQLite as hex) passes `body_hex`; it is an input form only and
+// never appears in the envelope.
+function messageBodyBytes(projection) {
+  const given = ["body", "body_hex", "body_b64"].filter((key) => projection[key] !== undefined);
+  if (given.length !== 1) malformed("message projection is invalid");
+  const [key] = given;
+  const value = projection[key];
+  if (typeof value !== "string") malformed("message projection is invalid");
+  if (key === "body") {
+    // Checked on the string itself: encoding a lone surrogate would quietly
+    // turn it into U+FFFD and pass for valid text.
+    requireUnicodeScalars(value, "body");
+    return Buffer.from(value, "utf8");
+  }
+  if (key === "body_hex") {
+    if (value.length % 2 !== 0 || !/^[0-9a-f]*$/u.test(value)) malformed("body_hex is not hex");
+    return Buffer.from(value, "hex");
+  }
+  if (!BASE64.test(value)) malformed("body_b64 is not canonical base64");
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) malformed("body_b64 is not canonical base64");
+  return bytes;
+}
+
 // Validates a message projection and returns only the fields the wire format
 // knows about. Used both to build the canonical send-side bytes (below) and,
 // on receive, to tolerate fields a newer sender added (see parseCanonicalProjection):
 // unknown fields are never read here, so they are dropped rather than rejected.
 function validateMessageFields(projection) {
   if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
-      typeof projection.body !== "string" || Buffer.byteLength(projection.body) < 1 ||
-      Buffer.byteLength(projection.body) > 1_000_000 ||
       typeof projection.created_at !== "string" || !TIMESTAMP.test(projection.created_at) ||
       !validTimestamp(projection.created_at)) {
     malformed("message projection is invalid");
   }
-  requireUnicodeScalars(projection.body, "body");
+  const bytes = messageBodyBytes(projection);
+  if (bytes.length < 1 || bytes.length > 1_000_000) malformed("message projection is invalid");
+  let text = null;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { /* not text */ }
+  if (text !== null && projection.body_b64 !== undefined) malformed("body_b64 carries valid UTF-8");
   requireName(projection.from_agent, "from_agent");
   requireName(projection.to_agent, "to_agent");
   return {
-    body: projection.body,
+    ...(text !== null ? { body: text } : { body_b64: bytes.toString("base64") }),
     created_at: projection.created_at,
     from_agent: projection.from_agent,
     to_agent: projection.to_agent,
@@ -202,7 +237,13 @@ function parseCanonicalProjection(bytes) {
   } catch {
     malformed("message is not valid UTF-8 JSON");
   }
-  if (value?.kind === undefined) return validateMessageFields(value);
+  if (value?.kind === undefined) {
+    // The driver stores bytes, not JSON: a body that is not text reaches it as
+    // `body_hex` (and an empty `body`), which it writes back verbatim.
+    const { body_b64: wireBytes, ...fields } = validateMessageFields(value);
+    return wireBytes === undefined ? fields :
+      { ...fields, body: "", body_hex: Buffer.from(wireBytes, "base64").toString("hex") };
+  }
   canonicalRosterMutation(value);
   assertKnownFields(value, ROSTER_MUTATION_FIELDS[value.kind], "roster mutation projection");
   return value;

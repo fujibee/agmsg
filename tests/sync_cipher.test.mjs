@@ -534,3 +534,76 @@ test("seal reads a multi-byte character that straddles a stdin chunk boundary in
   const sealed = JSON.parse(stdout);
   assert.ok(Buffer.from(sealed.blob, "base64").toString("utf8").includes(body));
 });
+
+// A message body is data (#1938 follow-up): the receiver's store must end up
+// holding the bytes the sender's store held, including a body that is not
+// valid UTF-8 (cut mid-character, a stray 0xff). Valid text keeps its
+// pre-existing wire form byte for byte; only a body that is not text uses
+// `body_b64`, and exactly one of the two ever appears.
+const bodyBase = {
+  type: "sync_seal", envelope_v: 1, cipher: "none", key_id: null, recipients: [],
+  max_blob_bytes: 1_048_576, wire_id: manifest.binding.wire_id,
+  team_id: manifest.binding.team_id, protocol_version: 1,
+};
+const bodyProjection = (body) => ({ created_at: "2026-07-20T13:00:01.000000Z",
+  from_agent: "carol", to_agent: "bob", ...body });
+const innerOf = (envelope) => Buffer.from(envelope.blob, "base64");
+
+test("a valid-UTF-8 body sealed from hex is byte-identical to one sealed as a string", async () => {
+  const text = "héllo — 日本語 \"quoted\" \\ back\nline";
+  const asString = sealEnvelope({ ...bodyBase, projection: bodyProjection({ body: text }) });
+  const asHex = sealEnvelope({ ...bodyBase,
+    projection: bodyProjection({ body_hex: Buffer.from(text, "utf8").toString("hex") }) });
+  assert.deepEqual(innerOf(asHex), innerOf(asString));
+  assert.ok(!innerOf(asHex).toString("utf8").includes("body_b64"));
+  assert.equal((await openEnvelope({ envelope: asHex, max_blob_bytes: 1_048_576 })).body, text);
+});
+
+for (const [name, bytes] of [
+  ["cut mid-character", Buffer.from([0xe3, 0x81])],
+  ["a lone 0xff", Buffer.from([0x61, 0xff, 0x62])],
+  ["an overlong NUL", Buffer.from([0xc0, 0x80])],
+  ["a lone continuation byte", Buffer.from([0x80])],
+  ["a lone high surrogate encoded as UTF-8", Buffer.from([0xed, 0xa0, 0x80])],
+]) {
+  test(`a body that is ${name} crosses the envelope as the same bytes`, async () => {
+    for (const cipher of ["none"]) {
+      const envelope = sealEnvelope({ ...bodyBase, cipher,
+        projection: bodyProjection({ body_hex: bytes.toString("hex") }) });
+      const inner = JSON.parse(innerOf(envelope).toString("utf8"));
+      assert.equal(inner.body, undefined);
+      assert.equal(inner.body_b64, bytes.toString("base64"));
+      const opened = await openEnvelope({ envelope, max_blob_bytes: 1_048_576 });
+      assert.equal(opened.body, "");
+      assert.equal(opened.body_hex, bytes.toString("hex"));
+      assert.equal(opened.body_b64, undefined);
+    }
+  });
+}
+
+test("the same body has one wire form: body_b64 over valid text, both fields, or bad base64 are refused", async () => {
+  const forge = (inner) => ({ v: 1, cipher: "none", key_id: null,
+    blob: Buffer.from(JSON.stringify({ created_at: "2026-07-20T13:00:01.000000Z",
+      from_agent: "carol", to_agent: "bob", ...inner }), "utf8").toString("base64") });
+  const refused = (inner) => assert.rejects(
+    openEnvelope({ envelope: forge(inner), max_blob_bytes: 1_048_576 }),
+    (error) => error.state === "malformed" || /malformed|invalid|canonical|UTF-8/u.test(error.message));
+  await refused({ body_b64: Buffer.from("plain text").toString("base64") });
+  await refused({ body: "text", body_b64: Buffer.from([0xff]).toString("base64") });
+  await refused({ body_b64: "/w" });
+  await refused({ body_b64: "" });
+  // A sender that sends neither is as malformed as it always was.
+  await refused({});
+});
+
+test("a body that is not text is held to the same blob and body limits", () => {
+  // base64 carries 3 bytes in 4, so a body that is not text has less room than
+  // one that is: it must still fit max_blob_bytes, and it is refused (not cut)
+  // when it does not.
+  sealEnvelope({ ...bodyBase, projection: bodyProjection({
+    body_hex: Buffer.alloc(700_000, 0xff).toString("hex") }) });
+  assert.throws(() => sealEnvelope({ ...bodyBase, projection: bodyProjection({
+    body_hex: Buffer.alloc(800_000, 0xff).toString("hex") }) }), /max_blob_bytes/u);
+  assert.throws(() => sealEnvelope({ ...bodyBase, max_blob_bytes: 8_388_608,
+    projection: bodyProjection({ body_hex: Buffer.alloc(1_000_001, 0xff).toString("hex") }) }));
+});
