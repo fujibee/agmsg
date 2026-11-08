@@ -2519,6 +2519,41 @@ printf '{"lines":%d}\\n' "$lines"
   }
 });
 
+// The staged-input tests count `agmsg-driver-input-*` entries in the temp
+// directory. Counted in the shared one, a slow removal by something else (an
+// earlier test, antivirus or a file lock on Windows) shows up as a leak of
+// THIS call. So the test gets a temp directory of its own, and only what the
+// code under test creates can appear in it. os.tmpdir() reads these variables
+// on every call, so the engine picks the new one up.
+async function privateTmpdir(t) {
+  const names = ["TMPDIR", "TEMP", "TMP"];
+  const saved = names.map((name) => [name, process.env[name]]);
+  const shared = tmpdir();
+  const own = await mkdtemp(join(shared, "agmsg-own-tmp-"));
+  for (const name of names) process.env[name] = own;
+  t.after(async () => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    if (!own.startsWith(shared)) throw new Error("unsafe test root");
+    await rm(own, { recursive: true, force: true });
+  });
+  return { shared, own };
+}
+
+// Entries are removed shortly after settle on Windows, so a count is awaited
+// up to a bound instead of read once.
+async function stagedInputCount(dir, expected, { wait = true } = {}) {
+  let count = -1;
+  for (let attempt = 0; attempt < (wait ? 50 : 1); attempt += 1) {
+    count = (await readdir(dir)).filter((entry) => entry.startsWith("agmsg-driver-input-")).length;
+    if (count === expected) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return count;
+}
+
 test("a staged input leaves nothing behind, whether the call succeeds or fails",
   { timeout: 30_000 }, async (t) => {
   // What is staged is message content, so the temp directory is not a tidiness
@@ -2531,13 +2566,13 @@ test("a staged input leaves nothing behind, whether the call succeeds or fails",
   // baseline is taken first: this is a shared directory and something else may
   // already have left one, and asserting zero would be asserting about the
   // machine rather than about this call.
-  const residue = async () => (await readdir(tmpdir()))
-    .filter((entry) => entry.startsWith("agmsg-driver-input-")).length;
-  const before = await residue();
+  const { shared, own } = await privateTmpdir(t);
+  const residue = () => stagedInputCount(own, 0);
+  const before = 0;
 
-  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  const root = await mkdtemp(join(shared, "agmsg-sync-driver-residue-"));
   t.after(async () => {
-    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    if (!root.startsWith(shared)) throw new Error("unsafe test root");
     await rm(root, { recursive: true, force: true });
   });
   const input = Array.from({ length: 8 }, (_, index) => ({ type: "probe", index }));
@@ -2588,7 +2623,7 @@ printf '{"ok":true}\\n'
       `successful calls leaked descriptors: ${openBefore} -> ${descriptors()}`);
   }
 
-  const bad = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  const bad = await mkdtemp(join(shared, "agmsg-sync-driver-residue-"));
   const fails = (pidFile, helperFile) => `#!/usr/bin/env bash
 echo $$ > ${JSON.stringify(pidFile)}
 echo $$ > ${JSON.stringify(helperFile)}
@@ -2661,11 +2696,11 @@ test("the staged input has no name for as long as the driver is reading it",
     t.skip("Windows cannot unlink an open file; settle-time removal covers it there");
     return;
   }
-  const residue = async () => (await readdir(tmpdir()))
-    .filter((entry) => entry.startsWith("agmsg-driver-input-")).length;
-  const before = await residue();
+  const { shared, own } = await privateTmpdir(t);
+  const residue = () => stagedInputCount(own, 0);
+  const before = 0;
 
-  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-unnamed-"));
+  const root = await mkdtemp(join(shared, "agmsg-sync-driver-unnamed-"));
   // Writes its pid, then stays alive without having read its input yet -- the
   // fixture helper returns once that pid is on disk, so the check below lands
   // inside the call rather than after it.
@@ -2680,7 +2715,8 @@ printf '{"ok":true}\\n'
   const { started } = await withDriverEnvironment(t, root, script,
     (mock, config) => [() => rosterDriver("apply", config, input)]);
 
-  assert.equal(await residue(), before,
+  // One read, no waiting: waiting would let a name that goes away later pass.
+  assert.equal(await stagedInputCount(own, 0, { wait: false }), before,
     "the staged input still had a name while the driver was reading it");
   for (const { promise } of started) await promise;
   assert.equal(await residue(), before, "and none after it settled");
