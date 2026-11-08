@@ -242,6 +242,49 @@ EOF
   refute grep -qF "u002F" "$cfg"
 }
 
+@test "--update removes an obsolete root written only as a literal string" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  cat > "$FAKE_HOME/.codex/config.toml" <<EOF
+[sandbox_workspace_write]
+writable_roots = ['$SK/db', "$FAKE_HOME/mine"]
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$SK/db" "$cfg"
+  grep -qF "\"$FAKE_HOME/mine\"]" "$cfg"
+}
+
+@test "--update removes an obsolete root written only with an escape" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  local esc="\\u002F${SK#/}"
+  cat > "$FAKE_HOME/.codex/config.toml" <<EOF
+[sandbox_workspace_write]
+writable_roots = ["$esc/teams", "$FAKE_HOME/mine"]
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "u002F" "$cfg"
+  grep -qF "\"$FAKE_HOME/mine\"]" "$cfg"
+}
+
+@test "--update leaves a config with nothing obsolete in it untouched by the cleanup" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[sandbox_workspace_write]\nwritable_roots = ["%s/mine"]\n' "$FAKE_HOME" > "$FAKE_HOME/.codex/config.toml"
+  printf 'sentinel\n' > "$FAKE_HOME/.codex/config.toml.bak"
+  run inst --update
+  [ "$status" -eq 0 ]
+  # the addition still takes its own backup of the untouched file; the cleanup took none
+  refute grep -qF "replaced Codex writable_roots entries" <<<"$output"
+}
+
 @test "--update follows the TOML string rules across lines: a multi-line string is one value, not array elements" {
   inst
   demote

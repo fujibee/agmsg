@@ -844,23 +844,12 @@ move_into_place() {
 # the writable_roots array: every other entry, including ones the user wrote
 # and other installs', stays.
 _drop_stale_codex_roots() {
-  local code_config="$1" stale=() _s
+  local code_config="$1" stale=() _s scan=0
   while IFS= read -r _s; do
     [ -n "$_s" ] && stale+=("$_s")
   done < <(agmsg_codex_stale_writable_paths "$SKILL_DIR")
   [ ${#stale[@]} -gt 0 ] || return 0
 
-  local pats=()
-  for _s in "${stale[@]}"; do
-    pats+=(-e "\"$_s\"")
-  done
-  grep -qF "${pats[@]}" "$code_config" 2>/dev/null || return 0
-
-  agmsg_install_op_require || return 1
-  # One pre-edit snapshot for the whole update: the addition below must not
-  # copy the already-cleaned file over it.
-  cp "$code_config" "$code_config.bak"
-  AGMSG_CODEX_BAK_DONE="$code_config"
   agmsg_install_op_require || return 1
   # Scans the writable_roots array character by character so that a quoted
   # string, a comment or any other key outside that array is never touched.
@@ -950,9 +939,23 @@ _drop_stale_codex_roots() {
         }
         $0 = out
       }
+      if (gone) changed = 1
       if (!(gone && $0 ~ /^[ \t]*$/)) print
     }
-  ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
+    END { exit (changed ? 0 : 3) }
+  ' "$code_config" > "$code_config.tmp" || scan=$?
+  # exit 3: nothing obsolete in the file, in whatever spelling; leave it alone.
+  if [ "$scan" -eq 3 ]; then
+    command rm -f "$code_config.tmp"
+    return 0
+  fi
+  [ "$scan" -eq 0 ] || return 1
+  agmsg_install_op_require || return 1
+  # One pre-edit snapshot for the whole update: the addition below must not
+  # copy the already-cleaned file over it.
+  cp "$code_config" "$code_config.bak"
+  AGMSG_CODEX_BAK_DONE="$code_config"
+  move_into_place "$code_config.tmp" "$code_config"
   agmsg_install_op_require || return 1
   echo "  ~ replaced Codex writable_roots entries that are now links ($code_config)"
 }
