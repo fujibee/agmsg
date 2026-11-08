@@ -326,6 +326,18 @@ export function knownTypes(roster: Roster | null, msgTeam: string, name: string)
   return roster && roster.team === msgTeam ? roster.list.find((m) => m.name === name)?.types : undefined;
 }
 
+// Whether a missed notice for `name` is worth a log line: not for a member the roster says has no terminal by
+// design. A name the roster does not have is logged, as it may be a real member without a pane.
+export function missedNoticeIsLogged(roster: Roster | null, msgTeam: string, name: string): boolean {
+  const types = knownTypes(roster, msgTeam, name);
+  return !types || !hasNoTerminalByDesign(types);
+}
+
+// An add-on joined a member to `joinedTeam`: the member list is read again only if that is the team on screen.
+export function rosterNeedsReload(joinedTeam: string, selectedTeam: string): boolean {
+  return joinedTeam !== "" && joinedTeam === selectedTeam;
+}
+
 // Fetch a team's members and adopt them only if no later fetch has started since (a response for a team the user
 // has already switched away from is dropped, however late it arrives). Always returns what was fetched.
 export async function loadRoster(
@@ -1281,7 +1293,7 @@ export default function App() {
       const { feed, pane, why } = routeMessage(team, e.payload, windowsRef.current, panesRef.current);
       if (!pane) {
         const types = knownTypes(rosterRef.current, e.payload.team, e.payload.to);
-        if (!types || !hasNoTerminalByDesign(types))
+        if (missedNoticeIsLogged(rosterRef.current, e.payload.team, e.payload.to))
           appLog(
             `notice not typed: message ${e.payload.from} -> ${e.payload.to} in ${e.payload.team}: ${why}${types ? "" : " (member type not known here)"}`,
           );
@@ -1482,6 +1494,15 @@ export default function App() {
     },
     [cmdName, spawnTypes, team],
   );
+
+  // An add-on joined a member (its own, or an agent it started) to a team after the list was read: read the list of
+  // the team on screen once, so a message to that member is known for what it is. Not once per message.
+  useEffect(() => {
+    const p = listen<string>("addon-roster-changed", (e) => {
+      if (rosterNeedsReload(e.payload, teamRef.current)) void loadMembers(e.payload).catch(() => {});
+    });
+    return () => void p.then((unlisten) => unlisten());
+  }, [loadMembers]);
 
   // An add-on asked for a terminal for an agent it started. Only the member and the type cross: the command,
   // the spawn options and the actas prompt come from the same code as "add agent", from the member as agmsg has it.

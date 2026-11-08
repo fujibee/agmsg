@@ -16,13 +16,13 @@
 # change without install.sh's own extraction changing with it.
 set -euo pipefail
 
-BOOTSTRAP_VERSION=2
+BOOTSTRAP_VERSION=3
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INSTALL_DB="$SKILL_DIR/run/install.db"
 MANIFEST="$SKILL_DIR/run/install-manifest.json"
-LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
+LOCK_DB="$SKILL_DIR/.install-op/lock.db"
 
 # Records a start attempt without claiming ownership. Best-effort: if the
 # reason cannot be stored in install.db, it still reaches stderr.
@@ -36,7 +36,7 @@ _agmsgd_launch_record_attempt() {
   echo "agmsgd-launch: $reason" >&2
 }
 
-# Non-blocking probe of run/install-op.lock.db's BEGIN EXCLUSIVE (PR 2) --
+# Non-blocking probe of .install-op/lock.db's BEGIN EXCLUSIVE (PR 2) --
 # an empty file this process never writes to, only locks against, exactly
 # like lifecycle.mjs's own Node-side probe (kept in sync with it
 # deliberately: same busy_timeout=0-then-BEGIN-EXCLUSIVE idiom, so bash and

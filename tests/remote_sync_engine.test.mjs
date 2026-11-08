@@ -5,7 +5,7 @@ import { EventEmitter, once } from "node:events";
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5604,6 +5604,130 @@ test("the restart helper retries a failed start, never takes the predecessor's o
   result = run();
   assert.equal(result.status, 1);
   assert.equal(await calls(), 5);
+});
+
+test("the restart helper does not start an engine while an install holds the install lock, then starts once (and not at all if the installer already did)", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-lock-"));
+  // Every child is registered the moment it is spawned, so a failed assertion or
+  // a timeout still ends it (and waits for it) before the directory goes.
+  const children = [];
+  const track = (child) => {
+    const done = new Promise((resolve) => child.once("exit", resolve));
+    children.push({ child, done });
+    return child;
+  };
+  t.after(async () => {
+    for (const { child } of children) { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+    await Promise.all(children.map(({ done }) => done));
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, "run"));
+  await mkdir(join(root, ".install-op"));
+  await writeFile(join(root, "run", "remote-sync.demo.pid"), "111\n");
+  const lockDb = join(root, ".install-op", "lock.db");
+  const remote = join(root, "remote.sh");
+  const log = join(root, "calls");
+  const holdLock = async () => {
+    // The installer's lock: BEGIN EXCLUSIVE kept open until the holder is ended.
+    const holder = track(spawn("sqlite3", [lockDb], { stdio: ["pipe", "ignore", "ignore"] }));
+    holder.stdin.write(".timeout 5000\nBEGIN EXCLUSIVE;\nSELECT 1;\n");
+    for (let i = 0; i < 50; i++) {
+      const probe = spawnSync("sqlite3", ["-cmd", ".timeout 100", lockDb, "SELECT count(*) FROM sqlite_master;"], { encoding: "utf8" });
+      if (probe.status !== 0) return holder;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("the lock holder never took the lock");
+  };
+  const helper = (startOutput, options) => {
+    rmSync(log, { force: true });
+    writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${shellQuote(log)}\n${startOutput}\n`, { mode: 0o755 });
+    return track(spawn("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0], options).map((a) => a === join(root, "remote.sh") ? remote : a),
+      { stdio: "ignore", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root } }));
+  };
+  const callCount = () => { try { return readFileSync(log, "utf8").trim().split("\n").length; } catch { return 0; } };
+  const exited = (child) => children.find((entry) => entry.child === child).done;
+  const fast = { lockPolls: 3, lockPollSeconds: 0.1 };
+
+  // Lock held: nothing is started, however long the helper looks.
+  const holder = await holdLock();
+  const waiting = helper('echo "Sync engine started for demo (pid 2)."', { lockPolls: 100, lockPollSeconds: 0.1 });
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  assert.equal(callCount(), 0, "no start while the install holds the lock");
+  // Lock let go: exactly one start, and the helper is done.
+  holder.kill();
+  await exited(holder);
+  assert.equal(await exited(waiting), 0);
+  assert.equal(callCount(), 1);
+
+  // The installer started the engine while the helper waited: the helper's start
+  // reports it running under another pid and ends, so no second engine is made.
+  const holder2 = await holdLock();
+  const second = helper('echo "Sync engine already running (pid 222)."', { lockPolls: 100, lockPollSeconds: 0.1 });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(callCount(), 0);
+  holder2.kill();
+  await exited(holder2);
+  assert.equal(await exited(second), 0);
+  assert.equal(callCount(), 1);
+});
+
+test("the restart helper never starts an engine when the install lock is still held at the end of its waiting; it says the engine is down, with the command that starts it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-exhausted-"));
+  const children = [];
+  t.after(async () => {
+    for (const child of children) { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+    await Promise.all(children.map((child) => new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null) ? resolve() : child.once("exit", resolve))));
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, "run"));
+  await mkdir(join(root, ".install-op"));
+  await mkdir(join(root, "scripts", "lib"), { recursive: true });
+  await writeFile(join(root, "scripts", "lib", "down-notice.sh"), readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "down-notice.sh")));
+  const lockDb = join(root, ".install-op", "lock.db");
+  const remote = join(root, "scripts", "remote.sh");
+  const log = join(root, "calls");
+  writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${shellQuote(log)}\necho "Sync engine started for demo (pid 2)."\n`, { mode: 0o755 });
+  const holder = spawn("sqlite3", [lockDb], { stdio: ["pipe", "ignore", "ignore"] });
+  children.push(holder);
+  holder.stdin.write(".timeout 5000\nBEGIN EXCLUSIVE;\nSELECT 1;\n");
+  for (let i = 0; i < 50 && spawnSync("sqlite3", ["-cmd", ".timeout 100", lockDb, "SELECT count(*) FROM sqlite_master;"]).status === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const result = spawnSync("bash", standDownRestartArgs("demo", join(root, "scripts"), [0, 0], { lockPolls: 3, lockPollSeconds: 0.1 }),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, timeout: 30000 });
+  assert.equal(result.status, 1);
+  assert.equal(existsSync(log), false, "no start while the lock is held, not even after the waiting is used up");
+  const records = readdirSync(join(root, "run", "down"));
+  assert.equal(records.length, 1);
+  const record = JSON.parse(readFileSync(join(root, "run", "down", records[0]), "utf8"));
+  assert.equal(record.state, "down");
+  assert.equal(record.recovery, `bash ${remote} sync start demo`);
+});
+
+test("the recovery command the restart helper records runs as written, whatever characters the install path holds", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "agmsg-restart-recovery-"));
+  t.after(async () => { await rm(base, { recursive: true, force: true }); });
+  const root = join(base, "sync owner's \"review\" x");
+  await mkdir(join(root, "run"), { recursive: true });
+  await mkdir(join(root, "scripts", "lib"), { recursive: true });
+  const noticeLib = join(root, "scripts", "lib", "down-notice.sh");
+  await writeFile(noticeLib, readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "down-notice.sh")));
+  const argvLog = join(base, "argv");
+  const remote = join(root, "scripts", "remote.sh");
+  // A start that never succeeds: every attempt is used and the record is written.
+  writeFileSync(remote, "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+  const result = spawnSync("bash", standDownRestartArgs("demo", join(root, "scripts"), [0]),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, timeout: 30000 });
+  assert.equal(result.status, 1);
+  // Read the way the status and doctor readers decode it, then run it: it has to
+  // reach the owning script with its own arguments.
+  const listed = spawnSync("bash", ["-c", `. ${shellQuote(noticeLib)}; AGMSG_DOWN_NOTICE_ROOT=${shellQuote(root)} down_notice_list`], { encoding: "utf8" });
+  const recovery = listed.stdout.trim().split("\t")[4];
+  assert.ok(recovery.includes("sync start"), listed.stdout);
+  writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${shellQuote(argvLog)}\n`, { mode: 0o755 });
+  const ran = spawnSync("bash", ["-c", recovery], { encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(readFileSync(argvLog, "utf8"), "sync\nstart\ndemo\n");
 });
 
 test("a roster state file the driver set aside is reported in the engine log, not in the result", async (t) => {

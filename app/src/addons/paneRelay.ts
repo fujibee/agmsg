@@ -61,6 +61,12 @@ const isRequest = (d: unknown): d is { agmsg: 1; type: "request"; id: number; op
   return r.agmsg === 1 && r.type === "request" && typeof r.id === "number" && Number.isFinite(r.id) && typeof r.op === "string";
 };
 
+const isErrorReport = (d: unknown): d is { agmsg: 1; type: "error"; message: string; stack?: string } => {
+  if (typeof d !== "object" || d === null) return false;
+  const r = d as Record<string, unknown>;
+  return r.agmsg === 1 && r.type === "error" && typeof r.message === "string" && (r.stack === undefined || typeof r.stack === "string");
+};
+
 /** The one thing the add-on is told about the app's language: the tag, nothing else. */
 export const localeEvent = (locale: string) => ({ agmsg: 1, type: "locale", locale });
 
@@ -127,7 +133,13 @@ export function createPaneRelay(deps: {
       const mine: Bound = { generation, port: channel.port1, state: deps.wantsFeed ? "initializing" : "live", buffered: [] };
       bound = mine;
       mine.port.onmessage = (e) => {
-        if (bound !== mine || !isRequest(e.data)) return;
+        if (bound !== mine) return;
+        if (isErrorReport(e.data)) {
+          // An error the page caught: Rust writes it to the app's log (cut and rate-limited there).
+          void deps.invoke("addon_pane_error", { id: deps.id, generation: mine.generation, message: e.data.message, stack: e.data.stack ?? null }).catch(() => {});
+          return;
+        }
+        if (!isRequest(e.data)) return;
         void handleRequest(mine, e.data);
       };
       win.postMessage({ agmsg: 1, type: "port" }, "*", [channel.port2 as Transferable]);

@@ -51,6 +51,7 @@
     "allow-addon-pane-add",
     "allow-addon-pane-remove",
     "allow-addon-pane-loaded",
+    "allow-addon-pane-error",
     "allow-addon-grant-team",
     "allow-addon-revoke-team",
     "allow-addon-set-power",

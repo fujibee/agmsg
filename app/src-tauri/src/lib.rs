@@ -683,6 +683,7 @@ pub fn run() {
             addons::commands::addon_pane_add,
             addons::commands::addon_pane_remove,
             addons::commands::addon_pane_loaded,
+            addons::commands::addon_pane_error,
             addons::commands::addon_grant_team,
             addons::commands::addon_set_power,
             addons::agents::addon_members_state,

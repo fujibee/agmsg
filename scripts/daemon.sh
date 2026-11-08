@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DB="$SKILL_DIR/run/install.db"
-LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
+LOCK_DB="$SKILL_DIR/.install-op/lock.db"
 LAUNCHER="$SCRIPT_DIR/daemon/agmsgd-launch.sh"
 # shellcheck source=lib/daemon-state.sh
 source "$SCRIPT_DIR/lib/daemon-state.sh"
@@ -29,6 +29,8 @@ source "$SCRIPT_DIR/lib/sqlpath.sh"
 source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck source=lib/hash.sh
 source "$SCRIPT_DIR/lib/hash.sh"
+# shellcheck source=lib/update-command.sh
+source "$SCRIPT_DIR/lib/update-command.sh"
 # shellcheck source=lib/down-notice.sh
 source "$SCRIPT_DIR/lib/down-notice.sh"
 
@@ -125,15 +127,36 @@ _with_op_lock() {
   return "$rc"
 }
 
+# True while an install or update of THIS install is alive: its incomplete-
+# operation record exists and the pid it names is still running. A record left by
+# an operation that was killed is not "running".
+_install_operation_running() {
+  local record="$SKILL_DIR/run/install-op-incomplete.json" pid
+  [ -f "$record" ] || return 1
+  pid="$(sed -n 's/.*"actor_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$record" 2>/dev/null | head -n 1)"
+  case "$pid" in ''|0|1) return 1 ;; esac
+  _agmsg_pid_alive_local "$pid"
+}
+
 _with_op_lock_run() {
   local statements="$1" expected_generation current_generation ready applied lock_pid attach_path lock_dir
   local AGMSGD_LOCK_INSTALL_ID
   shift
   expected_generation="$(_install_generation)" || {
-    echo "agmsg daemon: could not read this install's record (run/install-manifest.json does not match run/install.db, or one of them cannot be read). Repair it with: npx agmsg@next install --update (add --cmd <name> if this is a named install or several installs exist), then try again." >&2
+    # While an install or update runs, the completion record is moved aside and
+    # does not match install.db yet: nothing is broken, and the update starts an
+    # enabled agmsgd again when it is done.
+    if _install_operation_running; then
+      echo "agmsg daemon: another agmsg install or update is running; agmsgd will start when it finishes." >&2
+      return 1
+    fi
+    echo "agmsg daemon: could not read this install's record (run/install-manifest.json does not match run/install.db, or one of them cannot be read). Repair it with: $(agmsg_update_command "$SKILL_DIR"), then try again." >&2
     return 1
   }
   AGMSGD_LOCK_INSTALL_ID="${expected_generation%%:*}"
+  # The lock lives in .install-op/ at the install root; the installer makes it,
+  # and an install that predates it gets it here.
+  mkdir -p "${LOCK_DB%/*}" 2>/dev/null || true
   lock_dir="$(mktemp -d "$SKILL_DIR/run/daemon-op-lock.XXXXXX")" || return 1
   if [ "$(_os)" = windows ] && [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
     # The native sqlite3 on Windows cannot be driven through an MSYS FIFO (it
