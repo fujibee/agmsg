@@ -777,9 +777,12 @@ _pid_gone_harness() {   # <kill message>
 @test "install: --update records a down_notice when its one restart attempt fails, instead of only a terminal line (decision 11-04, S01/S14)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
-  # AGMSG_NODE is authoritative over both the recorded node_path and
-  # whatever real Node is on PATH (agmsg_resolve_node's own documented
-  # behavior), so this makes every candidate _resolve_node tries fail and
+  # _resolve_node tries the recorded node_path, then AGMSG_NODE, then
+  # whatever agmsg_resolve_node() returns as a last resort -- but that last
+  # resort itself treats AGMSG_NODE as authoritative and returns it
+  # verbatim ahead of a real PATH lookup (lib/node.sh), so setting
+  # AGMSG_NODE poisons BOTH of those slots, and setting node_path poisons
+  # the first -- all three candidates collapse to the same bad value, so
   # the installer's single restart attempt fails too -- exactly the
   # S01/S14 gap: the daemon stays down and, before this fix, that was
   # reported ONLY as a line in this run's own stderr.
@@ -790,7 +793,11 @@ _pid_gone_harness() {   # <kill message>
   [ -f "$SK/run/down/agmsgd.json" ]
   grep -q '"component":"agmsgd"' "$SK/run/down/agmsgd.json"
   grep -q '"state":"down"' "$SK/run/down/agmsgd.json"
-  grep -q 'agmsg daemon start' "$SK/run/down/agmsgd.json"
+  # The recovery command is single-quoted (so it survives a space in the
+  # install path, review round 3), so the literal substring "agmsg daemon
+  # start" never appears -- the quote closes right after "agmsg". Check
+  # the pieces that DO always appear instead.
+  grep -q "$SK/scripts/agmsg' daemon start" "$SK/run/down/agmsgd.json"
 }
 
 _install_fns() {
