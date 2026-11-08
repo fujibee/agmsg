@@ -797,7 +797,7 @@ _pid_gone_harness() {   # <kill message>
   # install path, review round 3), so the literal substring "agmsg daemon
   # start" never appears -- the quote closes right after "agmsg". Check
   # the pieces that DO always appear instead.
-  grep -q "$SK/scripts/agmsg' daemon start" "$SK/run/down/agmsgd.json"
+  grep -qF "$SK/scripts/agmsg' daemon start" "$SK/run/down/agmsgd.json"
 }
 
 _install_fns() {
