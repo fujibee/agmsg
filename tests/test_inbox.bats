@@ -547,3 +547,33 @@ _codex_proj() {
   grep -qF -- "CIBIG-99-" <<< "$output"
   [ "$(unread_count alice)" -eq 0 ]
 }
+
+@test "inbox: a body cut in the middle of a multibyte character does not stop the inbox, and every message is shown and marked read" {
+  # A UTF-8 locale's sed rejected such a body ("illegal byte sequence") and the
+  # whole read failed with exit 1.
+  export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+  bash "$SCRIPTS/send.sh" testteam alice bob "first ok"
+  bash "$SCRIPTS/send.sh" testteam alice bob "result=$(printf '\xe3\x81')"
+  bash "$SCRIPTS/send.sh" testteam alice bob "last ok"
+
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  LC_ALL=C grep -qF "3 new message(s)" <<<"$output"
+  LC_ALL=C grep -qF "first ok" <<<"$output"
+  LC_ALL=C grep -qF "result=" <<<"$output"
+  LC_ALL=C grep -qF "last ok" <<<"$output"
+  [ "$(unread_count bob)" -eq 0 ]
+}
+
+@test "history: a body cut in the middle of a multibyte character does not stop the history" {
+  export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+  bash "$SCRIPTS/send.sh" testteam alice bob "first ok"
+  bash "$SCRIPTS/send.sh" testteam alice bob "result=$(printf '\xe3\x81')"
+  bash "$SCRIPTS/send.sh" testteam alice bob "last ok"
+
+  run bash "$SCRIPTS/history.sh" testteam bob
+  [ "$status" -eq 0 ]
+  LC_ALL=C grep -qF "first ok" <<<"$output"
+  LC_ALL=C grep -qF "result=" <<<"$output"
+  LC_ALL=C grep -qF "last ok" <<<"$output"
+}

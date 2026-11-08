@@ -433,6 +433,12 @@ agmsg_sqlite() {
   # status is sqlite3's, not sed's, without changing pipefail for the
   # calling script (same shape as _sqlite_data / _sqlite_data_stdin in
   # drivers/storage/sqlite.sh).
+  #
+  # `LC_ALL=C` on the sed: a message body cut in the middle of a multibyte
+  # character is not valid UTF-8, and a UTF-8 locale's sed answers it with
+  # "RE error: illegal byte sequence" and exits 1, which took the whole inbox
+  # down for one bad message. In the C locale sed works on bytes and never
+  # rejects any. No extra process: the assignment applies to this sed only.
   # stderr is captured into a variable, not a temp file: this function is on
   # the hot path (every send/receive/watch.sh cycle), so mktemp+cat+rm on
   # EVERY call -- including the common all-ok case -- would add 3 processes
@@ -451,7 +457,7 @@ agmsg_sqlite() {
     _agmsg_sqlite_err=$(
       set -o pipefail
       # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-      { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | sed $'s/\r$//'; } 2>&1 1>&3 3>&-
+      { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | LC_ALL=C sed $'s/\r$//'; } 2>&1 1>&3 3>&-
     )
   } 3>&1 || _agmsg_sqlite_rc=$?
   [ -z "$_agmsg_sqlite_err" ] || printf '%s\n' "$_agmsg_sqlite_err" >&2
@@ -547,7 +553,7 @@ _agmsg_sqlite_recording() {
   # distinction exists to tell apart from an ordinary refusal.
   errfile=$(mktemp "${TMPDIR:-/tmp}/agmsg-sqlite-recording-err.XXXXXX" 2>/dev/null) || errfile=/dev/null
   # shellcheck disable=SC2086  # same intentional split as above
-  if sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>"$errfile" | sed $'s/\r$//'; then
+  if sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>"$errfile" | LC_ALL=C sed $'s/\r$//'; then
     rc=${PIPESTATUS[0]}
   else
     rc=${PIPESTATUS[0]}
@@ -594,7 +600,7 @@ agmsg_runtime_lock_acquire() {
   agmsg_storage_ensure_initialized || return 1
   db="$(_agmsg_runtime_db_path)"
   resource_sql="$(_agmsg_runtime_lock_resource_sql "$resource")"
-  agmsg_sqlite "$db" <<SQL | tr -d '\r'
+  agmsg_sqlite "$db" <<SQL | LC_ALL=C tr -d '\r'
 CREATE TABLE IF NOT EXISTS locks (
   resource TEXT PRIMARY KEY,
   owner_pid INTEGER NOT NULL,
@@ -614,7 +620,7 @@ agmsg_runtime_lock_owner() {
   resource_sql="$(_agmsg_runtime_lock_resource_sql "$1")"
   agmsg_sqlite "$(_agmsg_runtime_db_path)" \
     "SELECT owner_pid FROM locks WHERE resource = '$resource_sql';" 2>/dev/null \
-    | tr -d '\r'
+    | LC_ALL=C tr -d '\r'
 }
 
 agmsg_runtime_lock_verify() {
@@ -640,7 +646,7 @@ agmsg_runtime_lock_release() {
 # No busy_timeout (a :memory: db has no file lock) and no escape flag (these
 # call sites parse JSON/scalars, not the control-byte message stream).
 agmsg_sqlite_mem() {
-  sqlite3 :memory: "$@" | tr -d '\r'
+  sqlite3 :memory: "$@" | LC_ALL=C tr -d '\r'
 }
 
 # agmsg_sql_readfile_path lives in lib/sqlpath.sh — one definition, so the rule
@@ -686,7 +692,7 @@ agmsg_storage_driver() {
   if [ -n "$cfg" ] && [ -f "$cfg" ]; then
     name="$(sqlite3 :memory: \
       "SELECT COALESCE(json_extract(readfile('$(agmsg_sql_readfile_path "$cfg")'), '\$.storage'), '')" \
-      2>/dev/null | tr -d '\r')"
+      2>/dev/null | LC_ALL=C tr -d '\r')"
     if [ -n "$name" ] && [ "$name" != "null" ]; then
       printf '%s\n' "$name"
       return 0
