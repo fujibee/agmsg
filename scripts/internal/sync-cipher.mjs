@@ -38,6 +38,16 @@ function malformed(message) {
   throw new CipherStateError("malformed", message);
 }
 
+// An error that is about THIS row's data or size (a name, a timestamp, a body, a
+// blob that does not fit), as opposed to the exchange: a missing age binary, a
+// cipher this build lacks, a recipient manifest shared by the whole page, a
+// worker that died. Only the first kind may be skipped by a caller; the second
+// is true of every row and has to fail the call. `row` is the marker.
+function rowLocal(error) {
+  if (error instanceof CipherStateError) error.row = true;
+  return error;
+}
+
 function authenticationFailed(message) {
   throw new CipherStateError("authentication_failed", message);
 }
@@ -128,25 +138,29 @@ function bodyBytes(projection, forms, decode) {
 // `forms` names the body fields this caller may read: the wire's own two on
 // receive, and the sender's own input (`body`, `body_hex`) when sealing.
 function validateMessageFields(projection, forms = ["body", "body_b64"]) {
-  if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
-      typeof projection.created_at !== "string" || !TIMESTAMP.test(projection.created_at) ||
-      !validTimestamp(projection.created_at)) {
-    malformed("message projection is invalid");
+  try {
+    if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
+        typeof projection.created_at !== "string" || !TIMESTAMP.test(projection.created_at) ||
+        !validTimestamp(projection.created_at)) {
+      malformed("message projection is invalid");
+    }
+    const bytes = bodyBytes(projection, forms);
+    if (bytes.length < 1 || bytes.length > 1_000_000) malformed("message projection is invalid");
+    // ignoreBOM: a leading U+FEFF is a character of the body, not a marker to strip.
+    let text = null;
+    try { text = new TextDecoder("utf-8", UTF8_KEEPING_BOM).decode(bytes); } catch { /* not text */ }
+    if (text !== null && projection.body_b64 !== undefined) malformed("body_b64 carries valid UTF-8");
+    requireName(projection.from_agent, "from_agent");
+    requireName(projection.to_agent, "to_agent");
+    return {
+      ...(text !== null ? { body: text } : { body_b64: bytes.toString("base64") }),
+      created_at: projection.created_at,
+      from_agent: projection.from_agent,
+      to_agent: projection.to_agent,
+    };
+  } catch (error) {
+    throw rowLocal(error);
   }
-  const bytes = bodyBytes(projection, forms);
-  if (bytes.length < 1 || bytes.length > 1_000_000) malformed("message projection is invalid");
-  // ignoreBOM: a leading U+FEFF is a character of the body, not a marker to strip.
-  let text = null;
-  try { text = new TextDecoder("utf-8", UTF8_KEEPING_BOM).decode(bytes); } catch { /* not text */ }
-  if (text !== null && projection.body_b64 !== undefined) malformed("body_b64 carries valid UTF-8");
-  requireName(projection.from_agent, "from_agent");
-  requireName(projection.to_agent, "to_agent");
-  return {
-    ...(text !== null ? { body: text } : { body_b64: bytes.toString("base64") }),
-    created_at: projection.created_at,
-    from_agent: projection.from_agent,
-    to_agent: projection.to_agent,
-  };
 }
 
 function canonicalMessage(projection) {
@@ -567,7 +581,7 @@ export function ageExecutableVersion() {
 function sealNone(input, message) {
   if (input.key_id !== null) malformed("none requires null key_id");
   if (message.length > input.max_blob_bytes || message.length > MAX_BLOB_BYTES) {
-    malformed("plaintext exceeds max_blob_bytes");
+    throw rowLocal(new CipherStateError("malformed", "plaintext exceeds max_blob_bytes"));
   }
   return { v: 1, cipher: "none", key_id: null, blob: message.toString("base64") };
 }
@@ -590,7 +604,7 @@ function sealAge(input) {
   const result = runAge(args, frame);
   if (result.status !== 0) throw new Error(`age encryption failed: ${result.stderr.toString("utf8").trim()}`);
   if (result.stdout.length > input.max_blob_bytes || result.stdout.length > MAX_BLOB_BYTES) {
-    malformed("encrypted age file exceeds max_blob_bytes");
+    throw rowLocal(new CipherStateError("malformed", "encrypted age file exceeds max_blob_bytes"));
   }
   if (validateAgeHeader(result.stdout).x25519StanzaCount !== input.recipients.length) {
     malformed("age recipient stanza count differs from the manifest");
@@ -672,7 +686,7 @@ function sealOne(index, request) {
     return { index, worker: threadId, status: "ok", envelope: sealEnvelope(request) };
   } catch (error) {
     return { index, worker: threadId, status: "error", state: error?.state ?? null,
-      message: String(error?.message ?? error) };
+      row: error?.row === true, message: String(error?.message ?? error) };
   }
 }
 

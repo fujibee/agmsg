@@ -25,6 +25,8 @@ import {
   configure,
   cycle,
   newSkipState,
+  noteSkips,
+  skipPlan,
   recordSkips,
   discardInputDirectory,
   driver,
@@ -5765,11 +5767,17 @@ const skipDrivers = (log, { reported }) => ({
   driverCall: async (operation, _config, input) => {
     if (operation !== "prepare") return [{ type: "sync_apply_result", transport_cursor: "9", corrupt_count: 0 }];
     log.inputs.push(input[0].skip_positions ?? null);
-    // Like the real driver: a position it was told to leave out is not looked at.
-    const skipped = reported() && !(input[0].skip_positions ?? []).includes("2") ? [{ type: "sync_skipped", local_position: "2", id: "local-2",
-      reason: "malformed: from_agent is invalid" }] : [];
+    log.rechecks = [...(log.rechecks ?? []), input[0].recheck_positions ?? null];
+    const left = input[0].skip_positions ?? [];
+    const again = input[0].recheck_positions ?? [];
+    // Like the real driver: a position it was told to leave out is not looked at,
+    // one it was asked to look at again is, and is either still skipped or resolved.
+    const skipped = reported() && !left.includes("2") ? [{ type: "sync_skipped", local_position: "2",
+      id: "local-2", reason: "malformed: from_agent is invalid" }] : [];
+    const resolved = !reported() && again.includes("2") ?
+      [{ type: "sync_resolved", local_position: "2" }] : [];
     return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9", db_path: "/db/messages.db" },
-      ...skipped];
+      ...skipped, ...resolved];
   },
   rosterDriverCall: async (operation) => operation === "prepare" ?
     [{ type: "roster_sync_state", transport_cursor: "0", config_path: "/c", journal_path: "/j" }] : [],
@@ -5868,4 +5876,40 @@ test("recordSkips: the record names the row, a down notice is set for doctor, an
     else process.env.AGMSG_SYNC_CONNECTION_DIR = savedConnection;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("noteSkips: a retry clears only the rows the driver says it resolved, and keeps the ones nobody looked at", () => {
+  const skips = newSkipState();
+  const add = (position) => skips.rows.set(position, { direction: "push", local_position: position,
+    id: `local-${position}`, reason: "malformed: x", first_seen: "t", count: 1 });
+  add("1"); add("2"); add("3");
+  skips.cycles = 20;
+  const plan = skipPlan(skips);
+  assert.deepEqual(plan.recheck, ["1", "2", "3"]);
+  assert.deepEqual(plan.positions, []);
+  // The driver looked at 1 (resolved) and 3 (still bad); 2 was not examined.
+  const change = noteSkips(skips, plan, [{ local_position: "3", id: "local-3", reason: "malformed: x" }], ["1"]);
+  assert.deepEqual(change.cleared.map((row) => row.local_position), ["1"]);
+  assert.deepEqual([...skips.rows.keys()].sort(), ["2", "3"]);
+  assert.equal(skips.rows.get("3").count, 2);
+  assert.equal(skips.dirty, true);
+});
+
+test("noteSkips: a retry in which nothing was examined (sends not allowed) clears nothing", () => {
+  const skips = newSkipState();
+  skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "r", first_seen: "t", count: 1 });
+  skips.cycles = 20;
+  const change = noteSkips(skips, skipPlan(skips), [], []);
+  assert.deepEqual(change.cleared, []);
+  assert.equal(skips.rows.size, 1);
+  assert.equal(skips.cycles, 0);
+});
+
+test("noteSkips: a changed count or reason alone marks the record to be written again", () => {
+  const skips = newSkipState();
+  skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "old", first_seen: "t", count: 1 });
+  skips.dirty = false;
+  noteSkips(skips, skipPlan(skips), [{ local_position: "2", id: "local-2", reason: "new" }], []);
+  assert.equal(skips.dirty, true);
+  assert.equal(skips.rows.get("2").reason, "new");
 });

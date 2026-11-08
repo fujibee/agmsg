@@ -306,14 +306,23 @@ function skippedPath(team) {
 }
 
 // What to leave out of this prepare, and whether this is the retry of everything.
+//
+// A retry names every remembered position (`recheck`) for the driver to look at
+// again whatever its page limit, and nothing is left out of that prepare.
 export function skipPlan(skips) {
   const retrying = skips.rows.size > 0 && skips.cycles >= SKIP_RETRY_CYCLES;
-  return { retrying,
-    positions: retrying ? [] : [...skips.rows.keys()].slice(0, SKIP_EXCLUDE_MAX) };
+  const keys = [...skips.rows.keys()].slice(0, SKIP_EXCLUDE_MAX);
+  return { retrying, positions: retrying ? [] : keys, recheck: retrying ? keys : [] };
 }
 
 // Fold one prepare's `sync_skipped` records into the memory. Returns what changed.
-export function noteSkips(skips, plan, reported, now = new Date()) {
+//
+// A remembered row is cleared only on positive evidence: the driver says it
+// RESOLVED that position (`resolved`: it looked at the row again and it is no
+// longer skipped, because it sealed, was already reserved or acknowledged, or is
+// gone). A row nobody looked at (sends not allowed, more rows than one retry
+// covers) is kept, and the driver is not claimed to have read it.
+export function noteSkips(skips, plan, reported, resolved = [], now = new Date()) {
   const added = [];
   const cleared = [];
   const seen = new Set();
@@ -323,7 +332,8 @@ export function noteSkips(skips, plan, reported, now = new Date()) {
     const known = skips.rows.get(key);
     if (known) {
       known.count += 1;
-      known.reason = record.reason;
+      if (known.reason !== record.reason) known.reason = record.reason;
+      skips.dirty = true;
     } else {
       skips.rows.set(key, { direction: "push", local_position: key, id: record.id,
         reason: record.reason, first_seen: now.toISOString(), count: 1 });
@@ -331,9 +341,10 @@ export function noteSkips(skips, plan, reported, now = new Date()) {
     }
   }
   if (plan.retrying) {
-    // Everything was offered again: what did not come back is sendable now.
-    for (const [key, row] of skips.rows) {
-      if (!seen.has(key)) { skips.rows.delete(key); cleared.push(row); }
+    for (const position of resolved) {
+      const key = String(position);
+      const row = skips.rows.get(key);
+      if (row && !seen.has(key)) { skips.rows.delete(key); cleared.push(row); }
     }
     skips.cycles = 0;
   } else {
@@ -3600,14 +3611,17 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
     // Only the storage driver is told what to leave out, and only when there is
     // something: its input is otherwise byte-for-byte what it always was.
     const plan = skipPlan(skips);
-    const storageInput = plan.positions.length === 0 ? prepareInput :
-      [{ ...prepareInput[0], skip_positions: plan.positions }];
+    const storageInput = plan.positions.length === 0 && plan.recheck.length === 0 ? prepareInput :
+      [{ ...prepareInput[0],
+        ...(plan.positions.length > 0 ? { skip_positions: plan.positions } : {}),
+        ...(plan.recheck.length > 0 ? { recheck_positions: plan.recheck } : {}) }];
     const [prepared, rosterPrepared] = await Promise.all([
       driverCall("prepare", config, storageInput, [String(pushLimit)]),
       rosterDriverCall("prepare", config, prepareInput, [String(pushLimit)]),
     ]);
     const skipChange = noteSkips(skips, plan,
-      prepared.filter((record) => record.type === "sync_skipped"));
+      prepared.filter((record) => record.type === "sync_skipped"),
+      prepared.filter((record) => record.type === "sync_resolved").map((record) => record.local_position));
     for (const row of skipChange.added) {
       await note(eventCall, "sync.skipped", { direction: row.direction,
         local_position: row.local_position, id: row.id, reason: row.reason });

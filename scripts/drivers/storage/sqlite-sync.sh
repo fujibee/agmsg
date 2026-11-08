@@ -738,7 +738,7 @@ storage_sync_prepare_push() {
   _sqlite_sync_require_jq_binary || return 10
 
   local prepare generation db tl input_ok version cipher key_json key_id recipients max_blob allow_new
-  local skip_positions skip_filter="" skipped=0
+  local skip_positions recheck_positions skip_filter="" skipped=0 skipped_csv=","
   local -a skip_lines
   prepare=$(cat)
   input_ok=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r \
@@ -752,15 +752,19 @@ storage_sync_prepare_push() {
   key_id=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.key_id // empty')
   recipients=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -c '.recipients // []')
   max_blob=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.max_blob_bytes')
-  # allow_new, and the positions the engine asked to leave out of this page
-  # (rows it already found unsendable), come out of one jq as one line.
+  # allow_new, the positions the engine asked to leave out of this page (rows it
+  # already found unsendable) and the positions it asked to have looked at again
+  # whatever the page limit, come out of one jq as one line.
   allow_new=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '[(if .allow_new then 1 else 0 end),
-    ((.skip_positions // []) | map(tostring) | join(","))] | join("|")')
+    ((.skip_positions // []) | map(tostring) | join(",")),
+    ((.recheck_positions // []) | map(tostring) | join(","))] | join("|")')
+  recheck_positions="${allow_new##*|}"; allow_new="${allow_new%|*}"
   skip_positions="${allow_new#*|}"; allow_new="${allow_new%%|*}"
-  case "$skip_positions" in
-    '') ;;
-    *[!0-9,]*|,*|*,|*,,*) _sqlite_sync_why; return 13 ;;
-  esac
+  local position_list
+  for position_list in "$skip_positions" "$recheck_positions"; do
+    case "$position_list" in ''|[0-9]*) ;; *) _sqlite_sync_why; return 13 ;; esac
+    case "$position_list" in *[!0-9,]*|*,|*,,*) _sqlite_sync_why; return 13 ;; esac
+  done
   [ "$version" = 1 ] || { _sqlite_sync_why; return 13; }
   case "$cipher" in
     none) [ "$key_json" = null ] && [ "$recipients" = '[]' ] || { _sqlite_sync_why; return 13; } ;;
@@ -788,11 +792,11 @@ storage_sync_prepare_push() {
   [ -f "$cipher_helper" ] || { _sqlite_sync_why; return 13; }
   # 'reserved' carries the LEFT JOIN's existing wire_id so the immutability
   # check below is a filter on rows already in hand, not a lookup per message.
-  rows=$(_sqlite_data "$team" "
-    SELECT json_object('local_position',CAST(e.seq AS TEXT),'local_id',e.id,
+  local row_columns row_source
+  row_columns="json_object('local_position',CAST(e.seq AS TEXT),'local_id',e.id,
                        'body_hex',lower(hex(CAST(e.body AS BLOB))),'at',e.at,'from_agent',e.from_agent,
-                       'to_agent',e.to_agent,'reserved',m.wire_id)
-      FROM events e
+                       'to_agent',e.to_agent,'reserved',m.wire_id)"
+  row_source="FROM events e
       JOIN sync_bindings b ON b.local_team='$tl'
        AND b.server_instance_id='$server' AND b.remote_team_id='$remote'
        AND b.protocol_version=$protocol AND b.driver_generation='$generation'
@@ -803,10 +807,25 @@ storage_sync_prepare_push() {
        AND m.driver_generation=b.driver_generation AND m.local_position=e.seq
      WHERE e.type='message_sent' AND e.team='$tl' AND e.seq>b.push_cursor
        AND m.server_seq IS NULL
-       AND ($allow_new=1 OR m.wire_id IS NOT NULL)
-       $skip_filter
+       AND ($allow_new=1 OR m.wire_id IS NOT NULL)"
+  if [ -z "$recheck_positions" ]; then
+    rows=$(_sqlite_data "$team" "
+    SELECT $row_columns $row_source $skip_filter
      ORDER BY e.seq LIMIT $limit;
   ") || { _sqlite_sync_why; return 13; }
+  else
+    # The engine asked for these positions to be looked at again, whatever the
+    # page limit: they are added to the page (a row in both is one row, the
+    # compound's UNION), so a retry examines every row it names.
+    rows=$(_sqlite_data "$team" "
+    SELECT j FROM (
+      SELECT s, j FROM (SELECT e.seq AS s, $row_columns AS j $row_source $skip_filter
+                         ORDER BY e.seq LIMIT $limit)
+      UNION
+      SELECT e.seq AS s, $row_columns AS j $row_source AND e.seq IN ($recheck_positions)
+    ) ORDER BY s;
+  ") || { _sqlite_sync_why; return 13; }
+  fi
 
   # A reservation an earlier call already produced is immutable: the final
   # SELECT republishes it verbatim and it is never re-sealed.
@@ -852,7 +871,7 @@ storage_sync_prepare_push() {
     # (review, #1487). \x1f collapses nothing; the reason column is sanitized
     # of control characters below for the same reason (a literal \x1f or
     # newline inside it would misalign or truncate this read).
-    while IFS=$'\x1f' read -r idx status blob reason; do
+    while IFS=$'\x1f' read -r idx status blob rowlocal reason; do
       case "$idx" in ''|*[!0-9]*) continue ;; esac
       [ "$idx" -lt "$prepared" ] || continue
       if [ "$status" != ok ] || [ -z "$blob" ]; then
@@ -861,12 +880,18 @@ storage_sync_prepare_push() {
         else
           printf 'agmsg: cipher helper did not seal message %s (%s)\n' "$idx" "$status" >&2
         fi
-        # Left out of this page and reported (below) rather than failing it: a
-        # row the wire cannot carry must not stop every row behind it. It has no
-        # reservation, so push_cursor stays under it and a later prepare offers
-        # it again once it can be sealed.
-        skip_lines[$skipped]="${seal_pos[$idx]}"$'\x1f'"${seal_local[$idx]}"$'\x1f'"$status"$'\x1f'"$reason"
-        skipped=$((skipped + 1))
+        # Left out of this page and reported (below) rather than failing it, but
+        # ONLY when the helper says the fault is this row's own data or size: a
+        # row the wire cannot carry must not stop every row behind it. Anything
+        # else (no age binary, a cipher this build lacks, a recipient manifest,
+        # a dead worker) is true of every row, stays unsealed, and fails the call
+        # below as it always did. A skipped row has no reservation, so push_cursor
+        # stays under it and a later prepare offers it again once it can be sealed.
+        if [ "$rowlocal" = true ]; then
+          skip_lines[$skipped]="${seal_pos[$idx]}"$'\x1f'"${seal_local[$idx]}"$'\x1f'"$status"$'\x1f'"$reason"
+          skipped=$((skipped + 1))
+          skipped_csv="${skipped_csv}${seal_pos[$idx]},"
+        fi
         continue
       fi
       if [ "${AGMSG_SYNC_TEST_ABORT_AFTER_SEAL:-}" = 1 ]; then
@@ -925,6 +950,7 @@ storage_sync_prepare_push() {
                  and (.envelope.blob|length)>0
                then "ok" else (.state // .status // "invalid") end),
              (.envelope.blob // ""),
+             (if .row == true then "true" else "false" end),
              # Folded to one line and stripped of anything that could be
              # mistaken for the \x1f join below: a multi-line or control-
              # character-bearing message would otherwise truncate or misalign
@@ -967,6 +993,17 @@ storage_sync_prepare_push() {
       AND m.server_seq IS NULL ORDER BY m.local_position LIMIT $limit;" || return $?
   # One record per row left out, from ONE jq however many there are. No body: the
   # position, the local id and the helper's own (fixed-text) reason.
+  # A position the engine asked to look at again is RESOLVED when this call
+  # actually examined it (sends are allowed, so every such row was in the page)
+  # and did not skip it: it was sealed, already reserved, acknowledged or gone.
+  # With sends not allowed nothing is examined, so nothing is claimed.
+  if [ "$allow_new" = 1 ] && [ -n "$recheck_positions" ]; then
+    local resolved_position
+    for resolved_position in ${recheck_positions//,/ }; do
+      case "$skipped_csv" in *",$resolved_position,"*) continue ;; esac
+      printf '{"type":"sync_resolved","local_position":"%s"}\n' "$resolved_position"
+    done
+  fi
   if [ "$skipped" -gt 0 ]; then
     printf '%s\n' "${skip_lines[@]}" | _sqlite_sync_jq -cR 'split("\u001f")
       | {type:"sync_skipped",local_position:.[0],id:.[1],

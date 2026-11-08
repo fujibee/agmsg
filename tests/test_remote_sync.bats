@@ -1922,3 +1922,52 @@ bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per li
   [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_push_candidate"')" = 2 ]
   [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 1 ]
 }
+
+@test "sync contract: a retry looks at every position it names, whatever the page limit" {
+  local db out
+  storage_send demo alice bob "bad one" >/dev/null
+  storage_send demo alice bob "bad two" >/dev/null
+  storage_send demo alice bob "good" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body IN ('bad one','bad two')"
+  # A page of one, but both remembered positions are named: both are examined.
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"recheck_positions":[1,2]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_resolved"')" = 0 ]
+}
+
+@test "sync contract: a position that can be sent now is reported resolved, one that is still bad is not" {
+  local db out
+  storage_send demo alice bob "fixed" >/dev/null
+  storage_send demo alice bob "still bad" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='still bad'"
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"recheck_positions":[1,2]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_resolved") | .local_position')" = 1 ]
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_skipped") | .local_position')" = 2 ]
+}
+
+@test "sync contract: with sends not allowed nothing is examined, so nothing is claimed resolved" {
+  local out
+  storage_send demo alice bob "anything" >/dev/null
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":false,"recheck_positions":[1]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_resolved"')" = 0 ]
+}
+
+@test "sync contract: a failure that is true of every row fails the call, it is not skipped as one bad row" {
+  # age-v1 with no age binary: nothing about row 1 is wrong, and "skipped" would
+  # report a healthy message and let prepare succeed with nothing sealed.
+  local recipient out
+  recipient=$(jq -r '.recipient_sets.team_a.recipient' "$BATS_TEST_DIRNAME/../docs/spec/vectors/age-v1-vectors.json")
+  storage_send demo alice bob "a perfectly good message" >/dev/null
+  age_prepare() {
+    printf '%s\n' "{\"type\":\"sync_prepare\",\"envelope_v\":1,\"cipher\":\"age-v1\",\"key_id\":\"epoch-1\",\"recipients\":[\"$recipient\"],\"max_blob_bytes\":1048576,\"allow_new\":true}" \
+      | AGMSG_AGE_BIN=/nonexistent/agmsg-test-age storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100
+  }
+  run age_prepare
+  [ "$status" -ne 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 0 ]
+}
