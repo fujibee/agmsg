@@ -560,7 +560,9 @@ _codex_proj() {
   [ "$status" -eq 0 ]
   LC_ALL=C grep -qF "3 new message(s)" <<<"$output"
   LC_ALL=C grep -qF "first ok" <<<"$output"
-  LC_ALL=C grep -qF "result=" <<<"$output"
+  # The bad bytes themselves arrive unchanged (E3 81 right after "result="),
+  # not dropped or replaced.
+  LC_ALL=C grep -qF "result=$(printf '\xe3\x81')" <<<"$output"
   LC_ALL=C grep -qF "last ok" <<<"$output"
   [ "$(unread_count bob)" -eq 0 ]
 }
@@ -574,6 +576,8 @@ _codex_proj() {
   run bash "$SCRIPTS/history.sh" testteam bob
   [ "$status" -eq 0 ]
   LC_ALL=C grep -qF "first ok" <<<"$output"
-  LC_ALL=C grep -qF "result=" <<<"$output"
+  # The bad bytes themselves arrive unchanged (E3 81 right after "result="),
+  # not dropped or replaced.
+  LC_ALL=C grep -qF "result=$(printf '\xe3\x81')" <<<"$output"
   LC_ALL=C grep -qF "last ok" <<<"$output"
 }
