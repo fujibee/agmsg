@@ -41,7 +41,7 @@ AGENT_TYPE="${2:-$(agmsg_detect_cli_type)}"
 # value turns a plain `whoami.sh <project>` into exit 1, while the same tree
 # without the check still answers.
 if [ -n "${2:-}" ] && ! agmsg_is_known_type "$AGENT_TYPE"; then
-  echo "Unknown agent type: '$AGENT_TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g'))" >&2
+  echo "Unknown agent type: '$AGENT_TYPE' (supported: $(agmsg_known_types | sort -u | LC_ALL=C paste -sd, - | sed 's/,/, /g'))" >&2
   exit 1
 fi
 
@@ -56,7 +56,7 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
-AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
+AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | LC_ALL=C sed "s/'/''/g")
 
 if [ ! -d "$TEAMS_DIR" ]; then
   echo "not_joined=true available_teams=none"
@@ -104,7 +104,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     SELECT DISTINCT name
     FROM agents, json_each(agents.registrations) AS r
     WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL';
-  " | tr -d '\r')
+  " | LC_ALL=C tr -d '\r')
 done
 
 if [ -z "$EXACT_MATCHES" ] && [ -z "$SUGGESTED_MATCHES" ]; then
@@ -114,15 +114,15 @@ fi
 
 if [ -z "$EXACT_MATCHES" ]; then
   # SUGGESTED_MATCHES is "team\tagent" per line; preserve that order.
-  AGENT_NAMES=$(echo "$SUGGESTED_MATCHES" | cut -f2 | awk '!seen[$0]++' | paste -sd, -)
-  TEAM_NAMES=$(echo "$SUGGESTED_MATCHES" | cut -f1 | awk '!seen[$0]++' | paste -sd, -)
+  AGENT_NAMES=$(echo "$SUGGESTED_MATCHES" | cut -f2 | awk '!seen[$0]++' | LC_ALL=C paste -sd, -)
+  TEAM_NAMES=$(echo "$SUGGESTED_MATCHES" | cut -f1 | awk '!seen[$0]++' | LC_ALL=C paste -sd, -)
   echo "suggest=true agents=$AGENT_NAMES teams=$TEAM_NAMES type=$AGENT_TYPE project=$PROJECT_PATH available_teams=${ALL_TEAMS:-none}"
   exit 0
 fi
 
 # EXACT_MATCHES from identities.sh is "team\tagent" per line.
-TEAM_NAMES=$(echo "$EXACT_MATCHES" | cut -f1 | awk '!seen[$0]++' | paste -sd, -)
-AGENT_NAMES=$(echo "$EXACT_MATCHES" | cut -f2 | awk '!seen[$0]++' | paste -sd, -)
+TEAM_NAMES=$(echo "$EXACT_MATCHES" | cut -f1 | awk '!seen[$0]++' | LC_ALL=C paste -sd, -)
+AGENT_NAMES=$(echo "$EXACT_MATCHES" | cut -f2 | awk '!seen[$0]++' | LC_ALL=C paste -sd, -)
 AGENT_COUNT=$(echo "$EXACT_MATCHES" | cut -f2 | sort -u | wc -l | tr -d ' ')
 
 if [ "$AGENT_COUNT" -eq 1 ]; then

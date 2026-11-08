@@ -41,7 +41,7 @@ agmsg_storage_load
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
 
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+_agmsg_sqlesc() { printf %s "$1" | LC_ALL=C sed "s/'/''/g"; }
 
 VERB="${1:?Usage: api.sh <verb> <resource> ... — e.g. api.sh get teams}"
 shift

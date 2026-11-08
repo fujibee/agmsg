@@ -178,7 +178,7 @@ _orca_show_json() {   # <id>
 # JSON1 extension (the codebase's no-jq convention — see herdr's ops.sh).
 _orca_json_valid() {   # <json>
   local esc valid
-  esc="$(printf '%s' "$1" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$1" | LC_ALL=C sed "s/'/''/g")"
   valid="$(sqlite3 :memory: "SELECT json_valid('$esc')" 2>/dev/null)" || return 1
   [ "$valid" = 1 ]
 }
@@ -194,7 +194,7 @@ _orca_json_valid() {   # <json>
 # _orca_json_bool for `ok` / `connected` and any other true/false field.
 _orca_json_field() {   # <json> <path> <type>
   local esc="$1" path="$2" type="$3"
-  esc="$(printf '%s' "$esc" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$esc" | LC_ALL=C sed "s/'/''/g")"
   sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','$path')='$type' THEN json_extract('$esc','$path') ELSE '' END" 2>/dev/null
 }
 
@@ -202,7 +202,7 @@ _orca_json_field() {   # <json> <path> <type>
 # absent/not a boolean. See the type-name note on _orca_json_field above.
 _orca_json_bool() {   # <json> <path>
   local esc="$1" path="$2" t
-  esc="$(printf '%s' "$esc" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$esc" | LC_ALL=C sed "s/'/''/g")"
   t="$(sqlite3 :memory: "SELECT json_type('$esc','$path')" 2>/dev/null)"
   case "$t" in
     true)  printf '1\n' ;;
@@ -335,7 +335,7 @@ terminal_peek() {
   # pane content. Require json_type = array FIRST; only a confirmed array
   # (including a correctly empty one) reaches json_each.
   local esc tail_type
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   tail_type="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.terminal.tail')" 2>/dev/null)"
   [ "$tail_type" = array ] || {
     echo "orca: read for terminal '$id' did not return an array of lines (got: ${tail_type:-missing})" >&2
@@ -517,7 +517,7 @@ terminal_input_draft() {   # <id>
     return 12
   fi
   local esc draft_type draft extract_rc encoded b64_rc _restore_e
-  esc="$(printf '%s' "$read_json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$read_json" | LC_ALL=C sed "s/'/''/g")"
   draft_type="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.terminal.draft')" 2>/dev/null)"
   case "$draft_type" in
     '')
@@ -662,7 +662,7 @@ terminal_enumerate_panes() {
     return 0
   fi
   local esc n_all n_ok
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','\$.result.terminals')='array' THEN json_array_length('$esc','\$.result.terminals') ELSE -1 END" 2>/dev/null)"
   case "$n_all" in ''|*[!0-9]*) printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0 ;; esac
   n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.terminals') WHERE json_type(value,'\$.handle')='text'" 2>/dev/null)"
@@ -916,7 +916,7 @@ terminal_team_observe() {
   _orca_json_valid "$json" || return 10
   ok="$(_orca_json_bool "$json" '$.ok')"
   [ "$ok" = 1 ] || return 10
-  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
   # tabid/wtid are opaque, orca-generated UUIDs (never typed text a rename
   # can put a control character into), used here only as WHERE-clause join
   # keys -- unlike title below, there is no untrusted-content path into them,
@@ -924,13 +924,13 @@ terminal_team_observe() {
   tabid="$(sqlite3 :memory: "SELECT json_extract(value,'\$.tabId') FROM json_each('$esc','\$.result.terminals') WHERE json_extract(value,'\$.handle')='$bare' LIMIT 1" 2>/dev/null)"
   wtid="$(sqlite3 :memory: "SELECT json_extract(value,'\$.worktreeId') FROM json_each('$esc','\$.result.terminals') WHERE json_extract(value,'\$.handle')='$bare' LIMIT 1" 2>/dev/null)"
   [ -n "$tabid" ] && [ -n "$wtid" ] || return 10
-  wesc="$(printf '%s' "$wtid" | sed "s/'/''/g")"
+  wesc="$(printf '%s' "$wtid" | LC_ALL=C sed "s/'/''/g")"
   lidx="$(sqlite3 :memory: "SELECT key FROM json_each('$esc','\$.result.visualLayouts') WHERE json_extract(value,'\$.worktreeId')='$wesc' LIMIT 1" 2>/dev/null)"
   [ -n "$lidx" ] || return 10
   case "$lidx" in *[!0-9]*) return 10 ;; esac
   tabtype="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.visualLayouts[$lidx].root.tabs')" 2>/dev/null)"
   [ "$tabtype" = array ] || return 10
-  tesc="$(printf '%s' "$tabid" | sed "s/'/''/g")"
+  tesc="$(printf '%s' "$tabid" | LC_ALL=C sed "s/'/''/g")"
   tidx="$(sqlite3 :memory: "SELECT key FROM json_each('$esc','\$.result.visualLayouts[$lidx].root.tabs') WHERE json_extract(value,'\$.tabId')='$tesc' LIMIT 1" 2>/dev/null)"
   [ -n "$tidx" ] || return 10
   case "$tidx" in *[!0-9]*) return 10 ;; esac

@@ -35,7 +35,12 @@ _sqlite_lit() { local q="'"; printf '%s' "${1//$q/$q$q}"; }
 # separate fd — it never pollutes the JSONL on stdout) so failures are
 # debuggable, per §2.1 framing (#203 (1) / review).
 _sqlite_data() {
-  ( set -o pipefail; agmsg_sqlite "$(_sqlite_db "$1")" "$2" | tr -d '\r' )
+  [ -n "$_AGMSG_SQLITE_CRLF" ] || _agmsg_sqlite_crlf
+  if [ "$_AGMSG_SQLITE_CRLF" = 1 ]; then
+    ( set -o pipefail; agmsg_sqlite "$(_sqlite_db "$1")" "$2" | LC_ALL=C tr -d '\r' )
+  else
+    agmsg_sqlite "$(_sqlite_db "$1")" "$2"
+  fi
 }
 
 # The same query, handed over stdin instead of on the command line (#882).
@@ -59,7 +64,12 @@ _sqlite_data() {
 _sqlite_data_stdin() {
   # Outside the subshell on purpose: a probe run inside it would be discarded.
   agmsg_sqlite_warm
-  ( set -o pipefail; printf '%s\n' "$2" | agmsg_sqlite -batch "$(_sqlite_db "$1")" | tr -d '\r' )
+  if [ "$_AGMSG_SQLITE_CRLF" = 1 ]; then
+    ( set -o pipefail; printf '%s\n' "$2" | agmsg_sqlite -batch "$(_sqlite_db "$1")" | LC_ALL=C tr -d '\r' )
+  else
+    agmsg_sqlite_warm
+    ( set -o pipefail; printf '%s\n' "$2" | agmsg_sqlite -batch "$(_sqlite_db "$1")" )
+  fi
 }
 
 # The same, for a statement whose output nobody reads. Takes a database PATH
@@ -630,7 +640,7 @@ storage_import() {
   [ -f "$file" ] || return 1
   storage_init "$selector" >/dev/null
   local line t id team frm to body msg_id agent at
-  j() { sqlite3 :memory: "SELECT COALESCE(json_extract('$(_sqlite_lit "$line")','\$.$1'),'')" 2>/dev/null | tr -d '\r'; }
+  j() { sqlite3 :memory: "SELECT COALESCE(json_extract('$(_sqlite_lit "$line")','\$.$1'),'')" 2>/dev/null | LC_ALL=C tr -d '\r'; }
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     t=$(j type); id=$(j id); team=$(j team); at=$(j at)

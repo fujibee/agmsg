@@ -21,7 +21,7 @@ agmsg_delivery_apply() {
     # json_quote handles JSON-string escaping for arbitrary command strings
     # (project paths may contain JSON-special chars).
     local cmd_json
-    cmd_json=$(agmsg_sqlite_mem "SELECT json_quote('$(printf '%s' "$cmd" | sed "s/'/''/g")');")
+    cmd_json=$(agmsg_sqlite_mem "SELECT json_quote('$(printf '%s' "$cmd" | LC_ALL=C sed "s/'/''/g")');")
     # Use PascalCase 'Stop' trigger so the input payload field names match
     # the snake_case form (session_id) that check-inbox.sh already parses.
     cat <<EOF > "$hooks_file"

@@ -497,7 +497,7 @@ _sqlite_sync_schema() {
                   protocol_version,driver_generation,member_id)
     );
   " >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
-  if ! agmsg_sqlite "$db" "PRAGMA table_info(sync_read_members);" | cut -d'|' -f2 |
+  if ! agmsg_sqlite "$db" "PRAGMA table_info(sync_read_members);" | LC_ALL=C cut -d'|' -f2 |
       grep -qx remote_agent; then
     agmsg_sqlite "$db" "BEGIN IMMEDIATE;
       ALTER TABLE sync_read_members ADD COLUMN remote_agent TEXT NOT NULL DEFAULT '';
@@ -508,7 +508,7 @@ _sqlite_sync_schema() {
       COMMIT;" >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
   fi
   generation=$(agmsg_sqlite "$db" \
-    "SELECT generation FROM sync_store_metadata WHERE singleton=1;" 2>/dev/null | tr -d '\r')
+    "SELECT generation FROM sync_store_metadata WHERE singleton=1;" 2>/dev/null | LC_ALL=C tr -d '\r')
   if [ -z "$generation" ]; then
     generation=$(_sqlite_sync_uuid4) || { _sqlite_sync_why; return 13; }
     agmsg_sqlite "$db" "INSERT OR IGNORE INTO sync_store_metadata(singleton,generation)
@@ -527,10 +527,10 @@ storage_sync_resync_status() {
   [ -f "$db" ] || { _sqlite_sync_why; return 13; }
   table_count=$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sqlite_master
     WHERE type='table' AND name IN ('sync_store_metadata','sync_bindings','sync_resync_audits');" \
-    2>/dev/null | tr -d '\r') || { _sqlite_sync_why; return 13; }
+    2>/dev/null | LC_ALL=C tr -d '\r') || { _sqlite_sync_why; return 13; }
   [ "$table_count" = 3 ] || { _sqlite_sync_why; return 13; }
   generation=$(agmsg_sqlite "$db" "SELECT generation FROM sync_store_metadata WHERE singleton=1;" \
-    2>/dev/null | tr -d '\r') || { _sqlite_sync_why; return 13; }
+    2>/dev/null | LC_ALL=C tr -d '\r') || { _sqlite_sync_why; return 13; }
   [ -n "$generation" ] || { _sqlite_sync_why; return 13; }
   local output
   output=$(_sqlite_data "$team" "SELECT json_object(
@@ -622,7 +622,7 @@ storage_sync_resync() {
 # <team> is the storage selector, threaded from the contract that called us.
 _sqlite_sync_generation() {
   agmsg_sqlite "$(_sqlite_db "$1")" \
-    "SELECT generation FROM sync_store_metadata WHERE singleton=1;" | tr -d '\r'
+    "SELECT generation FROM sync_store_metadata WHERE singleton=1;" | LC_ALL=C tr -d '\r'
 }
 
 # Legacy rows live in `messages`, which predates the event log and which nothing
@@ -656,7 +656,7 @@ _sqlite_sync_project_legacy() {
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
 
   done_marker=$(agmsg_sqlite "$db" "SELECT value FROM storage_metadata
-    WHERE key='legacy_push_projected_v1';" 2>/dev/null | tr -d '\r')
+    WHERE key='legacy_push_projected_v1';" 2>/dev/null | LC_ALL=C tr -d '\r')
   [ -z "$done_marker" ] || return 0
 
   # A legacy id at or above the offset would project to a NON-negative seq and
@@ -664,7 +664,7 @@ _sqlite_sync_project_legacy() {
   # chosen to sit far above any real store, and "far above" is an assumption
   # worth failing on rather than assuming quietly.
   max_id=$(agmsg_sqlite "$db" "SELECT COALESCE(MAX(id),0) FROM messages
-    WHERE team='$tl';" 2>/dev/null | tr -d '\r')
+    WHERE team='$tl';" 2>/dev/null | LC_ALL=C tr -d '\r')
   case "$max_id" in ''|*[!0-9]*) max_id=0 ;; esac
   if [ "$max_id" -ge "$_AGMSG_LEGACY_SEQ_OFFSET" ]; then
     echo "agmsg: legacy message id $max_id exceeds the projection offset" >&2
@@ -819,7 +819,7 @@ storage_sync_prepare_push() {
       [ -n "$pos" ] || continue
       seal_pos[$prepared]="$pos"; seal_local[$prepared]="$local_id"
       seal_wire[$prepared]="$wire"; prepared=$((prepared + 1))
-    done < <(paste <(printf '%s\n' "$uuids") \
+    done < <(LC_ALL=C paste <(printf '%s\n' "$uuids") \
                    <(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)') \
              | _sqlite_sync_jq -rR 'split("\t") as $pair | ($pair[1] | fromjson) as $row
                        | [$row.local_position, $row.local_id, $pair[0]] | @tsv')
@@ -883,7 +883,7 @@ storage_sync_prepare_push() {
         _sqlite_sync_commit_chunk "$db" "$chunk_sql" || { _sqlite_sync_why; return 13; }
         sealed=$((sealed + chunk_count)); chunk_sql=""; chunk_count=0
       fi
-    done < <(paste <(printf '%s\n' "$uuids") \
+    done < <(LC_ALL=C paste <(printf '%s\n' "$uuids") \
                    <(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)') \
       | _sqlite_sync_jq -cR \
         --arg cipher "$cipher" --arg key "$key_id" --arg team_id "$remote" \
@@ -1251,7 +1251,7 @@ storage_sync_apply_pull() {
   # that predate the stream and still only removed the SQL file.
   _sqlite_sync_apply_fail() {  # [message]
     if [ "$#" -gt 0 ]; then
-      [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
+      [ -s "$jq_err" ] && LC_ALL=C sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
       printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
     fi
     { exec 3<&-; } 2>/dev/null || true
@@ -1505,7 +1505,7 @@ storage_sync_apply_pull() {
     server_instance_id='$server' AND remote_team_id='$remote' AND protocol_version=$protocol
     AND status='corrupt_state') +
     (SELECT COUNT(*) FROM sync_conflicts WHERE server_instance_id='$server'
-     AND remote_team_id='$remote' AND protocol_version=$protocol);" | tr -d '\r')
+     AND remote_team_id='$remote' AND protocol_version=$protocol);" | LC_ALL=C tr -d '\r')
   # STDIN, BECAUSE THIS ONE GROWS WITH THE PAGE (#882). `outcome_ids` gains an
   # entry per pulled message and is embedded TWICE below, so the command line
   # this used to be would pass about 400 messages on Windows and refuse the

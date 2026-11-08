@@ -694,6 +694,10 @@ EOF
   _fake_windows_manager
   local crlf_stub capture marker
   crlf_stub="$(_stub_sqlite3_crlf)"
+  # The stub models sqlite3.exe, the one sqlite3 whose rows end in \r\n; the CR
+  # strip runs only where that is so, and this test's fake `uname` does not
+  # change $OSTYPE, which is what that decision reads.
+  export AGMSG_SQLITE_CRLF=1
   capture="$TEST_SKILL_DIR/fake-windows/captured.xml"
   marker="$TEST_SKILL_DIR/fake-windows/registered"
   export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"

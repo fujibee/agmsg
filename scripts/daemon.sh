@@ -778,7 +778,7 @@ cmd_start() {
       return 1
     }
     found_version="$("$found_node" -e 'console.log(process.versions.node)')"
-    record_node_sql="UPDATE meta SET node_path = '$(printf '%s' "$found_node" | sed "s/'/''/g")', node_version = '$found_version';"
+    record_node_sql="UPDATE meta SET node_path = '$(printf '%s' "$found_node" | LC_ALL=C sed "s/'/''/g")', node_version = '$found_version';"
   fi
 
   # An install enabled by an earlier version (or updated before Codex was on
@@ -787,7 +787,7 @@ cmd_start() {
   local codex_fill="" codex_path
   codex_path="$(_resolve_codex 2>/dev/null || true)"
   if [ -n "$codex_path" ]; then
-    codex_fill="UPDATE meta SET codex_path = '$(printf '%s' "$codex_path" | sed "s/'/''/g")' WHERE COALESCE(codex_path, '') = '';"
+    codex_fill="UPDATE meta SET codex_path = '$(printf '%s' "$codex_path" | LC_ALL=C sed "s/'/''/g")' WHERE COALESCE(codex_path, '') = '';"
   fi
   local new_op_gen
   local start_where=""
@@ -1011,7 +1011,7 @@ cmd_enable() {
   local was_registered=0
   ! _service_registered || was_registered=1
   _with_op_lock "
-    UPDATE meta SET node_path = '$(printf '%s' "$node_path" | sed "s/'/''/g")', node_version = '$node_version', codex_path = '$(printf '%s' "$codex_path" | sed "s/'/''/g")';
+    UPDATE meta SET node_path = '$(printf '%s' "$node_path" | LC_ALL=C sed "s/'/''/g")', node_version = '$node_version', codex_path = '$(printf '%s' "$codex_path" | LC_ALL=C sed "s/'/''/g")';
     UPDATE daemon_intent SET desired = 'on';
   " _register "$node_path" || {
     if [ "$OP_LOCK_NOT_ACQUIRED" = 1 ]; then
@@ -1155,7 +1155,7 @@ cmd_offer() {
     claude-code|codex) ;;
     *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
   esac
-  desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | tr -d '\r' || true)"
+  desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | LC_ALL=C tr -d '\r' || true)"
   if [ "$desired" = on ]; then
     # Turned on is an intent, not proof that notices are being delivered:
     # a failed start or a stopped executor leaves it on with nothing running.
@@ -1185,7 +1185,7 @@ cmd_offer() {
       const { checkWindowsCodexQueueGate } = await import(process.argv[1]);
       const gate = checkWindowsCodexQueueGate({ executable: "codex" });
       console.log(gate.state === "ok" ? "ok" : gate.reason);
-    ' "file://$(cd "$SCRIPT_DIR/daemon/channels" && pwd -W 2>/dev/null || pwd)/windows-codex-queue.mjs" 2>/dev/null | tr -d '\r')" || found="windows_codex_version_unreadable"
+    ' "file://$(cd "$SCRIPT_DIR/daemon/channels" && pwd -W 2>/dev/null || pwd)/windows-codex-queue.mjs" 2>/dev/null | LC_ALL=C tr -d '\r')" || found="windows_codex_version_unreadable"
     if [ "$found" != ok ]; then
       echo "agmsgd=unavailable reason=agmsgd needs Codex 0.157 or newer on Windows ($found)"
       return 0

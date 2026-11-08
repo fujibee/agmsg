@@ -135,7 +135,7 @@ agmsg_driver_for_team() {
   # this mirrors how the rest of the tree reads these files.
   name="$(sqlite3 :memory: \
     "SELECT COALESCE(json_extract(readfile('$(agmsg_sql_readfile_path "$cfg")'), '\$.drivers.$axis'), '')" \
-    2>/dev/null | tr -d '\r')"
+    2>/dev/null | LC_ALL=C tr -d '\r')"
   case "$name" in ''|null) printf '%s\n' "$default" ;; *) printf '%s\n' "$name" ;; esac
 }
 
@@ -187,5 +187,5 @@ agmsg_ext_tool_available() {
 $(agmsg_driver_bases)
 EOF
   [ -n "$names" ] || { printf 'none'; return 0; }
-  printf '%s' "$names" | sort -u | paste -sd, - | sed 's/,/, /g'
+  printf '%s' "$names" | sort -u | LC_ALL=C paste -sd, - | sed 's/,/, /g'
 }

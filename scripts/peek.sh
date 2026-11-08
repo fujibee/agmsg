@@ -148,7 +148,7 @@ _team_rows() {
        COALESCE(json_extract(r.value, '\$.project'), ''),
        CASE WHEN r.value IS NULL THEN 0 ELSE 1 END
      FROM agents LEFT JOIN json_each(agents.registrations) AS r
-     ORDER BY name, CAST(r.key AS INTEGER);" 2>/dev/null | tr -d '\r')" || rc=$?
+     ORDER BY name, CAST(r.key AS INTEGER);" 2>/dev/null | LC_ALL=C tr -d '\r')" || rc=$?
   [ "$rc" -eq 0 ] || { echo "peek: team roster query failed (rc $rc)" >&2; return 10; }
   printf '%s\n' "$rows"
 }

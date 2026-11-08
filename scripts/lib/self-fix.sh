@@ -101,7 +101,7 @@ _fix_seats_of() {   # <bare-sid>
     # the value's inner shape varies by vintage, never the outer keying).
     agents="$(sqlite3 :memory: "
       SELECT key FROM json_each(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$cfg")') AS TEXT), '\$.agents'));
-    " 2>/dev/null | tr -d '\r')"
+    " 2>/dev/null | LC_ALL=C tr -d '\r')"
     [ -n "$agents" ] || continue
     while IFS= read -r agent; do
       [ -n "$agent" ] || continue

@@ -6,7 +6,7 @@
 
 : "${SKILL_DIR:?subscription.sh requires SKILL_DIR}"
 
-agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
+agmsg_sql_escape() { printf '%s' "$1" | LC_ALL=C sed "s/'/''/g"; }
 
 # Resolve the (team, agent) rows this process should receive for.
 #

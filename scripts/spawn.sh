@@ -129,7 +129,7 @@ $(agmsg_known_types | sort -u)
 EOF
   return 0
 }
-SUPPORTED_LIST="$(spawnable_types | paste -sd, - | sed 's/,/, /g')"
+SUPPORTED_LIST="$(spawnable_types | LC_ALL=C paste -sd, - | sed 's/,/, /g')"
 if ! agmsg_is_known_type "$AGENT_TYPE"; then
   die "unknown agent type '$AGENT_TYPE' (supported: ${SUPPORTED_LIST})"
 elif [ "$(agmsg_type_get "$AGENT_TYPE" spawnable)" != "yes" ] && [ -z "$(agmsg_type_get "$AGENT_TYPE" spawn)" ]; then
@@ -388,7 +388,7 @@ if [ -z "$TEAM" ]; then
   elif [ "$CAND_COUNT" -eq 0 ]; then
     die "no team is registered for this project; pass --team <team>"
   else
-    die "project belongs to multiple teams ($(printf '%s' "$CANDIDATES" | paste -sd, -)); pass --team <team>"
+    die "project belongs to multiple teams ($(printf '%s' "$CANDIDATES" | LC_ALL=C paste -sd, -)); pass --team <team>"
   fi
 fi
 

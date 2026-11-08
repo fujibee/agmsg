@@ -74,7 +74,7 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/lib/team-delete.sh"
 
-  DELETE_CONFIG_ESCAPED="$(sed "s/'/''/g" "$CONFIG")"
+  DELETE_CONFIG_ESCAPED="$(LC_ALL=C sed "s/'/''/g" "$CONFIG")"
 
   # Same three-way classification team-list.py's _team_row uses: "none" when
   # there is no connected_at, "disconnected" when disconnected_at is also
@@ -393,7 +393,7 @@ LAST_NAME=""
 # `.parameter`'s own usage help as if it were query output, with exit 0
 # (#87 cluster; see resolve-project.sh's `resolve_team` for the same
 # caveat).
-CONFIG_ESCAPED=$(sed "s/'/''/g" "$CONFIG")
+CONFIG_ESCAPED=$(LC_ALL=C sed "s/'/''/g" "$CONFIG")
 while IFS='	' read -r name type project registered; do
   if [ "$name" != "$LAST_NAME" ]; then
     COUNT=$((COUNT + 1))
@@ -407,7 +407,7 @@ while IFS='	' read -r name type project registered; do
   else
     _member_status "$TEAM" "$name" "$type" "$project" 1
   fi
-# tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
+# LC_ALL=C tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
 # the `registrations` field "N\r" and trip the integer test in the loop (#130).
 done < <(sqlite3 -separator '	' :memory: \
   "WITH agents AS (
@@ -429,7 +429,7 @@ done < <(sqlite3 -separator '	' :memory: \
    -- listing entirely and from the count with it. That is the normal state on
    -- a machine that pulled the team rather than joining it.
    FROM agents LEFT JOIN json_each(agents.registrations) AS r
-   ORDER BY name, CAST(r.key AS INTEGER);" | tr -d '\r')
+   ORDER BY name, CAST(r.key AS INTEGER);" | LC_ALL=C tr -d '\r')
 
 if [ "$OUTPUT_MODE" = json ]; then
   printf '\n]\n'

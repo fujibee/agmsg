@@ -29,7 +29,7 @@ agmsg_validate_agent_name "$AGENT_ID" || exit 1
 # into the JSON path below as `'$.agents.' || '<escaped>'` rather than spliced
 # into the path text, so a single quote in the name can't break the statement
 # (#87 cluster).
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+_agmsg_sqlesc() { printf %s "$1" | LC_ALL=C sed "s/'/''/g"; }
 AGENT_ID_SQL=$(_agmsg_sqlesc "$AGENT_ID")
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
@@ -45,7 +45,7 @@ fi
 agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
 agmsg_roster_ensure "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
 agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
-CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
+CONFIG_ESCAPED=$(LC_ALL=C sed "s/'/''/g" "$TEAM_CONFIG")
 
 # Check if agent exists.
 # CONFIG_ESCAPED is spliced as a genuine SQL string literal here, NOT bound
@@ -76,7 +76,7 @@ if agmsg_roster_has_journal "$TEAMS_DIR/$TEAM"; then
   agmsg_roster_append_left "$TEAMS_DIR/$TEAM" "$MEMBER_ID" "$AGENT_ID" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
-  CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
+  CONFIG_ESCAPED=$(LC_ALL=C sed "s/'/''/g" "$TEAM_CONFIG")
   AGENT_COUNT=$(agmsg_sqlite_mem \
     "SELECT count(*) FROM json_each(json_extract('$CONFIG_ESCAPED', '\$.agents'));")
   agmsg_lock_release
@@ -94,7 +94,7 @@ UPDATED=$(agmsg_sqlite_mem \
 
 # Check if agents is now empty
 AGENT_COUNT=$(agmsg_sqlite_mem \
-  "SELECT count(*) FROM json_each(json_extract('$(echo "$UPDATED" | sed "s/'/''/g")', '$.agents'));")
+  "SELECT count(*) FROM json_each(json_extract('$(echo "$UPDATED" | LC_ALL=C sed "s/'/''/g")', '$.agents'));")
 
 if [ "$AGENT_COUNT" -eq 0 ]; then
   rm -f "$TEAM_CONFIG"

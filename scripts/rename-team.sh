@@ -142,7 +142,7 @@ if [ -f "$DB" ]; then
   for TABLE in events read_cursors sync_bindings sync_messages sync_quarantine \
     sync_conflicts sync_read_members sync_read_remote_exact sync_read_aliases \
     sync_read_prepared; do
-    if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$TABLE';" | tr -d '\r')" = 1 ]; then
+    if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$TABLE';" | LC_ALL=C tr -d '\r')" = 1 ]; then
       case "$TABLE" in
         events|read_cursors) COLUMN=team ;;
         *) COLUMN=local_team ;;
