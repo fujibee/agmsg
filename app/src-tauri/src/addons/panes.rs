@@ -305,6 +305,11 @@ impl Registry {
         Some(p.generation)
     }
 
+    /// The add-on (`owner/repo` or built-in name) this pane runs.
+    pub fn addon_of(&self, id: PaneId) -> Option<String> {
+        self.panes.get(&id).map(|p| p.addon.clone())
+    }
+
     pub fn generation(&self, id: PaneId) -> Option<u64> {
         self.panes.get(&id).map(|p| p.generation)
     }
