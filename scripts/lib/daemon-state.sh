@@ -203,7 +203,7 @@ _agmsg_daemon_self_heal() {
   gen="$(sqlite3 -readonly "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT op_gen FROM daemon_intent;' 2>/dev/null || true)"
   case "$gen" in ''|*[!0-9]*) return 0 ;; esac
   AGMSG_DAEMON_SELF_HEAL=1 bash "$_AGMSG_DAEMON_ROOT/scripts/daemon.sh" start --only-if-op-gen "$gen" \
-    </dev/null >/dev/null 2>&1 &
+    </dev/null >/dev/null 2>&1 3>&- 4>&- &
   disown 2>/dev/null || true
 }
 
