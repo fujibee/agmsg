@@ -118,13 +118,9 @@ EOF
   chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
   export AGMSG_NODE="$(command -v bash)"
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
-  # Isolate the notice transport; these tests exercise launcher recovery and
-  # the shared helper calls, not the helper's persistence implementation.
+  # All launcher paths use the real persistence helper, including main's
+  # quick-death notices. Keep a pristine copy for the direct I/O probe.
   cp "$SCRIPTS/lib/down-notice.sh" "$SCRIPTS/lib/down-notice.persistence.sh"
-  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
-down_notice_set() { printf '%s\n' "$3" > "$RUN_DIR/test-down.$1"; }
-down_notice_clear() { rm -f "$RUN_DIR/test-down.$1"; }
-EOF
 }
 
 # PIDs of live per-role child launchers for this test's project: any process
@@ -1308,7 +1304,7 @@ EOF
   touch "$TEST_SKILL_DIR/teams/team/config.json"
   local i pending=0
   for i in {1..100}; do
-    if grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+    if grep -l 'identity discovery' "$RUN_DIR"/down/codex-identity.*.json >/dev/null 2>&1; then pending=1; break; fi
     sleep 0.1
   done
   [ "$pending" -eq 1 ]
@@ -1318,7 +1314,7 @@ EOF
   cp "$SCRIPTS/identities-saved.sh" "$SCRIPTS/identities.sh"
   local recovered=0
   for i in {1..100}; do
-    if ! grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+    if ! grep -l 'identity discovery' "$RUN_DIR"/down/codex-identity.*.json >/dev/null 2>&1; then recovered=1; break; fi
     sleep 0.1
   done
   [ "$recovered" -eq 1 ]
@@ -1352,7 +1348,7 @@ EOF
   printf '{"name":"team","agents":{"alice":{"registrations":[{}]}}}' > "$TEST_SKILL_DIR/teams/team/config.json"
   local i pending=0
   for i in {1..100}; do
-    if grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+    if grep -l 'identity discovery' "$RUN_DIR"/down/codex-identity.*.json >/dev/null 2>&1; then pending=1; break; fi
     sleep 0.1
   done
   [ "$pending" -eq 1 ]
@@ -1366,7 +1362,7 @@ EOF
   cp "$TEST_SKILL_DIR/saved-config.json" "$TEST_SKILL_DIR/teams/team/config.json"
   local recovered=0
   for i in {1..100}; do
-    if ! grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+    if ! grep -l 'identity discovery' "$RUN_DIR"/down/codex-identity.*.json >/dev/null 2>&1; then recovered=1; break; fi
     sleep 0.1
   done
   [ "$recovered" -eq 1 ]
@@ -1425,7 +1421,7 @@ unknown_requests_keep_bridge() {
     printf '%s\n' "$row" > "$request"
     pending=0
     for i in {1..100}; do
-      if grep -l 'no proven pair' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+      if grep -l 'no proven pair' "$RUN_DIR"/down/codex-identity.*.json >/dev/null 2>&1; then pending=1; break; fi
       sleep 0.1
     done
     [ "$pending" -eq 1 ] || return 1
@@ -1433,7 +1429,7 @@ unknown_requests_keep_bridge() {
     write_request thread-alice team alice
     recovered=0
     for i in {1..100}; do
-      if ! grep -l 'no proven pair' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+      if ! grep -l 'no proven pair' "$RUN_DIR"/down/codex-identity.*.json >/dev/null 2>&1; then recovered=1; break; fi
       sleep 0.1
     done
     [ "$recovered" -eq 1 ] || return 1
