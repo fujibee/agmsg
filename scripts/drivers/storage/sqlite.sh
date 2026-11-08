@@ -341,24 +341,29 @@ SQL
 # The correspondence is not bookkeeping: it is what every reader that unions the
 # two tables uses to recognise one message rather than list it twice.
 _sqlite_message_sent_sql() {
-  local team="$1" from="$2" to="$3" body="$4" id="$5" at="$6"
+  local team="$1" from="$2" to="$3" body="$4" id="$5" at="$6" body_file="${7:-}"
   local tl fl ol bl il al
   tl="$(_sqlite_lit "$team")"; fl="$(_sqlite_lit "$from")"; ol="$(_sqlite_lit "$to")"
-  bl="$(_sqlite_lit "$body")"; il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
+  bl="'$(_sqlite_lit "$body")'"; il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
+  # A body with a NUL byte cannot be written as a quoted literal (nor held in a
+  # shell variable): the store reads it from the file the sender kept it in.
+  if [ -n "$body_file" ]; then
+    bl="CAST(readfile('$(agmsg_sql_readfile_path "$body_file")') AS TEXT)"
+  fi
   printf '%s\n' "
     BEGIN IMMEDIATE;
     INSERT INTO messages (team,from_agent,to_agent,body,created_at)
-    VALUES ('$tl','$fl','$ol','$bl','$al');
+    VALUES ('$tl','$fl','$ol',$bl,'$al');
     INSERT INTO events (type,id,team,from_agent,to_agent,body,at,legacy_id)
-    VALUES ('message_sent','$il','$tl','$fl','$ol','$bl','$al',last_insert_rowid());
+    VALUES ('message_sent','$il','$tl','$fl','$ol',$bl,'$al',last_insert_rowid());
     COMMIT;
   "
 }
 
 storage_send() {
-  local team="$1" from="$2" to="$3" body="$4"
+  local team="$1" from="$2" to="$3" body="$4" body_file="${5:-}"
   local id at db; id="$(compat_uuid7)"; at="$(_sqlite_now)"; db="$(_sqlite_db "$team")"
-  local insert; insert="$(_sqlite_message_sent_sql "$team" "$from" "$to" "$body" "$id" "$at")"
+  local insert; insert="$(_sqlite_message_sent_sql "$team" "$from" "$to" "$body" "$id" "$at" "$body_file")"
   # Try the INSERT first and only fall back to storage_init on failure (the #114
   # pattern). Running storage_init — which issues PRAGMA journal_mode=WAL and the
   # CREATE TABLE/INDEX statements — on EVERY send serializes badly under a

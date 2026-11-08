@@ -212,6 +212,13 @@ storage_sync_reprocess() {
 storage_send() {
   _JSONL_TEAM="$1"
   local team="$1" from="$2" to="$3" body="$4"
+  # A body with a NUL byte arrives as a file (5th argument). This driver keeps
+  # bodies as JSON strings built in the shell and cannot hold one; refuse it
+  # rather than store a different body.
+  if [ -n "${5:-}" ]; then
+    echo "agmsg: this storage driver (jsonl) cannot hold a message body that contains a NUL byte; nothing was sent" >&2
+    return 1
+  fi
   local id at line; id="$(compat_uuid7)"; at="$(_jsonl_now)"
   _jsonl_init_file
   line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \

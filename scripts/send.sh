@@ -31,16 +31,50 @@ if [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
   set -- "${@:1:$#-1}"
 fi
 
+# Read a body from stdin as bytes. A shell variable cannot hold a NUL, so a body
+# that has one is kept in a file (BODY_NUL_FILE) and the store reads it from
+# there; BODY then holds a copy with each NUL shown as U+2400 for the shell-side
+# consumers. A body without a NUL is read exactly as before ($(cat): trailing
+# newlines dropped), with no process started.
+BODY_NUL_FILE=""
+_agmsg_read_body() {
+  local _seg _rc _i _n _segs=()
+  while :; do
+    _rc=0
+    IFS= read -r -d '' _seg || _rc=$?
+    _segs[${#_segs[@]}]="$_seg"
+    [ "$_rc" -eq 0 ] || break
+  done
+  _n=${#_segs[@]}
+  if [ "$_n" -eq 1 ]; then
+    BODY="${_segs[0]}"
+    BODY="${BODY%"${BODY##*[!$'\n']}"}"
+    return 0
+  fi
+  BODY_NUL_FILE="$(mktemp "${TMPDIR:-/tmp}/agmsg-body.XXXXXX")" || die "cannot create a temporary file for a body with a NUL byte"
+  BODY=""
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    printf '%s' "${_segs[$_i]}" >> "$BODY_NUL_FILE"
+    BODY="$BODY${_segs[$_i]}"
+    _i=$((_i + 1))
+    if [ "$_i" -lt "$_n" ]; then
+      printf '\0' >> "$BODY_NUL_FILE"
+      BODY="$BODY"$'\xe2\x90\x80'
+    fi
+  done
+}
+
 case "${1:-}" in
   --body-file)
     [ "$#" -eq 2 ] || die "--body-file takes exactly one path"
     [ -r "${2:-}" ] || die "cannot read body file: ${2:-<missing>}"
-    BODY="$(cat -- "$2")"
+    _agmsg_read_body < "$2"
     ;;
   --body)
     { [ "$#" -eq 2 ] && [ "${2:-}" = "-" ]; } \
       || die "--body accepts only '-' (read stdin); for a file use --body-file <path>"
-    BODY="$(cat)"
+    _agmsg_read_body
     ;;
   '')
     die "Missing message body"
@@ -53,7 +87,7 @@ case "${1:-}" in
     BODY="$1"
     ;;
 esac
-[ -n "$BODY" ] || die "the message body is empty — nothing to send"
+[ -n "$BODY" ] || [ -n "$BODY_NUL_FILE" ] || die "the message body is empty — nothing to send"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
@@ -139,7 +173,9 @@ fi
 # storage_send re-inits its schema idempotently before writing, which subsumes the
 # #114 concurrent first-write race the old path retried around (a process seeing
 # the DB file before the table exists just creates it).
-MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
+MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY" ${BODY_NUL_FILE:+"$BODY_NUL_FILE"})" || _agmsg_send_rc=$?
+[ -z "$BODY_NUL_FILE" ] || rm -f "$BODY_NUL_FILE"
+[ -z "${_agmsg_send_rc:-}" ] || exit "$_agmsg_send_rc"
 
 echo "Sent to $TO in team $TEAM"
 

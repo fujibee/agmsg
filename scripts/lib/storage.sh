@@ -88,6 +88,13 @@ elif [ -n "${SKILL_DIR:-}" ]; then
   source "$SKILL_DIR/scripts/lib/sqlite-crlf.sh"
 fi
 
+# A message body as a row-builder SELECT over json_each(...) shows it. A body may
+# hold a NUL byte (it is stored byte for byte), and sqlite3 prints a text value
+# only up to its first NUL -- which cut the whole row there (the time, the id)
+# and, in the inbox, dropped the message without ever marking it read. Each NUL
+# is shown as U+2400 instead; a body without one comes through unchanged.
+_AGMSG_SQL_BODY_DISPLAY="CAST((WITH RECURSIVE s(rest,acc) AS (SELECT CAST(json_extract(value,'\$.body') AS BLOB), X'' UNION ALL SELECT substr(rest, instr(rest,X'00')+1), acc || substr(rest,1,instr(rest,X'00')-1) || X'E29080' FROM s WHERE instr(rest,X'00')>0) SELECT acc || rest FROM s ORDER BY length(acc) DESC LIMIT 1) AS TEXT)"
+
 # Echo the directory that holds (or will hold) the message store.
 #
 # Memoized for the life of the process (_AGMSG_STORAGE_DIR_CACHE): every
