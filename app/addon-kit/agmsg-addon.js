@@ -121,6 +121,7 @@ export function connect(options = {}) {
     if (!data || data.agmsg !== PROTOCOL || data.type !== "port" || !event.ports || !event.ports[0]) return;
     port = event.ports[0];
     reportPort = port;
+    flushEarlyReports();
     port.onmessage = onPortMessage;
     port.start();
     window.removeEventListener("message", onWindowMessage);
@@ -209,13 +210,21 @@ let overlay = null;
 // The pane's port, once the app handed it over: errors are also sent to the app, which writes them to its log.
 let reportPort = null;
 const reported = new Set();
+const early = []; // errors from before the port arrived (the app hands it over after the page loaded): sent once it does
 const MAX_REPORTS = 20;
-function reportToApp(text, stack) {
-  if (!reportPort || reported.size >= MAX_REPORTS || reported.has(text)) return;
-  reported.add(text);
+function sendReport(r) {
   try {
-    reportPort.postMessage({ agmsg: PROTOCOL, type: "error", message: text.slice(0, 500), ...(stack ? { stack: String(stack).slice(0, 2000) } : {}) });
+    reportPort.postMessage({ agmsg: PROTOCOL, type: "error", message: r.text.slice(0, 500), ...(r.stack ? { stack: String(r.stack).slice(0, 2000) } : {}) });
   } catch {}
+}
+function reportToApp(text, stack) {
+  if (reported.size >= MAX_REPORTS || reported.has(text)) return;
+  reported.add(text);
+  if (reportPort) sendReport({ text, stack });
+  else early.push({ text, stack });
+}
+function flushEarlyReports() {
+  while (early.length) sendReport(early.shift());
 }
 
 /**

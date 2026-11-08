@@ -515,6 +515,7 @@ pub fn addon_pane_error(host: State<'_, Arc<AddonHost>>, id: PaneId, generation:
     let addon = {
         let reg = host.panes.registry.lock().unwrap();
         if reg.authorize(id, generation, Need::Current).is_err() {
+            COUNTS.lock().unwrap().retain(|((p, _), _)| *p != id); // the pane is gone or reloaded: its count goes with it
             return;
         }
         match reg.addon_of(id) {

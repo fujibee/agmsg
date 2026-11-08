@@ -15,6 +15,25 @@ function appWithPort() {
   return sent;
 }
 
+describe("kit error reports before the port", () => {
+  it("an error from a guarded callback or the window before the port arrives is sent once when it does", () => {
+    let onWindow = null;
+    const handlers = {};
+    const parent = {};
+    globalThis.window = { parent, addEventListener: (type, fn) => { handlers[type] = fn; if (type === "message") onWindow = fn; }, removeEventListener() {} };
+    globalThis.document = { body: null };
+    connect({ sample: false, errorOverlay: true });
+    guard(() => { throw new Error("early-guard"); })();
+    guard(() => { throw new Error("early-guard"); })();
+    handlers.error({ error: null, message: "Script error.", filename: "https://x/y.js", lineno: 3, colno: 4 });
+    const sent = [];
+    const port = { postMessage: (m) => sent.push(m), start() {}, onmessage: null };
+    onWindow({ source: parent, data: { agmsg: 1, type: "port" }, ports: [port] });
+    expect(sent.map((m) => m.message)).toEqual(["early-guard", "Script error. (https://x/y.js:3:4)"]);
+    expect(sent[0].stack).toContain("early-guard");
+  });
+});
+
 describe("kit error reports", () => {
   it("a guarded callback that throws is reported with its message and stack, and does not throw", () => {
     const sent = appWithPort();
