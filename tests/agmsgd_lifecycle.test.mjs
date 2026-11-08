@@ -30,6 +30,7 @@ function sha256(text) {
 function makeInstall() {
   const root = mkdtempSync(join(tmpdir(), "agmsgd-lifecycle-test-"));
   mkdirSync(join(root, "run"), { recursive: true });
+  mkdirSync(join(root, ".install-op"), { recursive: true });
   mkdirSync(join(root, "scripts", "lib"), { recursive: true });
   writeFileSync(join(root, "scripts", "team.sh"), "team\n");
   writeFileSync(join(root, "scripts", "lib", "storage.sh"), "storage\n");
@@ -66,7 +67,7 @@ test("readCompletionState: missing / complete / crashed / updating", () => {
     assert.equal(readCompletionState(root).state, "crashed", "no lock held -> update died mid-way");
 
     // Now hold the install-op lock -- must read as "updating", not "crashed".
-    const lockPath = join(root, "run", "install-op.lock.db");
+    const lockPath = join(root, ".install-op", "lock.db");
     const holder = new DatabaseSync(lockPath);
     holder.exec("BEGIN EXCLUSIVE;");
     try {

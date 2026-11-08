@@ -17,7 +17,7 @@
 // PR 2, 2026-09-29) and cross-checks it against agmsgd-launch.sh's own
 // `^BOOTSTRAP_VERSION=` line before writing either into the completion
 // record's bootstrap_version field.
-const BOOTSTRAP_VERSION = 2;
+const BOOTSTRAP_VERSION = 3;
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -208,7 +208,7 @@ async function main() {
   }
   const expectedOpGen = Number(opGenStr);
 
-  const lockPath = join(installRoot, "run", "install-op.lock.db");
+  const lockPath = join(installRoot, ".install-op", "lock.db");
   const incompleteOperationPath = join(installRoot, "run", "install-op-incomplete.json");
   const manifestPath = join(installRoot, "run", "install-manifest.json");
   const dbPath = join(installRoot, "run", "install.db");

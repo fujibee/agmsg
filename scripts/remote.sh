@@ -23,6 +23,7 @@ set -euo pipefail
 #   remote.sh status [<team>] [--json]
 #   remote.sh sync start <team>
 #   remote.sh sync restart <team>
+#   remote.sh sync stop <team>
 #   remote.sh reprocess <team>
 #   remote.sh disconnect <team>
 #   remote.sh forget [--yes] <team>
@@ -3482,12 +3483,40 @@ cmd_sync_restart() {
   cmd_sync_start "$team"
 }
 
+# Stops a running engine and leaves it stopped (an update that has to move files
+# the engine uses stops it, then `sync restart`s it). Nothing here is automatic:
+# it runs only when asked. A team with no engine running is already stopped.
+cmd_sync_stop() {
+  local team="${1:?Usage: remote.sh sync stop <team>}" systemd_state systemd_pid \
+    engine_state engine_pid
+  [ $# -eq 1 ] || { echo "Usage: remote.sh sync stop <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team'; stop the user unit instead of sync stop" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
+  if [ "$engine_state" = "running" ] && ! _remote_sync_engine_stop "$team"; then
+    echo "agmsg: sync engine pid $engine_pid for '$team' did not stop" >&2
+    agmsg_lock_release
+    return 1
+  fi
+  agmsg_lock_release
+  echo "Sync engine for '$team' is stopped."
+}
+
 cmd_sync() {
   local action="${1:-}"
   case "$action" in
     start) shift; cmd_sync_start "$@" ;;
     restart) shift; cmd_sync_restart "$@" ;;
-    *) echo "Usage: remote.sh sync start|restart <team>" >&2; exit 1 ;;
+    stop) shift; cmd_sync_stop "$@" ;;
+    *) echo "Usage: remote.sh sync start|restart|stop <team>" >&2; exit 1 ;;
   esac
 }
 

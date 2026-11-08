@@ -59,6 +59,11 @@ else
   # shellcheck disable=SC1090
   . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
 fi
+# The state-root helpers (an older recovery helper does not carry them).
+if ! declare -F agmsg_state_detach_foreign >/dev/null 2>&1 && [ -r "$SCRIPT_DIR/scripts/lib/state-root.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/state-root.sh"
+fi
 
 AUTO_YES=false
 KEEP_DATA=false
@@ -136,82 +141,45 @@ _uninstall_checked_rm() {
 }
 
 # Removes this install's own writable_roots from the selected Codex config,
-# matching the native path spelling used by installation on Windows.
+# matching the native path spelling used by installation on Windows. Each
+# argument after the config is a directory: an element that is that directory
+# or lies under it goes (never a sibling install whose path only starts the
+# same way).
 #
-# review: the old entry-match pattern ("$SKILL_DIR followed by any
-# characters up to the closing quote") had no boundary at all, so it also
-# matched a sibling install whose own path this one's is a literal prefix of
-# (e.g. SKILL_DIR "agmsg" matching a "agmsg-second" entry too). An entry is
-# removed only when it IS exactly SKILL_DIR, or starts with SKILL_DIR
-# followed by "/" -- and SKILL_DIR is regex-escaped first (it can contain
-# ".", which is otherwise "any character" in the pattern awk builds).
-#
-# review, round 2: a loose pre-check here (even a boundary-correct one) is
-# still a claim about what the file contains, and "do we write, back up,
-# and report changed" deserves better than trusting that claim. Transform
-# into a candidate file first and compare it against the original; back up
-# and replace only when they actually differ. A config that only mentions a
-# SIBLING install's own root now never gets touched, backed up, or reported
-# "cleaned" at all -- not because the entry check happened to be narrow
-# enough, but because nothing about it would actually change.
+# The file is read by the same whole-file scanner install --update uses
+# (agmsg_codex_roots_scan in scripts/lib/codex-config.sh), so only the real
+# writable_roots array is looked at: the same text inside a multi-line value
+# elsewhere (an example in developer_instructions, say) stays byte for byte.
+# Only this install's elements are taken out: an array that is left empty, and
+# the table around it, stay as they are (an empty list is harmless to Codex),
+# so nothing of anyone else's is ever judged or removed.
+# It is transformed into a candidate file first, and the config is backed up
+# and replaced only when that changes it: a config that only mentions a
+# SIBLING install's root is never touched, backed up, or reported "cleaned".
 _uninstall_clean_codex_config() {
-  local CODEX_CONFIG="$1" SKILL_DIR="$2"
+  local CODEX_CONFIG="$1" scan=0 prefixes="" _dir
+  shift
   [ -f "$CODEX_CONFIG" ] || return 0
-  # Remove matching entries from writable_roots (handles multiline arrays)
-  local match_dir
-  match_dir="$(agmsg_codex_native_path "$SKILL_DIR")"
-  awk -v pattern="$match_dir" '
-    function ere_escape(s,    i, c, out, special) {
-      special = "\\.[]()*+?{}|^$"
-      out = ""
-      for (i = 1; i <= length(s); i++) {
-        c = substr(s, i, 1)
-        if (index(special, c) > 0) out = out "\\" c
-        else out = out c
-      }
-      return out
-    }
-    BEGIN { esc = ere_escape(pattern) }
-    /writable_roots/ { in_roots=1; buf="" }
-    in_roots { buf = buf $0 "\n" }
-    in_roots && /\]/ {
-      gsub("\"" esc "(/[^\"]*)?\"[, ]*", "", buf)
-      # Clean up trailing/leading commas
-      gsub(/,[ \t]*\]/, "]", buf)
-      gsub(/\[[ \t]*,/, "[", buf)
-      gsub(/,[ \t]*,/, ",", buf)
-      # Check if empty
-      if (buf ~ /writable_roots[^[]*\[\s*\]/) {
-        in_roots=0; next
-      }
-      printf "%s", buf
-      in_roots=0; next
-    }
-    !in_roots { print }
-  ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp"
-  # Remove empty [sandbox_workspace_write] section
-  awk '
-    /^\[sandbox_workspace_write\]/ {
-      header=$0
-      if (getline nextline <= 0) next
-      if (nextline ~ /^\[/ || nextline == "") { print nextline; next }
-      print header
-      print nextline
-      next
-    }
-    { print }
-  ' "$CODEX_CONFIG.tmp" > "$CODEX_CONFIG.tmp2" && mv "$CODEX_CONFIG.tmp2" "$CODEX_CONFIG.tmp"
-  if cmp -s "$CODEX_CONFIG" "$CODEX_CONFIG.tmp"; then
+  for _dir in "$@"; do
+    prefixes="${prefixes}$(agmsg_codex_native_path "$_dir")"$'\n'
+  done
+  AGMSG_STALE_PREFIXES="$prefixes" \
+    agmsg_codex_roots_scan "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" || scan=$?
+  if [ "$scan" -eq 10 ]; then
     rm -f "$CODEX_CONFIG.tmp"
-  else
-    _uninstall_operation_require || return 1
-    cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-    _uninstall_operation_require || return 1
-    mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
-    _uninstall_operation_require || return 1
-    echo "  - cleaned Codex writable_roots in $CODEX_CONFIG (backup: $(basename "$CODEX_CONFIG").bak)"
-    REMOVED=true
+    return 0
   fi
+  if [ "$scan" -lt 11 ] || [ "$scan" -gt 13 ]; then
+    rm -f "$CODEX_CONFIG.tmp"
+    return 1
+  fi
+  _uninstall_operation_require || return 1
+  cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+  _uninstall_operation_require || return 1
+  mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+  _uninstall_operation_require || return 1
+  echo "  - cleaned Codex writable_roots in $CODEX_CONFIG (backup: $(basename "$CODEX_CONFIG").bak)"
+  REMOVED=true
 }
 
 # Removes ONE install's own commands, hooks, skill files, and Codex
@@ -220,6 +188,8 @@ _uninstall_clean_codex_config() {
 # below). Sets the global REMOVED=true on any change.
 _uninstall_one() {
   local SKILL_DIR="$1"
+  # A copy of an install points at the ORIGINAL's state: detach it before any lock or record.
+  agmsg_state_detach_foreign "$SKILL_DIR" || return 1
   local SKILL_NAME; SKILL_NAME="$(basename "$SKILL_DIR")"
 
   # Operation lock (agmsgd beta): held for the whole of this function,
@@ -231,11 +201,15 @@ _uninstall_one() {
   # stale-lock recovery step, so an uninstall
   # that crashes mid-way is the same "held until the holder dies" state a
   # crashed install.sh already leaves.
-  if ! agmsg_install_op_lock "$SKILL_DIR/run/install-op.lock.db"; then
+  if ! agmsg_install_op_lock "$SKILL_DIR/.install-op/lock.db"; then
     echo "  ! could not take the install operation lock for $SKILL_DIR: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
     return 1
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
+  if ! agmsg_install_op_legacy_lock_hold "$SKILL_DIR"; then
+    echo "  ! another agmsg install or update is running (it holds the old-layout lock $SKILL_DIR/run/install-op.lock.db); nothing was changed. Run this again after it finishes." >&2
+    return 1
+  fi
   _uninstall_operation_require || return 1
 
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
@@ -494,27 +468,53 @@ _uninstall_one() {
     break
   done
 
+  # --- State kept outside the skills directory ---
+  # install.sh links run/ db/ teams/ ext-tools/ .trash/ to <state base>/<name>/
+  # (scripts/lib/state-root.sh). The links go with the skill directory below;
+  # the data they point at is removed here, by the same rules: with --keep-data
+  # only the backup copies in .trash go, otherwise everything but the install
+  # operation lock database.
+  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target full_remove=false
+  for _state_part in db teams ext-tools .trash run; do
+    if [ -L "$SKILL_DIR/$_state_part" ]; then
+      _state_target="$(readlink "$SKILL_DIR/$_state_part")"
+      case "$_state_target" in
+        /*/"$_state_part") STATE_PARENT="${_state_target%/*}" ;;
+      esac
+    fi
+  done
+  unset _state_part _state_target
+  # The Codex entries carry the resolved spelling of that path (/private/var
+  # for /var on macOS); read before the directory goes.
+  if [ -n "$STATE_PARENT" ]; then
+    STATE_PARENT_REAL="$(cd -P "$STATE_PARENT" 2>/dev/null && pwd -P)" || STATE_PARENT_REAL=""
+  fi
+
   # --- Remove the skill directory ---
   if [ "$KEEP_DATA" = true ]; then
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
     _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
+    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/.trash" ]; then
+      _uninstall_checked_rm -rf "$STATE_PARENT/.trash" || return 1
+    fi
     _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" "$SKILL_DIR/CHANGELOG.md" || return 1
     echo "  - removed scripts, templates, SKILL.md, CHANGELOG.md"
-    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
+    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/${STATE_PARENT:+ (kept in $STATE_PARENT)}"
     REMOVED=true
   else
     echo ""
     if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
-      # run/install-op.lock.db is NEVER deleted, even here (agmsgd beta):
+      # .install-op/lock.db (in the install directory, which a state move never
+      # touches) is NEVER deleted, even here (agmsgd beta):
       # removing a DB a waiter still has open makes a
       # freshly recreated file of the same name a DIFFERENT lock than the
       # one the waiter holds a reference to -- see install-op-lock.sh's own
-      # header). Remove every top-level entry EXCEPT run/ by name, then
+      # header). Remove every top-level entry EXCEPT run/ and the lock by name, then
       # inside run/ remove everything except install-op.lock.db by name --
       # never a single recursive rm -rf "$SKILL_DIR" that cannot make this
       # one exception. rmdir (not rm -rf) on SKILL_DIR itself: it correctly
-      # fails and is left in place, since run/install-op.lock.db means it
+      # fails and is left in place, since .install-op/lock.db means it
       # is never truly empty after this.
       local _entry _run_entry
       for _entry in "$SKILL_DIR"/* "$SKILL_DIR"/.[!.]*; do
@@ -522,7 +522,7 @@ _uninstall_one() {
         # Keep the installed recovery entrypoint available until the
         # incomplete-operation record is cleared below.
         case "$(basename "$_entry")" in
-        uninstall.sh|.install-op-uninstaller-retired.*) continue ;;
+        uninstall.sh|.install-op-uninstaller-retired.*|.install-op) continue ;;
         esac
         if [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
@@ -537,10 +537,20 @@ _uninstall_one() {
         fi
       done
       unset _entry _run_entry
+      if [ -n "$STATE_PARENT" ]; then
+        local _state_dir
+        for _state_dir in db teams ext-tools .trash; do
+          [ -d "$STATE_PARENT/$_state_dir" ] || continue
+          _uninstall_checked_rm -rf "$STATE_PARENT/$_state_dir" || return 1
+        done
+        unset _state_dir
+        echo "  - removed the state kept in $STATE_PARENT"
+      fi
       _uninstall_operation_require || return 1
       rmdir "$SKILL_DIR" 2>/dev/null || true
-      echo "  - removed $SKILL_DIR (kept run/install-op.lock.db and the active operation record)"
+      echo "  - removed $SKILL_DIR (kept .install-op/lock.db and the active operation record)"
       REMOVED=true
+      full_remove=true
     fi
   fi
 
@@ -548,7 +558,14 @@ _uninstall_one() {
   # Clean only the active profile, using the same selection as installation.
   local _codex_cfg
   while IFS= read -r _codex_cfg; do
-    _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR" || return 1
+    local _clean_dirs=("$SKILL_DIR")
+    if [ -n "$STATE_PARENT" ]; then
+      _clean_dirs+=("$STATE_PARENT")
+      if [ -n "$STATE_PARENT_REAL" ] && [ "$STATE_PARENT_REAL" != "$STATE_PARENT" ]; then
+        _clean_dirs+=("$STATE_PARENT_REAL")
+      fi
+    fi
+    _uninstall_clean_codex_config "$_codex_cfg" "${_clean_dirs[@]}" || return 1
   done < <(agmsg_codex_config_paths)
 
   # --- Remove OpenCode, Hermes, and Grok Build skill files ---
@@ -616,6 +633,33 @@ _uninstall_one() {
       echo "  ! uninstall completed but could not remove its temporary recovery helper: $recovery_retired" >&2
       return 1
     }
+  fi
+  if [ "$full_remove" = true ] && [ ! -e "$SKILL_DIR/SKILL.md" ] && [ ! -e "$SKILL_DIR/scripts" ]; then
+    # Still holding the install lock and with the record cleared: take away what
+    # is left of this install, and only that -- its own link to the state, the
+    # state root's owner file and whatever else the state's run/ holds, and the
+    # directories that are then empty (rmdir, which leaves any directory that
+    # still holds something). Nothing else can be installing here while the lock
+    # is held, so no later install's link or file is taken (and nothing is
+    # touched if one has already written its skill files). The lock databases
+    # stay, as they always have: a waiter that holds one open would otherwise be
+    # left with a different lock from the next installer's.
+    local _left
+    if [ -L "$SKILL_DIR/run" ]; then
+      rm -f "$SKILL_DIR/run"
+    fi
+    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
+      for _left in "$STATE_PARENT/run"/* "$STATE_PARENT/run"/.[!.]*; do
+        [ -e "$_left" ] || continue
+        case "${_left##*/}" in install-op.lock.db*) continue ;; esac
+        rm -f "$_left"
+      done
+    fi
+    if [ -n "$STATE_PARENT" ] && [ -f "$STATE_PARENT/.owner" ]; then
+      rm -f "$STATE_PARENT/.owner"
+    fi
+    rmdir "$SKILL_DIR" 2>/dev/null || true
+    unset _left
   fi
   agmsg_install_op_unlock
   AGMSG_INSTALL_OP_ACTIVE=false

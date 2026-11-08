@@ -120,6 +120,8 @@ export function connect(options = {}) {
     const data = event.data;
     if (!data || data.agmsg !== PROTOCOL || data.type !== "port" || !event.ports || !event.ports[0]) return;
     port = event.ports[0];
+    reportPort = port;
+    flushEarlyReports();
     port.onmessage = onPortMessage;
     port.start();
     window.removeEventListener("message", onWindowMessage);
@@ -205,13 +207,51 @@ function safe(fn) {
 // ---- error overlay: an add-on never fails as a blank pane ----
 
 let overlay = null;
+// The pane's port, once the app handed it over: errors are also sent to the app, which writes them to its log.
+let reportPort = null;
+const reported = new Set();
+const early = []; // errors from before the port arrived (the app hands it over after the page loaded): sent once it does
+const MAX_REPORTS = 20;
+function sendReport(r) {
+  try {
+    reportPort.postMessage({ agmsg: PROTOCOL, type: "error", message: r.text.slice(0, 500), ...(r.stack ? { stack: String(r.stack).slice(0, 2000) } : {}) });
+  } catch {}
+}
+function reportToApp(text, stack) {
+  if (reported.size >= MAX_REPORTS || reported.has(text)) return;
+  reported.add(text);
+  if (reportPort) sendReport({ text, stack });
+  else early.push({ text, stack });
+}
+function flushEarlyReports() {
+  while (early.length) sendReport(early.shift());
+}
+
+/**
+ * Wraps a function so an error in it (a thrown one, or a rejected promise it returns) goes to the pane's error
+ * overlay and the app's log with its own message and stack, instead of the browser's opaque "Script error." that
+ * a sandboxed page gets for an error nothing caught. Use it for callbacks the browser calls: observers, frame
+ * and timer callbacks, event handlers. The return value passes through; after an error it is undefined.
+ */
+export function guard(fn) {
+  return function guarded(...args) {
+    try {
+      const r = fn.apply(this, args);
+      return r && typeof r.catch === "function" ? r.catch(showError) : r;
+    } catch (e) {
+      showError(e);
+    }
+  };
+}
+
 function installErrorOverlay() {
-  window.addEventListener("error", (e) => showError(e.error || e.message));
+  window.addEventListener("error", (e) => showError(e.error || (e.filename ? `${e.message} (${e.filename}:${e.lineno}:${e.colno})` : e.message)));
   window.addEventListener("unhandledrejection", (e) => showError(e.reason));
 }
 function showError(err) {
   const text = err && err.code ? `${err.code}: ${err.message}` : String((err && err.message) || err);
   console.error("[agmsg-addon]", err);
+  reportToApp(text, err && err.stack);
   if (!document.body) return;
   if (!overlay) {
     overlay = document.createElement("div");

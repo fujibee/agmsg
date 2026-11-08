@@ -10,6 +10,8 @@ import {
   mergeById,
   routeMessage,
   hasNoTerminalByDesign,
+  missedNoticeIsLogged,
+  rosterNeedsReload,
   knownTypes,
   loadRoster,
   agentCliArgs,
@@ -642,6 +644,34 @@ describe("members with no terminal by design", () => {
     await b;
     expect(knownTypes(adopted as never, "B", "same")).toEqual(["claude"]);
     expect(knownTypes(adopted as never, "A", "same")).toBeUndefined();
+  });
+
+  it("a member an add-on joined after the team was opened is known once the list is read again", async () => {
+    const latest = createLatestOnly();
+    let adopted: { team: string; list: ReturnType<typeof mem>[] } | null = null;
+    const adopt = (r: { team: string; list: ReturnType<typeof mem>[] }) => (adopted = r);
+    let calls = 0;
+    let served = [mem("you", "agmsg-app"), mem("real", "claude")];
+    const fetchMembers = async () => (calls++, served);
+    await loadRoster(latest, fetchMembers as never, "t", adopt as never);
+    // before: chess joined after the list was read, so it is logged as a miss
+    expect(missedNoticeIsLogged(adopted, "t", "chess")).toBe(true);
+    served = [...served, mem("chess", "app-addon"), mem("white", "claude")];
+    expect(rosterNeedsReload("t", "t")).toBe(true);
+    await loadRoster(latest, fetchMembers as never, "t", adopt as never);
+    expect(calls).toBe(2);
+    expect(missedNoticeIsLogged(adopted, "t", "chess")).toBe(false);
+    // a member that really has no pane is still logged, and so is a name nobody knows
+    expect(missedNoticeIsLogged(adopted, "t", "white")).toBe(true);
+    expect(missedNoticeIsLogged(adopted, "t", "ghost")).toBe(true);
+    expect(missedNoticeIsLogged(adopted, "t", "you")).toBe(false);
+  });
+
+  it("only the team on screen is read again after a join", () => {
+    expect(rosterNeedsReload("t", "t")).toBe(true);
+    expect(rosterNeedsReload("other", "t")).toBe(false);
+    expect(rosterNeedsReload("t", "")).toBe(false);
+    expect(rosterNeedsReload("", "")).toBe(false);
   });
 
   it("a response for a team already switched away from is dropped", async () => {

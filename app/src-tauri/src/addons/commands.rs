@@ -491,6 +491,68 @@ pub fn addon_notice_typed<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<Add
     }
 }
 
+/// At most this many error reports are logged per pane generation, and each is cut to these lengths.
+const MAX_PANE_ERRORS: u32 = 20;
+const MAX_PANE_ERROR_MESSAGE: usize = 500;
+const MAX_PANE_ERROR_STACK: usize = 2000;
+
+/// One log line for an error an add-on's page reported. Control characters become spaces so the add-on cannot
+/// write more than the one line it is given, and the text is cut to a fixed size.
+fn pane_error_line(addon: &str, message: &str, stack: Option<&str>) -> String {
+    let clean = |s: &str, max: usize| -> String { s.chars().take(max).map(|c| if c.is_control() { ' ' } else { c }).collect() };
+    match stack.filter(|s| !s.is_empty()) {
+        Some(st) => format!("[addons] {addon} pane error: {} | {}", clean(message, MAX_PANE_ERROR_MESSAGE), clean(st, MAX_PANE_ERROR_STACK)),
+        None => format!("[addons] {addon} pane error: {}", clean(message, MAX_PANE_ERROR_MESSAGE)),
+    }
+}
+
+/// An add-on's page hit an error it caught (the kit's overlay shows it in the pane); write it to the app's log so it
+/// can be read without opening the web inspector. Only the pane's current generation counts, and a page can log
+/// `MAX_PANE_ERRORS` lines per load, so a loop in the page cannot fill the log. No process is started.
+#[tauri::command]
+pub fn addon_pane_error(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, message: String, stack: Option<String>) {
+    static COUNTS: std::sync::Mutex<Vec<((PaneId, u64), u32)>> = std::sync::Mutex::new(Vec::new());
+    let (addon, current) = {
+        let reg = host.panes.registry.lock().unwrap();
+        (reg.addon_of(id), reg.generation(id))
+    };
+    if !admit_pane_error(&mut COUNTS.lock().unwrap(), id, generation, current) {
+        return;
+    }
+    if let Some(addon) = addon {
+        eprintln!("{}", pane_error_line(&addon, &message, stack.as_deref()));
+    }
+}
+
+/// Whether one more error report from `(id, generation)` is logged. `current` is the pane's current generation, or
+/// None when the pane is gone. A report from an older generation is refused and changes nothing but its own entry:
+/// a late report from an old port must not give the new load its budget back. Entries of older generations of the
+/// pane are dropped once a newer one reports; all of a pane's entries go when the pane is gone.
+fn admit_pane_error(counts: &mut Vec<((PaneId, u64), u32)>, id: PaneId, generation: u64, current: Option<u64>) -> bool {
+    match current {
+        None => {
+            counts.retain(|((p, _), _)| *p != id);
+            return false;
+        }
+        Some(g) if g != generation || generation == 0 => {
+            counts.retain(|(k, _)| *k != (id, generation));
+            return false;
+        }
+        Some(_) => {}
+    }
+    counts.retain(|((p, g), _)| *p != id || *g == generation);
+    match counts.iter_mut().find(|(k, _)| *k == (id, generation)) {
+        Some((_, n)) => {
+            if *n >= MAX_PANE_ERRORS {
+                return false;
+            }
+            *n += 1;
+        }
+        None => counts.push(((id, generation), 1)),
+    }
+    true
+}
+
 /// The watcher's `Message` has exactly the feed fields; keep only those.
 fn strip_to_feed(payload: &str) -> String {
     payload.to_string()
@@ -517,6 +579,40 @@ mod tests {
 
     fn args(path: Option<&str>, url: Option<&str>, base: Option<&str>) -> OpenArgs {
         OpenArgs { path: path.map(Into::into), url: url.map(Into::into), base: base.map(Into::into) }
+    }
+
+    #[test]
+    fn pane_error_budget_is_per_generation_and_a_stale_report_cannot_refill_it() {
+        let mut counts = Vec::new();
+        // pane 7 reloaded to generation 2 and used its whole budget
+        for _ in 0..MAX_PANE_ERRORS {
+            assert!(admit_pane_error(&mut counts, 7, 2, Some(2)));
+        }
+        assert!(!admit_pane_error(&mut counts, 7, 2, Some(2)));
+        // a late report from the old port (generation 1) is refused and must not clear generation 2's count
+        assert!(!admit_pane_error(&mut counts, 7, 1, Some(2)));
+        assert!(!admit_pane_error(&mut counts, 7, 2, Some(2)));
+        // another pane has its own budget
+        assert!(admit_pane_error(&mut counts, 8, 1, Some(1)));
+        // a reload starts a new budget and drops the old entry
+        assert!(admit_pane_error(&mut counts, 7, 3, Some(3)));
+        assert!(!counts.iter().any(|((p, g), _)| *p == 7 && *g == 2));
+        // generation 0 never counts; a pane that is gone loses all its entries
+        assert!(!admit_pane_error(&mut counts, 7, 0, Some(3)));
+        assert!(!admit_pane_error(&mut counts, 7, 3, None));
+        assert!(!counts.iter().any(|((p, _), _)| *p == 7));
+        assert!(counts.iter().any(|((p, _), _)| *p == 8));
+    }
+
+    #[test]
+    fn pane_error_line_is_one_cut_line() {
+        let l = pane_error_line("a/b", "boom\nfake line\u{1b}[31m", Some("at f (x.js:1:2)\nat g"));
+        assert_eq!(l, "[addons] a/b pane error: boom fake line [31m | at f (x.js:1:2) at g");
+        assert!(!l.contains('\n'));
+        let long = "x".repeat(5000);
+        let l = pane_error_line("a/b", &long, Some(&long));
+        assert_eq!(l.chars().count(), "[addons] a/b pane error: ".len() + 500 + 3 + 2000);
+        assert_eq!(pane_error_line("a/b", "m", Some("")), "[addons] a/b pane error: m");
     }
 
     #[test]

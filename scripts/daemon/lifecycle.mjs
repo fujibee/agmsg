@@ -1,7 +1,7 @@
 // Completion-record verification and update detection.
 //
 // The manifest itself (run/install-manifest.json, its .prev, and the
-// install-op lock at run/install-op.lock.db) is PR 2's own format -- this
+// install-op lock at .install-op/lock.db in the install directory) is PR 2's own format -- this
 // file only reads it. Confirmed shape (2026-09-29):
 //   { install_id, gen, version, created_at, digest_algo: "sha256",
 //     files: [{ path, digest }, ...] }
@@ -13,14 +13,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const MANIFEST_NAME = "install-manifest.json";
-const LOCK_NAME = "install-op.lock.db";
+const LOCK_NAME = ".install-op/lock.db";
 
-// True if some other process currently holds run/install-op.lock.db's
+// True if some other process currently holds .install-op/lock.db's
 // BEGIN EXCLUSIVE (PR 2). Non-blocking: `busy_timeout = 0` makes a
 // contended BEGIN EXCLUSIVE fail immediately instead of waiting, so this
 // never stalls waiting for the lock it is only trying to observe.
 function isInstallLockHeld(installRoot) {
-  const lockPath = join(installRoot, "run", LOCK_NAME);
+  const lockPath = join(installRoot, LOCK_NAME);
   if (!existsSync(lockPath)) return false;
   const db = new DatabaseSync(lockPath);
   try {

@@ -40,6 +40,20 @@ export interface NoticeEvent {
 }
 
 /**
+ * Sent BY the add-on over the port when its page hit an error: the app writes one line to its log
+ * (`[addons] <addon> pane error: <message> | <stack>`). The SDK sends it by itself for every error it shows in the
+ * overlay (at most 20 per load, each message once, message cut to 500 characters and stack to 2000). Wrap
+ * callbacks the browser calls (observers, timers, frames, events) in the SDK's `guard(fn)` so their errors carry a
+ * real message and stack; a sandboxed page otherwise sees only "Script error.". Never answered.
+ */
+export interface ErrorReport {
+  agmsg: 1;
+  type: "error";
+  message: string;
+  stack?: string;
+}
+
+/**
  * The app's language, pushed over the pane's port to every add-on (no permission needed): once right after the
  * port is handed over, and again each time the user changes the app's language. Only the tag; nothing else
  * about the user or the machine. `locale` is one of the app's languages: en, ja, zh-CN, zh-TW, ko, es, fr, de,

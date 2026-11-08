@@ -394,13 +394,26 @@ print('MATCH' if d['reason'] == 'a' + chr($code) + 'b' else repr(d['reason']))
     # list/print are one-record-per-line and a raw byte in 1-31/127 would
     # either break that framing (newline/tab) or just not display.
     printf '%s' "$output" > "$BATS_TEST_TMPDIR/cc-list-$code.raw"
+    # This test accumulates one record per control code across iterations
+    # (key "cc" + the code number), so down_notice_list returns every row
+    # seen so far -- check THIS code's own row, by key, not just whichever
+    # row comes first.
     run python3 -I -c "
+import sys
 with open('$BATS_TEST_TMPDIR/cc-list-$code.raw', 'rb') as f:
     raw = f.read()
+want = b'cc$code'
+rows = [r for r in raw.split(b'\n') if r]
+matches = [r for r in rows if r.split(b'\t', 1)[0] == want]
+if len(matches) != 1:
+    print('ROWCOUNT', len(matches)); sys.exit()
+row = matches[0]
+fields = row.split(b'\t')
+if len(fields) != 5:
+    print('FIELDCOUNT', len(fields)); sys.exit()
 # The format's own field (tab) and record (newline) separators are not what
 # this checks for -- only a raw control byte WITHIN a field's content, which
 # a decoded escape sequence must never produce.
-fields = raw.split(b'\n')[0].split(b'\t')
 bad = [b for f in fields for b in f if b in range(1, 32) or b == 127]
 print('CLEAN' if not bad else repr(bad))
 "

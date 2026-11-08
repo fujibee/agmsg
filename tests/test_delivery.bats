@@ -3126,7 +3126,7 @@ EOF
   # GREEN: the same config, now carrying every root this install needs.
   cat > "$code_config" <<EOF
 [sandbox_workspace_write]
-writable_roots = ["$TEST_SKILL_DIR/db", "$TEST_SKILL_DIR/teams", "$TEST_SKILL_DIR/run", "$TEST_SKILL_DIR/ext-tools"]
+writable_roots = ["$TEST_SKILL_DIR/db", "$TEST_SKILL_DIR/teams", "$TEST_SKILL_DIR/run", "$TEST_SKILL_DIR/ext-tools", "$TEST_SKILL_DIR/.install-op"]
 EOF
   run env CODEX_THREAD_ID="thread-notice-green" \
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
@@ -3151,7 +3151,7 @@ EOF
   # bogus string for config.json on this (non-Windows) test box, sqlite's
   # readfile() returns NULL, identities.sh finds no pairs, and session-start.sh
   # exits before ever reaching the notice -- a false green having nothing to
-  # do with the fix. Converting ONLY this install's four writable_paths, and
+  # do with the fix. Converting ONLY this install's writable_paths, and
   # passing every other path through unchanged, keeps every other cygpath
   # caller in the sourced scripts working against a real, readable path, the
   # way a real Windows cygpath would (it converts a config.json path into a
@@ -3167,7 +3167,7 @@ EOF
 # pass by accident even without the real fix.
 shift
 case "\$1" in
-  "$TEST_SKILL_DIR/db"|"$TEST_SKILL_DIR/teams"|"$TEST_SKILL_DIR/run"|"$TEST_SKILL_DIR/ext-tools")
+  "$TEST_SKILL_DIR/db"|"$TEST_SKILL_DIR/teams"|"$TEST_SKILL_DIR/run"|"$TEST_SKILL_DIR/ext-tools"|"$TEST_SKILL_DIR/.install-op")
     printf 'C:%s\n' "\${1#/*/}"
     ;;
   *)
@@ -3179,7 +3179,7 @@ EOF
 
   cat > "$code_config" <<EOF
 [sandbox_workspace_write]
-writable_roots = ["$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/db")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/teams")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/run")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/ext-tools")"]
+writable_roots = ["$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/db")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/teams")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/run")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/ext-tools")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/.install-op")"]
 EOF
   run env CODEX_THREAD_ID="thread-notice-windows" PATH="$stubdir:$PATH" \
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
