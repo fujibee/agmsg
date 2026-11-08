@@ -166,16 +166,28 @@ const GROK_PERMISSION_DIALOG_SENTINEL: &str = "\u{1}GROK_PERMISSION_DIALOG\u{1}"
 const GROK_QUESTION_DIALOG_SENTINEL: &str = "\u{1}GROK_QUESTION_DIALOG\u{1}";
 const GROK_WORKING_SENTINEL: &str = "\u{1}GROK_WORKING\u{1}";
 
+/// A line with control characters (BEL, BS, NUL, DEL, ...) removed and the ends trimmed.
+fn printable(line: &str) -> String {
+    line.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string()
+}
+
+/// How many of the bottom lines are searched for the notice, and how many are logged (each cut to `LOGGED_WIDTH`).
+const SEARCHED_LINES: usize = 6;
+const LOGGED_LINES: usize = 5;
+const LOGGED_WIDTH: usize = 120;
+
 /// What the pane showed a moment after an app-typed notice was submitted, as one log line: whether it went Working,
-/// whether the start of the notice is still among the bottom lines (the composer, not the transcript above it), and
-/// those lines. Diagnostic only; nothing acts on it.
+/// whether the start of the notice is among the bottom `SEARCHED_LINES` whole lines (the composer, not the
+/// transcript above it), and the last `LOGGED_LINES` of them, cut and without control characters. `lines` are the
+/// pane's last non-empty lines, uncut. Diagnostic only; nothing acts on it.
 pub fn after_enter_line(agent_type: &str, tail: &str, lines: &[String], injected: &str) -> String {
     let working = classify(agent_type, tail) == PaneState::Working;
-    let marker: String = injected.chars().take(16).collect();
-    let bottom = &lines[lines.len().saturating_sub(6)..];
-    let in_composer = !marker.trim().is_empty() && bottom.iter().any(|l| l.contains(marker.trim()));
+    let marker = printable(&injected.chars().take(16).collect::<String>());
+    let bottom = &lines[lines.len().saturating_sub(SEARCHED_LINES)..];
+    let in_composer = !marker.is_empty() && bottom.iter().any(|l| l.contains(&marker));
+    let shown: Vec<String> = bottom[bottom.len().saturating_sub(LOGGED_LINES)..].iter().map(|l| printable(l).chars().take(LOGGED_WIDTH).collect()).collect();
     let yn = |b: bool| if b { "yes" } else { "no" };
-    format!("working={} text_in_composer={} last lines: {}", yn(working), yn(in_composer), lines.join(" | "))
+    format!("working={} text_in_composer={} last lines: {}", yn(working), yn(in_composer), shown.join(" | "))
 }
 
 pub fn classify(agent_type: &str, tail: &str) -> PaneState {
@@ -330,12 +342,12 @@ impl TailBuffer {
         }
     }
 
-    /// The last `n` non-empty screen lines (escapes stripped, split like `detection_tail`), each cut to `width`
-    /// characters. For a log line about what a pane showed; it does not take part in detection.
-    pub fn last_lines(&self, n: usize, width: usize) -> Vec<String> {
+    /// The last `n` non-empty screen lines (escapes stripped, split like `detection_tail`, control characters
+    /// removed), whole. For a log line about what a pane showed; it does not take part in detection.
+    pub fn last_lines(&self, n: usize) -> Vec<String> {
         let raw: Vec<u8> = self.bytes.iter().copied().collect();
         let (text, _) = strip_ansi(&String::from_utf8_lossy(&raw));
-        let mut lines: Vec<String> = text.split(['\r', '\n']).filter(|l| !l.trim().is_empty()).map(|l| l.trim().chars().take(width).collect()).collect();
+        let mut lines: Vec<String> = text.split(['\r', '\n']).map(printable).filter(|l| !l.is_empty()).collect();
         lines.drain(..lines.len().saturating_sub(n));
         lines
     }
@@ -838,7 +850,7 @@ Would you like to proceed?\n\
     fn after_enter(agent_type: &str, screen: &str) -> String {
         let mut tail = TailBuffer::default();
         tail.push(screen.as_bytes());
-        after_enter_line(agent_type, &tail.detection_tail(), &tail.last_lines(5, 120), NOTICE)
+        after_enter_line(agent_type, &tail.detection_tail(), &tail.last_lines(6), NOTICE)
     }
 
     #[test]
@@ -861,12 +873,36 @@ Would you like to proceed?\n\
     }
 
     #[test]
+    fn the_notice_on_the_sixth_line_from_the_bottom_or_past_column_120_is_still_found() {
+        let marker_line = format!("> {NOTICE}");
+        let mut lines: Vec<String> = vec![marker_line.clone()];
+        lines.extend((1..6).map(|i| format!("l{i}")));
+        let line = after_enter_line("codex", "", &lines, NOTICE);
+        assert!(line.starts_with("working=no text_in_composer=yes"), "sixth line from the bottom: {line}");
+        assert!(!line.contains("[agmsg]"), "only the last five lines are logged: {line}");
+        let wide = format!("{}{NOTICE}", "w".repeat(130));
+        let line = after_enter_line("codex", "", &[wide], NOTICE);
+        assert!(line.starts_with("working=no text_in_composer=yes"), "past column 120: {line}");
+        assert!(line.len() < 200, "the logged text is cut: {line}");
+    }
+
+    #[test]
+    fn control_characters_are_not_logged() {
+        let mut tail = TailBuffer::default();
+        tail.push(b"a\x07b\x08c\x00d\x7fe\n[agmsg] x\x07y\n");
+        let lines = tail.last_lines(5);
+        assert_eq!(lines, vec!["abcde", "[agmsg] xy"]);
+        let line = after_enter_line("codex", "", &["z\x07\x1b".to_string()], "[agmsg] q");
+        assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
+    }
+
+    #[test]
     fn last_lines_are_cut_and_skip_blank_lines() {
         let mut tail = TailBuffer::default();
         tail.push(b"one\n\n  two  \r\x1b[31mthree-is-long\x1b[0m\n");
-        assert_eq!(tail.last_lines(2, 5), vec!["two", "three"]);
-        assert_eq!(tail.last_lines(9, 5), vec!["one", "two", "three"]);
-        assert!(TailBuffer::default().last_lines(3, 5).is_empty());
+        assert_eq!(tail.last_lines(2), vec!["two", "three-is-long"]);
+        assert_eq!(tail.last_lines(9), vec!["one", "two", "three-is-long"]);
+        assert!(TailBuffer::default().last_lines(3).is_empty());
     }
 
     #[test]

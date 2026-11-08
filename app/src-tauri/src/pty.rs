@@ -402,15 +402,42 @@ const AFTER_ENTER_LOOK: Duration = Duration::from_millis(1500);
 fn log_after_enter(sessions: Arc<Mutex<HashMap<String, PtySession>>>, id: String, text: String) {
     thread::spawn(move || {
         thread::sleep(AFTER_ENTER_LOOK);
-        let seen = sessions.lock().unwrap().get(&id).map(|s| {
-            let tail = s.tail.lock().unwrap();
-            let agent_type = s.detection.lock().unwrap().agent_type().to_string();
-            (agent_type, tail.detection_tail(), tail.last_lines(5, 120))
-        });
-        if let Some((agent_type, tail, lines)) = seen {
-            eprintln!("[agmsg-app] after Enter into {id}: {}", crate::agent_state::after_enter_line(&agent_type, &tail, &lines, &text));
+        // Best effort: a lock somebody holds is tried a few times and then given up on, so this thread ends within
+        // a fixed time and never waits behind the registry or a pane's buffer.
+        let mut seen = None;
+        for attempt in 0..LOOK_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(LOOK_RETRY_GAP);
+            }
+            if let Some(handles) = try_get(&sessions, &id, |s| (Arc::clone(&s.tail), Arc::clone(&s.detection))) {
+                seen = handles.and_then(|(tail, detection)| try_snapshot(&tail, &detection));
+                break;
+            }
+        }
+        match seen {
+            Some((agent_type, tail, lines)) => {
+                eprintln!("[agmsg-app] after Enter into {id}: {}", crate::agent_state::after_enter_line(&agent_type, &tail, &lines, &text));
+            }
+            None => eprintln!("[agmsg-app] after Enter into {id}: the pane was busy or gone, not looked at"),
         }
     });
+}
+
+const LOOK_ATTEMPTS: u32 = 4;
+const LOOK_RETRY_GAP: Duration = Duration::from_millis(50);
+
+/// `f` on the entry for `id`, without waiting: `None` when the map's lock is held (the caller tries again later),
+/// `Some(None)` when there is no such entry. The map's lock is let go before this returns.
+fn try_get<V, R>(map: &Mutex<HashMap<String, V>>, id: &str, f: impl FnOnce(&V) -> R) -> Option<Option<R>> {
+    let guard = map.try_lock().ok()?;
+    Some(guard.get(id).map(f))
+}
+
+/// What the log line needs from one pane, taken without waiting for either lock.
+fn try_snapshot(tail: &Mutex<TailBuffer>, detection: &Mutex<DetectionTracker>) -> Option<(String, String, Vec<String>)> {
+    let tail = tail.try_lock().ok()?;
+    let agent_type = detection.try_lock().ok()?.agent_type().to_string();
+    Some((agent_type, tail.detection_tail(), tail.last_lines(6)))
 }
 
 /// Inject `text` (then Enter) into the agent's stdin — the universal,
@@ -459,6 +486,44 @@ mod tests {
     }
 
     use super::windows_shell_argv;
+
+    #[test]
+    fn the_look_after_an_enter_never_waits_for_a_lock_somebody_holds() {
+        use super::{try_get, try_snapshot};
+        use crate::agent_state::{DetectionTracker, TailBuffer};
+        use std::sync::{Arc, Mutex};
+        let map: Mutex<std::collections::HashMap<String, u8>> = Mutex::new([("p".to_string(), 7u8)].into_iter().collect());
+        assert_eq!(try_get(&map, "p", |v| *v), Some(Some(7)));
+        assert_eq!(try_get(&map, "gone", |v| *v), Some(None), "no such pane is an answer, not a wait");
+        let held = map.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(try_get(&map, "p", |v| *v), None, "a held registry is reported at once");
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        drop(held);
+
+        let tail = Arc::new(Mutex::new(TailBuffer::default()));
+        let detection = Arc::new(Mutex::new(DetectionTracker::new("codex".into())));
+        assert!(try_snapshot(&tail, &detection).is_some());
+        let held_tail = tail.lock().unwrap();
+        assert!(try_snapshot(&tail, &detection).is_none(), "a held buffer is not waited for");
+        drop(held_tail);
+        let held_detection = detection.lock().unwrap();
+        assert!(try_snapshot(&tail, &detection).is_none(), "a held tracker is not waited for");
+        drop(held_detection);
+        assert!(try_snapshot(&tail, &detection).is_some());
+    }
+
+    #[test]
+    fn the_registry_is_not_held_while_the_pane_buffers_are_read() {
+        use super::try_get;
+        use std::sync::{Arc, Mutex};
+        let map: Mutex<std::collections::HashMap<String, Arc<Mutex<u8>>>> = Mutex::new([("p".to_string(), Arc::new(Mutex::new(1u8)))].into_iter().collect());
+        let handle = try_get(&map, "p", Arc::clone).unwrap().unwrap();
+        // the registry can be taken (a pane opened or closed) while the inner lock is still in use
+        let inner = handle.lock().unwrap();
+        assert!(map.try_lock().is_ok(), "the registry lock was let go");
+        drop(inner);
+    }
 
     #[test]
     fn two_injections_into_one_pane_never_interleave_even_when_the_first_is_slow() {
