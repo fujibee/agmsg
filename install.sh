@@ -837,23 +837,38 @@ move_into_place() {
   agmsg_install_op_require
 }
 
-# Removes from ONE Codex config.toml's writable_roots the entries this install
-# wrote for db/, teams/, run/ and ext-tools/ under the skills directory when
-# those are now links into a state root (Codex rejects a writable root that
-# contains a symlink). Only those exact quoted paths go, and only from inside
-# the writable_roots array: every other entry, including ones the user wrote
-# and other installs', stays.
-_drop_stale_codex_roots() {
+# Brings ONE Codex config.toml's writable_roots in line with this install, in a
+# single pass over the file: it drops the entries an earlier release wrote for
+# db/, teams/, run/ and ext-tools/ under the skills directory when those are
+# now links into a state root (Codex rejects a writable root that contains a
+# symlink), and adds this install's own paths (the arguments) that the array
+# does not hold yet.
+#
+# The file is read by the TOML string rules over its whole length (basic,
+# literal and multi-line strings, comments, table headers), so only the real
+# writable_roots array is looked at or edited: the same text inside a
+# multi-line value elsewhere stays byte for byte. An element is compared by its
+# decoded value, in whichever string spelling it is written. Every other
+# element, the user's own and other installs', stays. When the array is missing
+# the key is added under [sandbox_workspace_write], and that table when it is
+# missing too.
+#
+# The awk exit status says what it did: 10 nothing, 11 removed, 12 added,
+# 13 both. Only a changed file is backed up (once) and replaced.
+_sync_codex_roots() {
   local code_config="$1" stale=() _s scan=0
+  shift
+  local writable_paths=("$@")
+  if [ ! -f "$code_config" ]; then
+    return 0
+  fi
   while IFS= read -r _s; do
     [ -n "$_s" ] && stale+=("$_s")
   done < <(agmsg_codex_stale_writable_paths "$SKILL_DIR")
-  [ ${#stale[@]} -gt 0 ] || return 0
 
   agmsg_install_op_require || return 1
-  # Scans the writable_roots array character by character so that a quoted
-  # string, a comment or any other key outside that array is never touched.
-  AGMSG_STALE_ROOTS="$(printf '%s\n' "${stale[@]}")" awk '
+  AGMSG_STALE_ROOTS="$(printf '%s\n' ${stale[@]+"${stale[@]}"})" \
+  AGMSG_WANT_ROOTS="$(printf '%s\n' ${writable_paths[@]+"${writable_paths[@]}"})" awk '
     # position just after the closing delimiter of a multi-line string, or 0
     function msend(line, from, d,   k, ch) {
       for (k = from; k <= length(line); k++) {
@@ -886,149 +901,115 @@ _drop_stale_codex_roots() {
     BEGIN {
       n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n")
       for (i = 1; i <= n; i++) if (st[i] != "") stale[st[i]] = 1
+      m = split(ENVIRON["AGMSG_WANT_ROOTS"], wa, "\n")
+      for (i = 1; i <= m; i++) if (wa[i] != "") want[++nw] = wa[i]
     }
     {
       gone = 0
       ed = 0
       start = 1
-      # every line is scanned so that a multi-line string anywhere in the file
-      # is known before a line is taken for the writable_roots key; only the
-      # array itself is edited
+      # a table header outside any string or array
+      if (!inr && ms == "" && $0 ~ /^[ \t]*\[\[?[^],=\[]+\]\]?[ \t\r]*(#.*)?$/) {
+        intable = ($0 ~ /^[ \t]*\[[ \t]*sandbox_workspace_write[ \t]*\][ \t\r]*(#.*)?$/)
+        if (intable && !basehdr) basehdr = nl + 1
+      }
       if (inr) ed = 1
-      else if (ms == "" && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) { inr = 1; ed = 1; start = RLENGTH + 1 }
-      if (start > 0) {
-        len = length($0); out = substr($0, 1, start - 1); c = start
-        while (c <= len) {
-          if (ms != "") {
-            p = msend($0, c, ms)
-            if (p == 0) { out = out substr($0, c); break }
-            out = out substr($0, c, p - c); c = p; ms = ""
+      else if (ms == "" && match($0, /^[ \t]*writable_roots[ \t]*=[ \t]*\[/)) {
+        inr = 1; ed = 1; start = RLENGTH + 1
+        narr++; arrbase[narr] = intable; arrline[narr] = nl + 1; arrpos[narr] = start - 1
+      }
+      len = length($0); out = substr($0, 1, start - 1); c = start
+      while (c <= len) {
+        if (ms != "") {
+          p = msend($0, c, ms)
+          if (p == 0) { out = out substr($0, c); break }
+          out = out substr($0, c, p - c); c = p; ms = ""
+          continue
+        }
+        ch = substr($0, c, 1)
+        if (ch == "\"" || ch == "\x27") {
+          if (substr($0, c, 3) == ch ch ch) {
+            # a multi-line string; when it closes on this line it is one element too
+            p = msend($0, c + 3, ch ch ch)
+            if (p == 0) { ms = ch ch ch; out = out substr($0, c); break }
+            tok = substr($0, c, p - c)
+            body = substr(tok, 4, length(tok) - 6)
+            val = (ch == "\"") ? dec(body) : body
+            e = p - 1
+          } else {
+            # one whole string element; an escaped quote does not end a double-quoted one
+            e = c + 1
+            while (e <= len) {
+              ec = substr($0, e, 1)
+              if (ch == "\"" && ec == "\\") e++
+              else if (ec == ch) break
+              e++
+            }
+            tok = substr($0, c, e - c + 1)
+            body = substr(tok, 2, length(tok) - 2)
+            val = (ch == "\"") ? dec(body) : body
+          }
+          if (ed && (val in stale)) {
+            c = e + 1
+            if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
+            else if (substr($0, c) ~ /^[ \t]*\]/) sub(/[ \t]*,[ \t]*$/, "", out)   # the last one: no dangling comma
+            gone = 1; removed = 1
             continue
           }
-          ch = substr($0, c, 1)
-          if (ch == "\"" || ch == "\x27") {
-            if (substr($0, c, 3) == ch ch ch) {
-              # a multi-line string; when it closes on this line it is one element too
-              p = msend($0, c + 3, ch ch ch)
-              if (p == 0) { ms = ch ch ch; out = out substr($0, c); break }
-              tok = substr($0, c, p - c)
-              body = substr(tok, 4, length(tok) - 6)
-              val = (ch == "\"") ? dec(body) : body
-              e = p - 1
-            } else {
-              # one whole string element; an escaped quote does not end a double-quoted one
-              e = c + 1
-              while (e <= len) {
-                ec = substr($0, e, 1)
-                if (ch == "\"" && ec == "\\") e++
-                else if (ec == ch) break
-                e++
-              }
-              tok = substr($0, c, e - c + 1)
-              body = substr(tok, 2, length(tok) - 2)
-              val = (ch == "\"") ? dec(body) : body
-            }
-            if (ed && (val in stale)) {
-              c = e + 1
-              if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
-              gone = 1
-              continue
-            }
-            out = out tok; c = e + 1
-          } else if (ch == "#") {
-            out = out substr($0, c); break
-          } else if (ch == "]" && ed) {
-            out = out substr($0, c); inr = 0; break
-          } else { out = out ch; c++ }
-        }
-        $0 = out
+          if (ed) present[narr SUBSEP val] = 1
+          out = out tok; c = e + 1
+        } else if (ch == "#") {
+          out = out substr($0, c); break
+        } else if (ch == "]" && ed) {
+          out = out substr($0, c); inr = 0; break
+        } else { out = out ch; c++ }
       }
-      if (gone) changed = 1
-      if (!(gone && $0 ~ /^[ \t]*$/)) print
+      if (!(gone && out ~ /^[ \t]*$/)) L[++nl] = out
     }
-    END { exit (changed ? 0 : 3) }
+    END {
+      # the array to add to: the one under [sandbox_workspace_write], else the first
+      t = 0
+      for (i = 1; i <= narr; i++) if (arrbase[i]) { t = i; break }
+      if (!t && narr > 0) t = 1
+      for (i = 1; i <= nw; i++) if (!t || !((t SUBSEP want[i]) in present)) miss[++nm] = want[i]
+      if (nm > 0) {
+        added = 1
+        if (t > 0) {
+          ins = ""
+          for (j = 1; j <= nm; j++) ins = ins "\"" miss[j] "\", "
+          L[arrline[t]] = substr(L[arrline[t]], 1, arrpos[t]) ins substr(L[arrline[t]], arrpos[t] + 1)
+        } else {
+          ent = ""
+          for (j = 1; j <= nm; j++) ent = ent (j > 1 ? ", " : "") "\"" miss[j] "\""
+          if (basehdr) L[basehdr] = L[basehdr] "\nwritable_roots = [" ent "]"
+          else { L[++nl] = ""; L[++nl] = "[sandbox_workspace_write]"; L[++nl] = "writable_roots = [" ent "]" }
+        }
+      }
+      for (i = 1; i <= nl; i++) print L[i]
+      exit 10 + (removed ? 1 : 0) + (added ? 2 : 0)
+    }
   ' "$code_config" > "$code_config.tmp" || scan=$?
-  # exit 3: nothing obsolete in the file, in whatever spelling; leave it alone.
-  if [ "$scan" -eq 3 ]; then
+  if [ "$scan" -eq 10 ]; then
     command rm -f "$code_config.tmp"
-    return 0
-  fi
-  [ "$scan" -eq 0 ] || return 1
-  agmsg_install_op_require || return 1
-  # One pre-edit snapshot for the whole update: the addition below must not
-  # copy the already-cleaned file over it.
-  cp "$code_config" "$code_config.bak"
-  AGMSG_CODEX_BAK_DONE="$code_config"
-  move_into_place "$code_config.tmp" "$code_config"
-  agmsg_install_op_require || return 1
-  echo "  ~ replaced Codex writable_roots entries that are now links ($code_config)"
-}
-
-# Adds this install's writable_paths (below) to ONE Codex config.toml.
-# Apply the active profile's sandbox configuration.
-_configure_codex_sandbox_file() {
-  local code_config="$1"
-  shift
-  local writable_paths=("$@")
-  if [ ! -f "$code_config" ]; then
-    return 0
-  fi
-
-  _drop_stale_codex_roots "$code_config" || return 1
-
-  local missing=()
-  local p
-  for p in "${writable_paths[@]}"; do
-    if ! grep -q "$p" "$code_config" 2>/dev/null; then
-      missing+=("$p")
-    fi
-  done
-
-  if [ ${#missing[@]} -eq 0 ]; then
     echo "  ~ Codex writable_roots already configured ($code_config)"
     return 0
   fi
-
-  agmsg_install_op_require || return 1
-  if [ "${AGMSG_CODEX_BAK_DONE:-}" != "$code_config" ]; then
-    cp "$code_config" "$code_config.bak"
+  if [ "$scan" -lt 11 ] || [ "$scan" -gt 13 ]; then
+    command rm -f "$code_config.tmp"
+    return 1
   fi
+  agmsg_install_op_require || return 1
+  cp "$code_config" "$code_config.bak"
   agmsg_install_op_require || return 1
   echo "  ~ backed up $code_config → $code_config.bak"
-
-  local entries inserts
-  entries=$(printf ', "%s"' "${missing[@]}")
-  entries="${entries:2}"  # remove leading ", " — for the "create a new array" branches
-  inserts=$(printf '"%s", ' "${missing[@]}")  # trailing ", " — prepended inside an existing array
-
-  if grep -q 'writable_roots' "$code_config" 2>/dev/null; then
-    # Insert into the existing array right after its opening '['. This is
-    # uniformly valid TOML for empty ([]), single-line and multiline arrays —
-    # trailing commas are legal — and avoids the leading/double-comma corruption
-    # that munging the closing ']' produced for an empty array (`[, "x"]`).
-    agmsg_install_op_require || return 1
-    awk -v ins="$inserts" '
-      !done && /writable_roots[[:space:]]*=[[:space:]]*\[/ {
-        sub(/\[/, "[" ins)
-        done=1
-      }
-      { print }
-    ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
-  elif grep -q '^\[sandbox_workspace_write\]' "$code_config" 2>/dev/null; then
-    # Section exists but no writable_roots
-    agmsg_install_op_require || return 1
-    awk -v entries="$entries" '
-      { print }
-      /^\[sandbox_workspace_write\]/ { print "writable_roots = [" entries "]" }
-    ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
-  else
-    # No section at all
-    agmsg_install_op_require || return 1
-    printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
-    agmsg_install_op_require || return 1
-  fi
+  move_into_place "$code_config.tmp" "$code_config"
   agmsg_install_op_require || return 1
-  echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/ ($code_config)"
+  if [ $(( scan & 1 )) -eq 1 ]; then
+    echo "  ~ replaced Codex writable_roots entries that are now links ($code_config)"
+  fi
+  if [ $(( scan & 2 )) -eq 2 ]; then
+    echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/ ($code_config)"
+  fi
 }
 
 configure_codex_sandbox() {
@@ -1068,7 +1049,7 @@ configure_codex_sandbox() {
 
   local cfg
   for cfg in "${codex_configs[@]}"; do
-    _configure_codex_sandbox_file "$cfg" "${writable_paths[@]}"
+    _sync_codex_roots "$cfg" "${writable_paths[@]}"
   done
   agmsg_install_op_require
 }

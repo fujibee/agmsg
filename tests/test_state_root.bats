@@ -290,12 +290,69 @@ EOF
 drop_stale_alone() {   # <config.toml> <stale path>
   run env STALE_PATH="$2" bash -c '
     SKILL_DIR=/fixture/skill
-    eval "$(sed -n "/^_drop_stale_codex_roots()/,/^}/p" "$1/install.sh")"
+    eval "$(sed -n "/^_sync_codex_roots()/,/^}/p" "$1/install.sh")"
     agmsg_install_op_require() { return 0; }
     move_into_place() { mv "$1" "$2"; }
     agmsg_codex_stale_writable_paths() { echo "$STALE_PATH"; }
-    _drop_stale_codex_roots "$2"
+    _sync_codex_roots "$2"
   ' _ "$REPO_ROOT" "$1"
+}
+
+@test "--update on a config with a writable_roots example inside a multi-line string: the note stays byte for byte, the real array gets the real roots" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  local cfg="$FAKE_HOME/.codex/config.toml" real
+  cat > "$cfg" <<EOF
+developer_instructions = """
+Keep this note exactly: writable_roots = ["$SK/db"] was configured by hand.
+"""
+
+[sandbox_workspace_write]
+writable_roots = ["$SK/db", "$SK/teams", "$SK/run", "$SK/ext-tools", "/unrelated/keep-me", '$SK/db']
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  real="$(cd -P "$ST" && pwd -P)"
+  grep -qxF "Keep this note exactly: writable_roots = [\"$SK/db\"] was configured by hand." "$cfg"
+  grep -qxF 'developer_instructions = """' "$cfg"
+  local line
+  line="$(grep '^writable_roots = ' "$cfg")"
+  [ "$(grep -c '^writable_roots = ' "$cfg")" -eq 1 ]
+  refute grep -qE ',[[:space:]]*\]$' <<<"$line"
+  grep -qF '"/unrelated/keep-me"' <<<"$line"
+  local p
+  for p in db teams run ext-tools; do
+    grep -qF "\"$real/$p\"" <<<"$line"
+    refute grep -qF "$SK/$p" <<<"$line"
+  done
+  grep -qF "\"$SK/.install-op\"" <<<"$line"
+  # the second update has nothing to change
+  cp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+  run inst --update
+  [ "$status" -eq 0 ]
+  cmp "$cfg" "$BATS_TEST_TMPDIR/before.toml"
+}
+
+@test "--update adds the roots under [sandbox_workspace_write] when the table has no writable_roots, and creates the table when it is missing" {
+  inst
+  mkdir -p "$FAKE_HOME/.codex"
+  local cfg="$FAKE_HOME/.codex/config.toml" real
+  real="$(cd -P "$ST" && pwd -P)"
+  printf 'note = """\nwritable_roots = ["x"]\n"""\n[sandbox_workspace_write] # kept\nnetwork_access = true\n' > "$cfg"
+  run inst --update
+  [ "$status" -eq 0 ]
+  grep -qxF 'writable_roots = ["x"]' "$cfg"
+  grep -qxF '[sandbox_workspace_write] # kept' "$cfg"
+  grep -qxF 'network_access = true' "$cfg"
+  [ "$(grep -c '^writable_roots = .*install-op' "$cfg")" -eq 1 ]
+  grep -qF "\"$real/run\"" "$cfg"
+  printf 'model = "m"\n' > "$cfg"
+  run inst --update
+  [ "$status" -eq 0 ]
+  grep -qxF '[sandbox_workspace_write]' "$cfg"
+  grep -qF "\"$real/db\"" "$cfg"
+  grep -qxF 'model = "m"' "$cfg"
 }
 
 @test "the removal reads only the real array: writable_roots text inside a multi-line string elsewhere is kept byte for byte" {
@@ -371,6 +428,9 @@ EOF
   run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
   [ "$status" -eq 0 ]
   [ ! -e "$ST/db" ] && [ ! -e "$ST/teams" ]
+  # nothing of this install is left: no link (dangling or not), no lock, no directory
+  [ ! -e "$SK" ] && [ ! -L "$SK/run" ] && [ ! -e "$SK/.install-op" ]
+  [ ! -e "$ST" ]
   # the entries carry the resolved spelling (/private/var for /var on macOS)
   ! grep -q '/\.agmsg/agmsg' "$FAKE_HOME/.codex/config.toml"
 }

@@ -511,7 +511,7 @@ _uninstall_one() {
   # the data they point at is removed here, by the same rules: with --keep-data
   # only the backup copies in .trash go, otherwise everything but the install
   # operation lock database.
-  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target
+  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target full_remove=false
   for _state_part in db teams ext-tools .trash run; do
     if [ -L "$SKILL_DIR/$_state_part" ]; then
       _state_target="$(readlink "$SKILL_DIR/$_state_part")"
@@ -587,6 +587,7 @@ _uninstall_one() {
       rmdir "$SKILL_DIR" 2>/dev/null || true
       echo "  - removed $SKILL_DIR (kept .install-op/lock.db and the active operation record)"
       REMOVED=true
+      full_remove=true
     fi
   fi
 
@@ -672,6 +673,34 @@ _uninstall_one() {
   agmsg_install_op_unlock
   AGMSG_INSTALL_OP_ACTIVE=false
   unset AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER
+  # Only while nothing has been installed here since: an install that started
+  # after the lock was let go has written its own skill files and links.
+  if [ "$full_remove" = true ] && [ ! -e "$SKILL_DIR/SKILL.md" ] && [ ! -e "$SKILL_DIR/scripts" ]; then
+    # The lock is let go and the record cleared: take away what is left of this
+    # install, and only that -- its own link to the state, the lock database
+    # and its sidecars, and the directories that are then empty (rmdir, which
+    # leaves any directory that still holds something).
+    local _left
+    if [ -L "$SKILL_DIR/run" ]; then
+      rm -f "$SKILL_DIR/run"
+    fi
+    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
+      for _left in "$STATE_PARENT/run"/install-op.lock.db*; do
+        [ -e "$_left" ] && rm -f "$_left"
+      done
+      rmdir "$STATE_PARENT/run" 2>/dev/null || true
+    fi
+    for _left in "$SKILL_DIR/.install-op"/lock.db*; do
+      [ -e "$_left" ] && rm -f "$_left"
+    done
+    rmdir "$SKILL_DIR/.install-op" 2>/dev/null || true
+    rmdir "$SKILL_DIR" 2>/dev/null || true
+    if [ -n "$STATE_PARENT" ]; then
+      [ -f "$STATE_PARENT/.owner" ] && rm -f "$STATE_PARENT/.owner"
+      rmdir "$STATE_PARENT" 2>/dev/null || true
+    fi
+    unset _left
+  fi
 }
 
 # Machine-wide pieces, shared by every install: only safe to remove once NO
