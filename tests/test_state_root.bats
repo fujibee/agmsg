@@ -222,25 +222,46 @@ EOF
   refute grep -qE 'writable_roots = \[[^]]*"'"$SK"'/db"' "$cfg"
 }
 
-@test "--update removes only whole stale elements: an escaped quote or a literal string holding the same text stays" {
+@test "--update removes a stale element in any string spelling, and only whole elements: an escaped-quote path stays" {
+  inst
+  demote
+  mkdir -p "$FAKE_HOME/.codex"
+  local esc="\\u002F${SK#/}"
+  cat > "$FAKE_HOME/.codex/config.toml" <<EOF
+[sandbox_workspace_write]
+writable_roots = ["$FAKE_HOME/mine/\\"$SK/db", "$SK/db", '$SK/teams', "$esc/run", """$SK/ext-tools""", "$FAKE_HOME/mine"]
+EOF
+  run inst --update
+  [ "$status" -eq 0 ]
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  # the same path in a literal string, an escaped spelling or a one-line
+  # multi-line string is the same root: gone too, and what is left is byte for byte
+  grep -qF "\"$FAKE_HOME/mine/\\\"$SK/db\", \"$FAKE_HOME/mine\"]" "$cfg"
+  refute grep -qF "$SK/teams" "$cfg"
+  refute grep -qF "$SK/ext-tools" "$cfg"
+  refute grep -qF "u002F" "$cfg"
+}
+
+@test "--update follows the TOML string rules across lines: a multi-line string is one value, not array elements" {
   inst
   demote
   mkdir -p "$FAKE_HOME/.codex"
   cat > "$FAKE_HOME/.codex/config.toml" <<EOF
 [sandbox_workspace_write]
-writable_roots = ["$FAKE_HOME/mine/\\"$SK/db", "$SK/db", '$SK/db', "$FAKE_HOME/mine"]
+writable_roots = [
+  """$FAKE_HOME/mine/
+"$SK/db"
+end""", "$SK/db", "$FAKE_HOME/mine2" # "$SK/teams"
+]
+note = "$SK/db"
 EOF
   run inst --update
   [ "$status" -eq 0 ]
-  run python3 -I -c '
-import sys, tomllib
-roots = tomllib.load(open(sys.argv[1], "rb"))["sandbox_workspace_write"]["writable_roots"]
-home, sk = sys.argv[2], sys.argv[3]
-assert home + "/mine/\"" + sk + "/db" in roots, roots
-assert home + "/mine" in roots, roots
-assert roots.count(sk + "/db") == 1, roots   # the literal string only
-' "$FAKE_HOME/.codex/config.toml" "$FAKE_HOME" "$SK"
-  [ "$status" -eq 0 ]
+  local cfg="$FAKE_HOME/.codex/config.toml"
+  # the line inside the multi-line string is untouched; the real element after it went
+  grep -qxF "\"$SK/db\"" "$cfg"
+  grep -qxF "end\"\"\", \"$FAKE_HOME/mine2\" # \"$SK/teams\"" "$cfg"
+  grep -qxF "note = \"$SK/db\"" "$cfg"
 }
 
 @test "uninstall removes the state root too, and its Codex entries" {

@@ -865,9 +865,38 @@ _drop_stale_codex_roots() {
   # Scans the writable_roots array character by character so that a quoted
   # string, a comment or any other key outside that array is never touched.
   AGMSG_STALE_ROOTS="$(printf '%s\n' "${stale[@]}")" awk '
+    # position just after the closing delimiter of a multi-line string, or 0
+    function msend(line, from, d,   k, ch) {
+      for (k = from; k <= length(line); k++) {
+        ch = substr(line, k, 1)
+        if (d == "\"\"\"" && ch == "\\") { k++; continue }
+        if (substr(line, k, 3) == d) return k + 3
+      }
+      return 0
+    }
+    # the value of a basic string body: \\ \" \t \n \r and \uXXXX for ASCII
+    function dec(b,   o, k, ch, nx, h) {
+      o = ""
+      for (k = 1; k <= length(b); k++) {
+        ch = substr(b, k, 1)
+        if (ch != "\\") { o = o ch; continue }
+        nx = substr(b, ++k, 1)
+        if (nx == "t") o = o "\t"
+        else if (nx == "n") o = o "\n"
+        else if (nx == "r") o = o "\r"
+        else if (nx == "u") {
+          h = substr(b, k + 1, 4); k += 4
+          if (h ~ /^00[0-7][0-9A-Fa-f]$/) o = o sprintf("%c", hexd(substr(h, 3, 1)) * 16 + hexd(substr(h, 4, 1)))
+          else o = o "\\u" h
+        }
+        else o = o nx
+      }
+      return o
+    }
+    function hexd(x) { return index("0123456789abcdef", tolower(x)) - 1 }
     BEGIN {
       n = split(ENVIRON["AGMSG_STALE_ROOTS"], st, "\n")
-      for (i = 1; i <= n; i++) if (st[i] != "") stale["\"" st[i] "\""] = 1
+      for (i = 1; i <= n; i++) if (st[i] != "") stale[st[i]] = 1
     }
     {
       gone = 0
@@ -877,28 +906,42 @@ _drop_stale_codex_roots() {
       if (start > 0) {
         len = length($0); out = substr($0, 1, start - 1); c = start
         while (c <= len) {
+          if (ms != "") {
+            p = msend($0, c, ms)
+            if (p == 0) { out = out substr($0, c); break }
+            out = out substr($0, c, p - c); c = p; ms = ""
+            continue
+          }
           ch = substr($0, c, 1)
-          if (ch == "\"") {
-            # one whole string element; an escaped quote does not end it
-            e = c + 1
-            while (e <= len) {
-              ec = substr($0, e, 1)
-              if (ec == "\\") e++
-              else if (ec == "\"") break
-              e++
+          if (ch == "\"" || ch == "\x27") {
+            if (substr($0, c, 3) == ch ch ch) {
+              # a multi-line string; when it closes on this line it is one element too
+              p = msend($0, c + 3, ch ch ch)
+              if (p == 0) { ms = ch ch ch; out = out substr($0, c); break }
+              tok = substr($0, c, p - c)
+              body = substr(tok, 4, length(tok) - 6)
+              val = (ch == "\"") ? dec(body) : body
+              e = p - 1
+            } else {
+              # one whole string element; an escaped quote does not end a double-quoted one
+              e = c + 1
+              while (e <= len) {
+                ec = substr($0, e, 1)
+                if (ch == "\"" && ec == "\\") e++
+                else if (ec == ch) break
+                e++
+              }
+              tok = substr($0, c, e - c + 1)
+              body = substr(tok, 2, length(tok) - 2)
+              val = (ch == "\"") ? dec(body) : body
             }
-            tok = substr($0, c, e - c + 1)
-            if (tok in stale) {
+            if (val in stale) {
               c = e + 1
               if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
               gone = 1
               continue
             }
             out = out tok; c = e + 1
-          } else if (ch == "\x27") {
-            e = index(substr($0, c + 1), "\x27")
-            e = (e == 0) ? len : c + e
-            out = out substr($0, c, e - c + 1); c = e + 1
           } else if (ch == "#") {
             out = out substr($0, c); break
           } else if (ch == "]") {
