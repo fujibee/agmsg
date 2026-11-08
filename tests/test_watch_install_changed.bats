@@ -156,7 +156,7 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   refute grep -q 'installation was updated' "$out"
 }
 
-@test "watch: a finished install whose watch.sh is not runnable keeps the original exit after the timeout (#684)" {
+@test "watch: a finished install whose watch.sh is not runnable keeps the watcher delivering, says so once, and restarts when it is repaired (#684)" {
   local out="$BATS_TEST_TMPDIR/out4.txt"
   : > "$out"
   AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
@@ -177,14 +177,133 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   chmod -x "$SCRIPTS/watch.sh"
   printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
 
-  _wait_for "! kill -0 $pid 2>/dev/null" || true
+  # Past the grace the watcher says so, once, and does NOT stop.
+  _wait_for "grep -q 'still executing the code from before the update' '$out'" || true
+  _explain_if_missing "$out" "$pid" 'still executing the code from before the update'
+  grep -q 'still executing the code from before the update' "$out"
+  # The degraded record is written (just after the line) and names the way out.
+  _wait_for "grep -q '\"state\":\"degraded\"' '$TEST_SKILL_DIR/run/down/watch-install.$pid.json'" || true
+  grep -q '"state":"degraded"' "$TEST_SKILL_DIR/run/down/watch-install.$pid.json"
+  sleep 2
+  kill -0 "$pid"
+  run grep -c 'still executing the code from before the update' "$out"
+  [ "$output" = "1" ]
+
+  # It still delivers with the code it has.
+  bash "$SCRIPTS/send.sh" team bob alice "while-broken" >/dev/null
+  _wait_for "grep -q 'while-broken' '$out'" || true
+  grep -q 'while-broken' "$out"
+
+  # Repaired: it restarts onto the new code by itself (same pid, exec), no manual re-arm.
+  awk 'NR==1 { print; print "echo watch-test-repaired-marker"; next } { print }' \
+    "$SCRIPTS/watch.sh" > "$SCRIPTS/watch.sh.new"
+  chmod +x "$SCRIPTS/watch.sh.new"
+  mv "$SCRIPTS/watch.sh.new" "$SCRIPTS/watch.sh"
+  _wait_for "grep -q 'watch-test-repaired-marker' '$out'" || true
+  # The record goes away once the watcher has restarted onto the repaired install.
+  _wait_for "[ ! -e '$TEST_SKILL_DIR/run/down/watch-install.$pid.json' ]" || true
+  [ ! -e "$TEST_SKILL_DIR/run/down/watch-install.$pid.json" ]
+  local was_alive=0
+  kill -0 "$pid" 2>/dev/null && was_alive=1
+  grep -q 'watch-test-repaired-marker' "$out"
+  agmsg_stop_pid "$pid"
+  [ "$was_alive" -eq 1 ]
+}
+
+@test "watch: an installation that never stops looking changed does not end the watcher after the restart cap (#684)" {
+  local out="$BATS_TEST_TMPDIR/out5.txt"
+  : > "$out"
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_RESTART_MIN_AGE=3 \
+    bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+
+  bash "$SCRIPTS/send.sh" team bob alice "before-churn" >/dev/null
+  _wait_for "grep -q 'before-churn' '$out'" || true
+  grep -q 'before-churn' "$out"
+
+  # A VERSION stamped in the future reads as newer than every watcher start, so
+  # each restarted image sees "changed" again -- the loop the cap exists for.
+  printf 'future-version\n' > "$TEST_SKILL_DIR/VERSION"
+  touch -t 203801010000 "$TEST_SKILL_DIR/VERSION"
+
+  _wait_for "grep -q 'kept changing across 5 restart' '$out'" || true
+  _explain_if_missing "$out" "$pid" 'kept changing across 5 restart'
+  grep -q 'kept changing across 5 restart' "$out"
+  _wait_for "grep -q '\"state\":\"degraded\"' '$TEST_SKILL_DIR/run/down/watch-install.$pid.json'" || true
+  grep -q '"state":"degraded"' "$TEST_SKILL_DIR/run/down/watch-install.$pid.json"
+  sleep 2
+  # Still the same process, still serving the subscription, and it said so once.
+  kill -0 "$pid"
+  run grep -c 'kept changing across 5 restart' "$out"
+  [ "$output" = "1" ]
+  bash "$SCRIPTS/send.sh" team bob alice "after-churn" >/dev/null
+  _wait_for "grep -q 'after-churn' '$out'" || true
+  grep -q 'after-churn' "$out"
+
+  # Past the cap a restart is still tried once the image is old enough (3 s here),
+  # and the record that says the install is not settling survives that hand-over.
+  local rec="$TEST_SKILL_DIR/run/down/watch-install.$pid.json" since_before since_after n
+  since_before="$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$rec")"
+  [ -n "$since_before" ]
+  # The log is named after the normalized session id, which carries the agent
+  # pid where one is found (macOS), so match it rather than spell it out.
+  _wait_for "[ \"\$(cat '$TEST_SKILL_DIR'/run/watch.sid-684d*.log 2>/dev/null | grep -c 'restarting on the new code')\" -ge 7 ]" || true
+  n="$(cat "$TEST_SKILL_DIR"/run/watch.sid-684d*.log | grep -c 'restarting on the new code')"
+  [ "$n" -ge 7 ]
+  kill -0 "$pid"
+  grep -q '"state":"degraded"' "$rec"
+  since_after="$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$rec")"
+  [ "$since_after" = "$since_before" ]
+  run grep -c 'kept changing across 5 restart' "$out"
+  [ "$output" = "1" ]
+
+  # The install settles (VERSION no longer newer than the watcher): the run of
+  # restarts ends and the record goes.
+  # The record cannot be removed at first (its directory is read-only): the removal
+  # stays pending, the watcher keeps running, and it is retried until it works.
+  chmod 555 "$TEST_SKILL_DIR/run/down"
+  touch -t 202001010000 "$TEST_SKILL_DIR/VERSION"
+  sleep 3
+  kill -0 "$pid"
+  [ -e "$rec" ]
+  chmod 755 "$TEST_SKILL_DIR/run/down"
+  _wait_for "[ ! -e '$rec' ]" || true
+  [ ! -e "$rec" ]
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
   agmsg_stop_pid "$pid"
-  chmod +x "$SCRIPTS/watch.sh"
+  [ "$was_alive" -eq 1 ]
+}
 
-  [ "$was_alive" -eq 0 ]
-  grep -q 'installation was updated' "$out"
+@test "watch: a degraded record that could not be written is tried again, and the report line still appears once (#684)" {
+  local out="$BATS_TEST_TMPDIR/out6.txt" down="$TEST_SKILL_DIR/run/down"
+  : > "$out"
+  mkdir -p "$down"
+  chmod 555 "$down"
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
+    bash "$SCRIPTS/watch.sh" sid-684e "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+  bash "$SCRIPTS/send.sh" team bob alice "before-unwritable" >/dev/null
+  _wait_for "grep -q 'before-unwritable' '$out'" || true
+  sleep 2
+  chmod -x "$SCRIPTS/watch.sh"
+  printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
+  _wait_for "grep -q 'still executing the code from before the update' '$out'" || true
+  grep -q 'still executing the code from before the update' "$out"
+  sleep 2
+  # The record directory is not writable, so nothing is there yet ...
+  [ -z "$(ls "$down" 2>/dev/null)" ]
+  # ... and once it is, the next pass writes it, without a second report line.
+  chmod 755 "$down"
+  _wait_for "grep -q '\"state\":\"degraded\"' '$down/watch-install.$pid.json'" || true
+  local ok=0
+  grep -q '"state":"degraded"' "$down/watch-install.$pid.json" 2>/dev/null && ok=1
+  run grep -c 'still executing the code from before the update' "$out"
+  local reports="$output"
+  chmod +x "$SCRIPTS/watch.sh"
+  agmsg_stop_pid "$pid"
+  [ "$ok" -eq 1 ]
+  [ "$reports" = "1" ]
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {
