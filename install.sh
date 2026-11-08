@@ -32,6 +32,10 @@ AGENTS_DIR="$HOME/.agents"
 . "$SCRIPT_DIR/scripts/lib/install-manifest.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/agmsg-launcher.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/down-notice.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/update-command.sh"
 
 # Type registry — resolve each type's SKILL command template from its manifest
 # (scripts/drivers/types/<name>/template.md) instead of a hardcoded templates/ path. Read-only
@@ -51,6 +55,9 @@ agmsg_load_renderable_skill_types
 # so the two cannot silently disagree about which files exist again.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+# Where an install keeps its run/, db/, teams/ (outside the watched skills dir).
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/state-root.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/stale-outcome-files.sh"
 # Warning when an update adds a built-in that a trusted plugin already replaces.
@@ -245,6 +252,238 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   rm -f "$skill/run/agmsgd-updating"
 }
 
+# Moves an install's run/ db/ teams/ ext-tools/ .trash/ out of the skills
+# directory (scripts/lib/state-root.sh) and links them back. Codex watches
+# ~/.agents/skills and rescans every skill about every 10 seconds while agmsg
+# writes under it; writes through a symlinked directory are not reported.
+#
+# Called before the install operation begins. Whatever uses the files is stopped
+# for the move and brought back by the existing update steps (sync engines:
+# `sync restart` below; agmsgd: agmsg_install_stop_daemon here and
+# agmsg_install_restart_daemon at the end). When the state
+# cannot be moved, nothing is touched, one line names the install and the
+# reason, and the install keeps working where it is.
+#   $1 skill dir   $2 newline-separated teams with a running sync engine
+# The same question agmsg_install_stop_daemon asks of the recorded owner:
+# 0 = agmsgd is (still) starting, ready or stopping; 1 = confirmed not running
+# (no record, no daemon table in an install older than agmsgd, or exactly one row
+# that says none); 2 = unknown (unreadable, no row, several rows, another value).
+agmsg_install_daemon_active() {   # <skill_dir>
+  local db="$1/run/install.db" has row n state
+  [ -f "$db" ] || return 1
+  has="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT count(*) FROM sqlite_master WHERE name='daemon_owner';" 2>/dev/null)" || return 2
+  case "${has%$'\r'}" in 0) return 1 ;; 1) ;; *) return 2 ;; esac
+  # The table always holds exactly one row; anything else is not a record to trust.
+  row="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT count(*) || '|' || coalesce(min(state), '') FROM daemon_owner;" 2>/dev/null)" || return 2
+  row="${row%$'\r'}"
+  n="${row%%|*}"
+  state="${row#*|}"
+  [ "$n" = 1 ] || return 2
+  case "$state" in
+    none) return 1 ;;
+    ready|starting|stopping) return 0 ;;
+  esac
+  return 2
+}
+
+# The pid of <team>'s engine when it is ours to stop right now, judged by what is
+# on the machine and asked afresh each time: the pidfile of this install names a
+# live process whose command line is this install's engine script ending in
+# "run --team <team>" (the comparison remote.sh's engine status makes, through
+# the same compat functions), and the team has no systemd unit (a supervisor's
+# engine is the supervisor's). Prints the pid and returns:
+#   0 = that engine is running and is ours
+#   1 = positively no engine of ours: no pidfile, no valid pid, the process is
+#       gone, or its command line was read and is not the engine
+#   2 = the team has a systemd unit: not ours to stop, not proof of anything
+#   3 = unknown: the process is alive but its command line could not be read, or
+#       an observation failed (the systemd probe that exists but errors, a pidfile
+#       that is there and cannot be read)
+agmsg_install_engine_owned_pid() {   # <skill_dir> <team>
+  local skill="$1" team="$2" pid command load systemctl_bin="${AGMSG_SYSTEMCTL:-systemctl}" pidfile
+  # Only a machine without systemctl is known to have no unit. A probe that is
+  # there and fails (no user bus, no permission) or answers nothing readable is
+  # not "no unit": a supervisor's engine has no pidfile of ours.
+  if command -v "$systemctl_bin" >/dev/null 2>&1; then
+    load="$("$systemctl_bin" --user show "agmsg-remote-sync-$team.service" -p LoadState 2>/dev/null)" || return 3
+    case "$load" in
+      *not-found*) ;;
+      *LoadState=*) return 2 ;;
+      *) return 3 ;;
+    esac
+  fi
+  # An absent pidfile is "no engine"; one that is there and cannot be read is not.
+  pidfile="$skill/run/remote-sync.$team.pid"
+  [ -e "$pidfile" ] || [ -L "$pidfile" ] || return 1
+  pid="$(cat "$pidfile" 2>/dev/null)" || return 3
+  pid="${pid%$'\r'}"
+  _agmsg_pid_valid "$pid" || return 1
+  _agmsg_pid_alive_local "$pid" || return 1
+  command="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  [ -n "$command" ] || return 3
+  agmsg_cmdline_names_path "$command" "$skill/scripts/internal/remote-sync.mjs" || return 1
+  case "$command" in *" run --team $team") ;; *) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
+# Stops the sync engine of <team> of the install that is on disk now. The installer
+# cannot rely on the installed remote.sh to do it: releases up to 1.7.1 have no
+# `sync stop`, so it does the stopping itself, under the same team lock `sync
+# start` and `sync restart` take, so no engine is started or replaced while this
+# runs.
+#   0 = no engine of ours is running any more (there was none, or it was stopped
+#       here and nothing took its place)
+#   1 = it is running and could not be stopped, or a supervisor owns it, or it was
+#       replaced: none of those is proof of stopped.
+# Ownership is asked again before EACH signal, so a pid that was reused after the
+# engine left is never signalled: TERM, up to about five seconds for it to leave,
+# then (only if the same engine still runs) KILL, up to five more. The pidfile is
+# removed only if it still names the process that was stopped.
+agmsg_install_engine_stop() {   # <skill_dir> <team>
+  local skill="$1" team="$2"
+  (
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/scripts/lib/registry-lock.sh" || exit 1
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/scripts/lib/compat.sh" || exit 1
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/scripts/lib/instance-id.sh" || exit 1
+    agmsg_lock_acquire "$skill/teams/$team" || exit 1
+    rc=1
+    _agmsg_install_engine_stop_locked "$skill" "$team" && rc=0
+    agmsg_lock_release
+    exit "$rc"
+  )
+}
+
+_agmsg_install_engine_stop_locked() {   # <skill_dir> <team>
+  local skill="$1" team="$2" pid current signal attempt rc=0
+  pid="$(agmsg_install_engine_owned_pid "$skill" "$team")" || rc=$?
+  case "$rc" in 0) ;; 1) return 0 ;; *) return 1 ;; esac
+  for signal in TERM KILL; do
+    rc=0
+    current="$(agmsg_install_engine_owned_pid "$skill" "$team")" || rc=$?
+    [ "$rc" -eq 0 ] || break
+    [ "$current" = "$pid" ] || return 1
+    [ "$signal" != KILL ] || echo "  ~ the sync engine for '$team' (pid $pid) did not exit within 5 s after TERM; stopping it with KILL"
+    kill "-$signal" "$pid" 2>/dev/null || true
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+      agmsg_install_pid_gone "$pid" && break 2
+      attempt=$((attempt + 1))
+      sleep 0.05
+    done
+  done
+  agmsg_install_pid_gone "$pid" || return 1
+  # Gone is not enough: it has to be positively "no engine of ours" now. An
+  # engine that took its place, a supervisor, or something that cannot be read
+  # leaves the state where it is and the pidfile alone.
+  rc=0
+  agmsg_install_engine_owned_pid "$skill" "$team" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || return 1
+  [ "$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)" != "$pid" ] || rm -f "$skill/run/remote-sync.$team.pid"
+  echo "  ~ stopped the sync engine for '$team' (pid $pid); the update starts it again"
+  return 0
+}
+
+# A state that stays where Codex watches is shown where a person already looks
+# (agmsg status, doctor, the start of a session), not only in this run's output.
+# The record is cleared once the state has moved.
+agmsg_install_state_notice() {   # <skill_dir> <reason>
+  AGMSG_DOWN_NOTICE_ROOT="$1" down_notice_set state degraded \
+    "the state of '${1##*/}' is still in $1, a directory Codex watches (not moved: $2)" \
+    "$(agmsg_update_command "$1") (the next update tries the move again)" || true
+}
+
+agmsg_install_move_state() {
+  local skill="$1" teams="$2" root name part moved_any=false need=false team
+  name="${skill##*/}"
+  root="$(agmsg_state_root "$skill" "$AGENTS_DIR")"
+  for part in $AGMSG_STATE_PARTS; do
+    [ -L "$skill/$part" ] || need=true
+    if [ -d "$skill/$part" ] && [ ! -L "$skill/$part" ]; then moved_any=true; fi
+  done
+  if [ "$need" = false ]; then
+    # Already linked: only record who owns the root and where it is.
+    local linked
+    linked="$(readlink "$skill/run" 2>/dev/null)"
+    case "$linked" in /*/run) root="${linked%/run}" ;; esac
+    agmsg_state_adopt "$skill" "$root" || true
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear state || true
+    [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+    return 0
+  fi
+  if ! agmsg_state_preflight "$skill" "$root"; then
+    echo "  ! state of '$name' is not moved; it keeps working in place (Codex rescans its skills on writes there)" >&2
+    agmsg_install_state_notice "$skill" "${AGMSG_STATE_REASON:-the target could not be prepared}"
+    [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+    return 0
+  fi
+  if [ "$moved_any" = true ]; then
+    # The caller holds the install operation lock (and has refused on an
+    # unfinished operation record) from before this point to the end of the update.
+    echo "  ~ moving the state of '$name' to $root (a link stays in $skill)"
+    # Same stop the update uses before replacing scripts: the intent stays on, so
+    # the update's own restart at the end brings agmsgd back. The move only goes
+    # on when every writer is positively stopped; otherwise what was stopped is
+    # started again and the state stays where it is.
+    local stopped="" stop_failed=""
+    agmsg_install_stop_daemon "$skill"
+    local active=0
+    agmsg_install_daemon_active "$skill" || active=$?
+    if [ "$active" = 0 ]; then
+      stop_failed="agmsgd did not confirm that it stopped"
+    elif [ "$active" = 2 ]; then
+      stop_failed="the state of agmsgd in $skill/run/install.db cannot be read"
+    else
+      while IFS= read -r team; do
+        [ -n "$team" ] || continue
+        if agmsg_install_engine_stop "$skill" "$team"; then
+          stopped="$stopped
+$team"
+        else
+          stop_failed="the sync engine for '$team' could not be stopped"
+          break
+        fi
+      done <<< "$teams"
+    fi
+    if [ -n "$stop_failed" ]; then
+      # shellcheck disable=SC2034  # read by agmsg_state_marker_write
+      AGMSG_STATE_REASON="$stop_failed"
+      echo "  ! state of '$name' is not moved: $stop_failed; it keeps working in place (Codex rescans its skills on writes there)" >&2
+      agmsg_install_state_notice "$skill" "$stop_failed"
+      # An update goes on from here and starts agmsgd and the engines it found
+      # running itself once the new files and the completion record are in
+      # place; starting them now would run the old scripts against a record that
+      # is aside. Anything else (a plain install) puts back what it stopped.
+      if [ "$UPDATE_ONLY" != true ]; then
+        agmsg_install_restart_daemon "$skill"
+        while IFS= read -r team; do
+          [ -n "$team" ] || continue
+          bash "$skill/scripts/remote.sh" sync restart "$team" >/dev/null 2>&1 \
+            || echo "  ! could not restart the sync engine for '$team'; run: bash $skill/scripts/remote.sh sync restart $team" >&2
+        done <<< "$stopped"
+      fi
+      [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+      return 0
+    fi
+  fi
+  # The install operation lock (.install-op/lock.db, in the install directory,
+  # which this move never touches) is already held by the caller from before the
+  # checks above, so no other install, update or uninstall runs while run/ is
+  # renamed and linked.
+  local link_ok=false
+  agmsg_state_link "$skill" "$root" && link_ok=true
+  if [ "$link_ok" != true ]; then
+    echo "  ! the state of '$name' was only partly moved; fix the lines above, then run the update again" >&2
+    agmsg_install_state_notice "$skill" "the move stopped part way"
+  else
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear state || true
+  fi
+  [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
+  return 0
+}
+
 agmsg_install_restart_guidance() {
   echo '  Next: finish your current work, then close and reopen each running agent.'
   echo '    Resume the same conversation and run your messaging skill with actas <existing-agent-name> to refresh its destination.'
@@ -396,10 +635,14 @@ agmsg_prune_removed_scripts() {
 # it -- a .trash/ nested under scripts/ would have its OWN prior contents
 # picked up by the very next prune as "not shipped".
 agmsg_reset_trash() {
+  local dir="$1"
   agmsg_install_op_require || return 1
-  rm -rf "$1"
+  # .trash may be a link to the state kept outside the skills directory: empty
+  # what it points at and keep the link.
+  if [ -L "$dir" ]; then dir="$(readlink "$dir")"; fi
+  rm -rf "$dir"
   agmsg_install_op_require || return 1
-  mkdir -p "$1"
+  mkdir -p "$dir"
   agmsg_install_op_require
 }
 
@@ -422,7 +665,7 @@ agmsg_install_write_recovery_helper() {
   agmsg_install_op_require || return 1
   temp="$(mktemp "$SKILL_DIR/run/.install-op-recovery.XXXXXX")" || return 1
   if ! cat "$SCRIPT_DIR/scripts/lib/codex-config.sh" "$SCRIPT_DIR/scripts/lib/sqlpath.sh" \
-      "$SCRIPT_DIR/scripts/lib/sqlite-output.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" > "$temp"; then
+      "$SCRIPT_DIR/scripts/lib/sqlite-output.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" "$SCRIPT_DIR/scripts/lib/state-root.sh" > "$temp"; then
     rm -f "$temp"
     return 1
   fi
@@ -440,7 +683,7 @@ agmsg_install_write_recovery_helper() {
 
 agmsg_install_operation_begin() {
   local manifest="$SKILL_DIR/run/install-manifest.json"
-  local lock_db="$SKILL_DIR/run/install-op.lock.db"
+  local lock_db="$SKILL_DIR/.install-op/lock.db"
   local install_db="$SKILL_DIR/run/install.db"
 
   mkdir -p "$SKILL_DIR/run"
@@ -450,6 +693,10 @@ agmsg_install_operation_begin() {
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
   trap 'agmsg_install_operation_exit' EXIT
+  if ! agmsg_install_op_legacy_lock_hold "$SKILL_DIR"; then
+    echo "  ! another agmsg install or update is running (it holds the old-layout lock $SKILL_DIR/run/install-op.lock.db); nothing was changed. Run this again after it finishes." >&2
+    return 1
+  fi
   trap 'agmsg_install_op_handle_signal INT' INT
   trap 'agmsg_install_op_handle_signal TERM' TERM
 
@@ -677,7 +924,7 @@ agmsg_install_write_version() {
 }
 
 agmsg_install_touch_marker_and_write_version() {
-  touch "$SKILL_DIR/.agmsg" || return 1
+  agmsg_state_marker_write "$SKILL_DIR" || return 1
   agmsg_install_write_version
 }
 
@@ -715,67 +962,61 @@ move_into_place() {
   agmsg_install_op_require
 }
 
-# Adds this install's writable_paths (below) to ONE Codex config.toml.
-# Apply the active profile's sandbox configuration.
-_configure_codex_sandbox_file() {
-  local code_config="$1"
+# Brings ONE Codex config.toml's writable_roots in line with this install, in a
+# single pass over the file: it drops the entries an earlier release wrote for
+# db/, teams/, run/ and ext-tools/ under the skills directory when those are
+# now links into a state root (Codex rejects a writable root that contains a
+# symlink), and adds this install's own paths (the arguments) that the array
+# does not hold yet.
+#
+# The file is read by the TOML string rules over its whole length (basic,
+# literal and multi-line strings, comments, table headers), so only the real
+# writable_roots array is looked at or edited: the same text inside a
+# multi-line value elsewhere stays byte for byte. An element is compared by its
+# decoded value, in whichever string spelling it is written. Every other
+# element, the user's own and other installs', stays. When the array is missing
+# the key is added under [sandbox_workspace_write], and that table when it is
+# missing too. Entries are added to that table only; an array in a profile
+# table is never added to (obsolete entries are dropped from any of them).
+#
+# The awk exit status says what it did: 10 nothing, 11 removed, 12 added,
+# 13 both. Only a changed file is backed up (once) and replaced.
+_sync_codex_roots() {
+  local code_config="$1" stale=() _s scan=0
   shift
   local writable_paths=("$@")
   if [ ! -f "$code_config" ]; then
     return 0
   fi
+  while IFS= read -r _s; do
+    [ -n "$_s" ] && stale+=("$_s")
+  done < <(agmsg_codex_stale_writable_paths "$SKILL_DIR")
 
-  local missing=()
-  local p
-  for p in "${writable_paths[@]}"; do
-    if ! grep -q "$p" "$code_config" 2>/dev/null; then
-      missing+=("$p")
-    fi
-  done
-
-  if [ ${#missing[@]} -eq 0 ]; then
+  agmsg_install_op_require || return 1
+  AGMSG_STALE_ROOTS="$(printf '%s\n' ${stale[@]+"${stale[@]}"})" \
+  AGMSG_WANT_ROOTS="$(printf '%s\n' ${writable_paths[@]+"${writable_paths[@]}"})" \
+    agmsg_codex_roots_scan "$code_config" > "$code_config.tmp" || scan=$?
+  if [ "$scan" -eq 10 ]; then
+    command rm -f "$code_config.tmp"
     echo "  ~ Codex writable_roots already configured ($code_config)"
     return 0
   fi
-
+  if [ "$scan" -lt 11 ] || [ "$scan" -gt 13 ]; then
+    command rm -f "$code_config.tmp"
+    return 1
+  fi
   agmsg_install_op_require || return 1
   cp "$code_config" "$code_config.bak"
   agmsg_install_op_require || return 1
   echo "  ~ backed up $code_config → $code_config.bak"
-
-  local entries inserts
-  entries=$(printf ', "%s"' "${missing[@]}")
-  entries="${entries:2}"  # remove leading ", " — for the "create a new array" branches
-  inserts=$(printf '"%s", ' "${missing[@]}")  # trailing ", " — prepended inside an existing array
-
-  if grep -q 'writable_roots' "$code_config" 2>/dev/null; then
-    # Insert into the existing array right after its opening '['. This is
-    # uniformly valid TOML for empty ([]), single-line and multiline arrays —
-    # trailing commas are legal — and avoids the leading/double-comma corruption
-    # that munging the closing ']' produced for an empty array (`[, "x"]`).
-    agmsg_install_op_require || return 1
-    awk -v ins="$inserts" '
-      !done && /writable_roots[[:space:]]*=[[:space:]]*\[/ {
-        sub(/\[/, "[" ins)
-        done=1
-      }
-      { print }
-    ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
-  elif grep -q '^\[sandbox_workspace_write\]' "$code_config" 2>/dev/null; then
-    # Section exists but no writable_roots
-    agmsg_install_op_require || return 1
-    awk -v entries="$entries" '
-      { print }
-      /^\[sandbox_workspace_write\]/ { print "writable_roots = [" entries "]" }
-    ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
-  else
-    # No section at all
-    agmsg_install_op_require || return 1
-    printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
-    agmsg_install_op_require || return 1
-  fi
+  move_into_place "$code_config.tmp" "$code_config"
   agmsg_install_op_require || return 1
-  echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/ ($code_config)"
+  if [ $(( scan & 1 )) -eq 1 ]; then
+    echo "  ~ replaced Codex writable_roots entries that are now links ($code_config)"
+  fi
+  if [ $(( scan & 2 )) -eq 2 ]; then
+    echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/ ($code_config)"
+  fi
 }
 
 configure_codex_sandbox() {
@@ -815,7 +1056,7 @@ configure_codex_sandbox() {
 
   local cfg
   for cfg in "${codex_configs[@]}"; do
-    _configure_codex_sandbox_file "$cfg" "${writable_paths[@]}"
+    _sync_codex_roots "$cfg" "${writable_paths[@]}"
   done
   agmsg_install_op_require
 }
@@ -1042,11 +1283,12 @@ if [ "$UPDATE_ONLY" = true ]; then
   fi
   SKILL_NAME="$(basename "$SKILL_DIR")"
   CMD_NAME="$SKILL_NAME"
+  if agmsg_state_name_reserved "$CMD_NAME"; then
+    echo "  ! '$CMD_NAME' cannot be an install name: $(agmsg_state_base)/$CMD_NAME is shared by every install. Rename or remove $SKILL_DIR." >&2
+    exit 1
+  fi
   echo "  Updating $SKILL_NAME..."
   INSTALLED_VERSION="$(agmsg_source_version)"
-  agmsg_install_operation_begin || exit 1
-  agmsg_install_stop_daemon "$SKILL_DIR"
-  agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
   # #963: a sync engine that is running when the write below starts either
   # survives on the code it already loaded (silent -- `remote.sh status` still
   # reports it as running, and nothing about the new scripts takes effect) or
@@ -1058,6 +1300,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   # Restarting after the rewrite (further down) covers BOTH outcomes:
   # a survivor is stopped and replaced, and a crasher is simply started fresh
   # since its pidfile already reads as stale by then.
+  # A copy made with cp -R still links to the ORIGINAL's state: give it its own
+  # (empty) parts before anything is read, locked or written through those links.
+  agmsg_state_detach_foreign "$SKILL_DIR" || exit 1
   AGMSG_RUNNING_TEAMS=""
   if [ -x "$SKILL_DIR/scripts/remote.sh" ]; then
     while IFS= read -r _agmsg_status_line; do
@@ -1076,6 +1321,14 @@ $_agmsg_running_team"
     done < <("$SKILL_DIR/scripts/remote.sh" status --json 2>/dev/null || true)
   fi
   unset _agmsg_status_line _agmsg_running_team
+  # The lock is taken first and held through the move: the lock database moves
+  # with run/ by rename, so it is the same file at both paths and a second
+  # install, update or uninstall waits (or refuses on the unfinished record)
+  # instead of working on the old tree.
+  agmsg_install_operation_begin || exit 1
+  agmsg_install_move_state "$SKILL_DIR" "$AGMSG_RUNNING_TEAMS"
+  agmsg_install_stop_daemon "$SKILL_DIR"
+  agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
   # Captured before the auto-detect below can fill AGENT_TYPE in for other
   # reasons: an EXPLICIT --agent-type is what #1449's rule below cares about,
   # not whatever AGENT_TYPE ends up holding once auto-detected too.
@@ -1253,7 +1506,7 @@ $_agmsg_running_team"
     # -print0 and `read -d ''` because the path is arbitrary UTF-8. A newline
     # cannot appear in a team name (validate.sh rejects control characters), but
     # nothing here needs to rely on that.
-    find "$SKILL_DIR/teams" -mindepth 2 -maxdepth 2 -name config.json -type f \
+    find -H "$SKILL_DIR/teams" -mindepth 2 -maxdepth 2 -name config.json -type f \
       \( -perm -g+w -o -perm -o+w \) -print0 2>/dev/null |
       while IFS= read -r -d '' agmsg_binding; do
         if chmod go-w "$agmsg_binding" 2>/dev/null; then
@@ -1337,20 +1590,6 @@ $_agmsg_running_team"
   agmsg_install_restart_guidance
   agmsg_install_daemon_hint "$SKILL_DIR"
   echo ""
-  # #963: a sync engine has no equivalent self-detection, so this update
-  # restarts one itself for every team the snapshot above found running.
-  if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
-    while IFS= read -r _agmsg_team; do
-      [ -n "$_agmsg_team" ] || continue
-      if ! agmsg_install_op_run_phase "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
-        echo "  ! could not restart the sync engine for '$_agmsg_team'; run:" >&2
-        echo "      bash $SKILL_DIR/scripts/remote.sh sync restart $_agmsg_team" >&2
-      fi
-    done <<< "$AGMSG_RUNNING_TEAMS"
-    unset _agmsg_team
-  else
-    echo "  ~ no sync engine was running before this update; nothing to restart"
-  fi
   echo ""
   echo "    'engine stale' after this is not proof a restart above failed on its"
   echo "    own -- check: remote.sh status <team> (#963, #954)."
@@ -1362,6 +1601,24 @@ $_agmsg_running_team"
   echo "    Check with 'delivery.sh status <type> <project>'. (#133)"
   echo ""
   agmsg_install_operation_finish || exit 1
+  # After the completion record is written and the lock is let go: an engine
+  # started earlier takes the old record as its baseline, sees the new one appear
+  # and stands down again a few seconds later. A stood-down engine's own restart
+  # helper waits for the install lock, so exactly one of the two starts it.
+  # #963: a sync engine has no equivalent self-detection, so this update
+  # restarts one itself for every team the snapshot above found running.
+  if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
+    while IFS= read -r _agmsg_team; do
+      [ -n "$_agmsg_team" ] || continue
+      if ! bash "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
+        echo "  ! could not restart the sync engine for '$_agmsg_team'; run:" >&2
+        echo "      bash $SKILL_DIR/scripts/remote.sh sync restart $_agmsg_team" >&2
+      fi
+    done <<< "$AGMSG_RUNNING_TEAMS"
+    unset _agmsg_team
+  else
+    echo "  ~ no sync engine was running before this update; nothing to restart"
+  fi
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""
@@ -1380,8 +1637,14 @@ fi
 
 # --- Apply defaults ---
 CMD_NAME="${CMD_NAME:-agmsg}"
+if agmsg_state_name_reserved "$CMD_NAME"; then
+  echo "  ! '$CMD_NAME' cannot be an install name: $(agmsg_state_base)/$CMD_NAME is shared by every install. Pick another --cmd." >&2
+  exit 1
+fi
 SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 INSTALLED_VERSION="$(agmsg_source_version)"
+mkdir -p "$SKILL_DIR" || exit 1
+agmsg_install_move_state "$SKILL_DIR" ""
 agmsg_install_operation_begin || exit 1
 agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
 

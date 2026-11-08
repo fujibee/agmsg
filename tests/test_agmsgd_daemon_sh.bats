@@ -43,7 +43,7 @@ teardown() {
 }
 
 _seed_install_db() {
-  mkdir -p "$TEST_SKILL_DIR/run"
+  mkdir -p "$TEST_SKILL_DIR/run" "$TEST_SKILL_DIR/.install-op"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
   # node_path is normally recorded by `enable` -- seeded
   # here directly for tests that exercise `start` on its own, without
@@ -380,7 +380,7 @@ EOF
   marker="$TEST_SKILL_DIR/fake-launchd/registered"
   events="$TEST_SKILL_DIR/fake-launchd/events"
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     run bash "$DAEMON" enable
   [ "$status" -eq 0 ]
 
@@ -392,7 +392,7 @@ EOF
   [ -f "$plist" ]
   [ -f "$marker" ]
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" \
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$plist" ]
@@ -405,7 +405,7 @@ EOF
   # pid still exists and that has no control socket cannot be checked; disable
   # drops it rather than failing.
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='1', socket=NULL, executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" \
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "none" ]
@@ -423,12 +423,12 @@ EOF
   [ "$status" -eq 0 ]
   [ "${output#*not in use yet}" != "$output" ]
   [ -z "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT name FROM sqlite_master WHERE name='daemon_owner';")" ]
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$TEST_SKILL_DIR/fake-launchd/registered" AGMSGD_FAKE_LAUNCHD_EVENTS="$TEST_SKILL_DIR/fake-launchd/events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$TEST_SKILL_DIR/fake-launchd/registered" AGMSGD_FAKE_LAUNCHD_EVENTS="$TEST_SKILL_DIR/fake-launchd/events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     run bash "$DAEMON" enable
   [ "$status" -eq 0 ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT install_id FROM meta;")" = "daemon-sh-test" ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT desired FROM daemon_intent;")" = "on" ]
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$TEST_SKILL_DIR/fake-launchd/registered" AGMSGD_FAKE_LAUNCHD_EVENTS="$TEST_SKILL_DIR/fake-launchd/events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$TEST_SKILL_DIR/fake-launchd/registered" AGMSGD_FAKE_LAUNCHD_EVENTS="$TEST_SKILL_DIR/fake-launchd/events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" \
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   printf 'not a sqlite database' > "$TEST_SKILL_DIR/run/install.db"
@@ -479,7 +479,7 @@ EOF
   touch "$marker"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER=1 \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER=1 \
     run bash "$DAEMON" disable
   [ "$status" -ne 0 ]
   printf '%s\n' "$output" | grep -Fq 'could not unregister launchd service'
@@ -694,6 +694,10 @@ EOF
   _fake_windows_manager
   local crlf_stub capture marker
   crlf_stub="$(_stub_sqlite3_crlf)"
+  # The stub models sqlite3.exe, the one sqlite3 whose rows end in \r\n; the CR
+  # strip runs only where that is so, and this test's fake `uname` does not
+  # change $OSTYPE, which is what that decision reads.
+  export AGMSG_SQLITE_CRLF=1
   capture="$TEST_SKILL_DIR/fake-windows/captured.xml"
   marker="$TEST_SKILL_DIR/fake-windows/registered"
   export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
@@ -742,13 +746,13 @@ EOF
   marker="$TEST_SKILL_DIR/fake-launchd/registered"
   events="$TEST_SKILL_DIR/fake-launchd/events"
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     run /bin/bash "$DAEMON" enable
   [ "$status" -eq 0 ]
   ! echo "$output" | grep -qi "could not read this install's record" || false
   [ -f "$marker" ]
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/.install-op/lock.db" \
     run /bin/bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$marker" ]
@@ -862,7 +866,7 @@ _enable_env() {
   : > "$TEST_SKILL_DIR/fake-launchd/events"
 
   # Another process holds the operation lock for longer than enable will wait.
-  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 6\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" >/dev/null 2>&1 ) &
+  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 6\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/.install-op/lock.db" >/dev/null 2>&1 ) &
   local holder=$!
   sleep 1
   AGMSGD_LOCK_WAIT_MS=500 _run_with_deadline 30 bash "$DAEMON" enable
@@ -883,7 +887,7 @@ _enable_env() {
   _seed_install_db
   _write_completion_record
   _enable_env
-  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 2\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" >/dev/null 2>&1 ) &
+  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 2\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/.install-op/lock.db" >/dev/null 2>&1 ) &
   local holder=$!
   sleep 0.5
   AGMSGD_LOCK_WAIT_MS=8000 _run_with_deadline 40 bash "$DAEMON" enable

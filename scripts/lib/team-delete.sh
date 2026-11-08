@@ -25,7 +25,7 @@ _agmsg_team_delete_all_names() {
   if [ -f "$config" ]; then
     names="$(sqlite3 :memory: \
       "SELECT key FROM json_each(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.agents'));" \
-      2>/dev/null | tr -d '\r')"
+      2>/dev/null | LC_ALL=C tr -d '\r')"
   fi
   journal="$(agmsg_roster_journal_path "$team_dir")"
   if [ -f "$journal" ]; then
@@ -50,7 +50,7 @@ _agmsg_team_delete_all_names() {
         UNION
         SELECT json_extract(event,'\$.to') AS n FROM events
          WHERE json_extract(event,'\$.type')='member_renamed'
-      ) WHERE n IS NOT NULL;" 2>/dev/null | tr -d '\r')"
+      ) WHERE n IS NOT NULL;" 2>/dev/null | LC_ALL=C tr -d '\r')"
     names="$(printf '%s\n%s\n' "$names" "$journal_names" | sed '/^$/d' | LC_ALL=C sort -u)"
   fi
   printf '%s\n' "$names"
@@ -165,7 +165,7 @@ agmsg_team_purge_messages() {
   lit="$(agmsg_sqlesc "$team")"
   purge_sql=""
   for table in $_AGMSG_TEAM_SCOPED_TABLES; do
-    if [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$table';" | tr -d '\r')" = 1 ]; then
+    if [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$table';" | LC_ALL=C tr -d '\r')" = 1 ]; then
       case "$table" in
         events|read_cursors) column=team ;;
         *) column=local_team ;;

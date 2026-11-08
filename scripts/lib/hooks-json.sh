@@ -70,7 +70,7 @@ strip_agmsg_event_file() {
   # script under it, and nothing legitimately outside agmsg's install would
   # ever contain that exact path as a substring.
   local skill_dir_sql
-  skill_dir_sql=$(printf '%s' "$SKILL_DIR" | sed "s/'/''/g")
+  skill_dir_sql=$(printf '%s' "$SKILL_DIR" | LC_ALL=C sed "s/'/''/g")
   # Write the result with writefile() rather than redirecting sqlite3's CLI
   # output. On strict sqlite3 builds (>= 3.50, shipped on Windows) the CLI
   # renders control bytes — e.g. a CR that rode in on a CRLF settings file —
@@ -143,7 +143,7 @@ strip_agmsg_event_file() {
 windows_wrap() {
   local posix_cmd="$1"
   local bash_cmd_ps
-  bash_cmd_ps=$(printf '%s' "{ $posix_cmd ; } > \"\$AGMSG_HOOK_OUT\"" | sed "s/'/''/g")
+  bash_cmd_ps=$(printf '%s' "{ $posix_cmd ; } > \"\$AGMSG_HOOK_OUT\"" | LC_ALL=C sed "s/'/''/g")
   # `printf '%s'`, never a format string. This text carries backslashes into
   # PowerShell, and a format string puts a second round of escape processing
   # between what is written here and what is emitted -- measured: three attempts
@@ -176,12 +176,12 @@ add_event_entry_file() {
   # the "command" value's embedded " and ' unescaped, producing "malformed
   # JSON" on tricky project paths and on native Windows sqlite builds (#134).
   local cmd_lit
-  cmd_lit=$(printf '%s' "$cmd" | sed "s/'/''/g")
+  cmd_lit=$(printf '%s' "$cmd" | LC_ALL=C sed "s/'/''/g")
   local hook_obj="json_object('type','command','command','$cmd_lit'"
   if [ "$windows_wrap" = "yes" ]; then
     local cw cw_lit
     cw=$(windows_wrap "$cmd")
-    cw_lit=$(printf '%s' "$cw" | sed "s/'/''/g")
+    cw_lit=$(printf '%s' "$cw" | LC_ALL=C sed "s/'/''/g")
     hook_obj="$hook_obj,'commandWindows','$cw_lit'"
   fi
   hook_obj="$hook_obj)"
@@ -322,7 +322,7 @@ _agmsg_json_reindent() {
   tmp_sql=$(agmsg_sql_readfile_path "$tmp")
   tmp2=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   tmp2_sql=$(agmsg_sql_readfile_path "$tmp2")
-  indent_sql=$(printf '%s' "$indent" | sed "s/'/''/g")
+  indent_sql=$(printf '%s' "$indent" | LC_ALL=C sed "s/'/''/g")
   wrote=$(agmsg_sqlite_mem "
     WITH src AS (SELECT json_pretty(readfile('$tmp_sql'), '$indent_sql') AS blob)
     SELECT writefile('$tmp2_sql', blob) = length(CAST(blob AS BLOB)) FROM src;

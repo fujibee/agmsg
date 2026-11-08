@@ -1773,7 +1773,7 @@ EOF
     # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
-    _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
+    _arr="[$(printf '%s' "$OUT" | LC_ALL=C paste -sd, -)]"
     # #777/#1045: this pair's undelivered backlog grows independently of
     # anything this loop bounds, so interpolating it into ONE argv element
     # eventually exceeds the OS's per-argument ceiling (Linux

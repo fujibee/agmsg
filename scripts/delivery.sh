@@ -404,7 +404,7 @@ agmsg_delivery_status_default() {
       # #1038: ownership by the absolute install path, not a substring of the
       # bare skill name — see strip_agmsg_event_file (hooks-json.sh) for why.
       local skill_dir_sql
-      skill_dir_sql=$(printf '%s' "$SKILL_DIR" | sed "s/'/''/g")
+      skill_dir_sql=$(printf '%s' "$SKILL_DIR" | LC_ALL=C sed "s/'/''/g")
       has_ss=$(agmsg_sqlite_mem "
         SELECT EXISTS(
           SELECT 1 FROM json_each(json_extract(readfile('$sql_hf'), '\$.hooks.SessionStart')) AS s,

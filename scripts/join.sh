@@ -18,7 +18,7 @@ source "$SCRIPT_DIR/lib/type-registry.sh"
 # (scripts/drivers/types/<name>/type.conf). Allowing arbitrary strings silently mis-registers an
 # agent and makes monitor mode fail with a confusing "no joined teams" message.
 if ! agmsg_is_known_type "$AGENT_TYPE"; then
-  echo "Unknown agent type: '$AGENT_TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g'))" >&2
+  echo "Unknown agent type: '$AGENT_TYPE' (supported: $(agmsg_known_types | sort -u | LC_ALL=C paste -sd, - | sed 's/,/, /g'))" >&2
   exit 1
 fi
 
@@ -125,7 +125,7 @@ agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
 # agent id is compared as an ordinary SQL value (json_each + WHERE), not
 # spliced into a JSON path, so a name containing a single quote can't break
 # the query.
-AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | sed "s/'/''/g")
+AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | LC_ALL=C sed "s/'/''/g")
 if [ "$FORCE" -ne 1 ] && [ -f "$TEAM_CONFIG" ]; then
   TOMBSTONE_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
   TOMBSTONE=$(agmsg_sqlite_mem "
@@ -137,7 +137,7 @@ if [ "$FORCE" -ne 1 ] && [ -f "$TEAM_CONFIG" ]; then
     LIMIT 1;
   ")
   if [ -n "$TOMBSTONE" ] && [ "$TOMBSTONE" != "null" ]; then
-    TOMBSTONE_ESCAPED=$(printf '%s' "$TOMBSTONE" | sed "s/'/''/g")
+    TOMBSTONE_ESCAPED=$(printf '%s' "$TOMBSTONE" | LC_ALL=C sed "s/'/''/g")
     RENAMED_TO=$(agmsg_sqlite_mem "SELECT json_extract('$TOMBSTONE_ESCAPED', '\$.to');")
     RENAMED_AT=$(agmsg_sqlite_mem "SELECT json_extract('$TOMBSTONE_ESCAPED', '\$.at');")
     echo "Error: '$AGENT_ID' was renamed to '$RENAMED_TO' in team '$TEAM' at $RENAMED_AT. Did you mean to join/actas as '$RENAMED_TO'? Use --force to create '$AGENT_ID' as a new, separate identity anyway." >&2
@@ -147,11 +147,11 @@ fi
 
 # --- Add or extend agent registrations ---
 CONFIG_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
-AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
-PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | sed "s/'/''/g")
+AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | LC_ALL=C sed "s/'/''/g")
+PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | LC_ALL=C sed "s/'/''/g")
 PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 REGISTRATION=$(sqlite3 :memory: "SELECT json_object('type', '$AGENT_TYPE_SQL', 'project', '$PROJECT_SQL');")
-REGISTRATION_ESCAPED=$(printf '%s' "$REGISTRATION" | sed "s/'/''/g")
+REGISTRATION_ESCAPED=$(printf '%s' "$REGISTRATION" | LC_ALL=C sed "s/'/''/g")
 
 EXISTING=$(agmsg_sqlite_mem "
   WITH cfg AS (SELECT CAST(readfile('$CONFIG_SQL') AS TEXT) AS json)
@@ -190,7 +190,7 @@ if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
       "SELECT json_object('registrations', json_array(json('$REGISTRATION_ESCAPED')));")
   fi
 else
-  EXISTING_ESCAPED=$(printf '%s' "$EXISTING" | sed "s/'/''/g")
+  EXISTING_ESCAPED=$(printf '%s' "$EXISTING" | LC_ALL=C sed "s/'/''/g")
   NORMALIZED=$(agmsg_sqlite_mem "
     WITH agent(a) AS (SELECT '$EXISTING_ESCAPED')
     SELECT CASE
@@ -206,7 +206,7 @@ else
     END
     FROM agent;
   ")
-  NORMALIZED_ESCAPED=$(printf '%s' "$NORMALIZED" | sed "s/'/''/g")
+  NORMALIZED_ESCAPED=$(printf '%s' "$NORMALIZED" | LC_ALL=C sed "s/'/''/g")
 
   HAS_REGISTRATION=$(agmsg_sqlite_mem "
     SELECT EXISTS(
@@ -230,7 +230,7 @@ else
   fi
 fi
 
-AGENT_OBJ_ESCAPED=$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")
+AGENT_OBJ_ESCAPED=$(printf '%s' "$AGENT_OBJ" | LC_ALL=C sed "s/'/''/g")
 # Clearing a matching tombstone (#360 review) is folded into this SAME
 # read-modify-write, not a separate one: a name is only ever "actually
 # (re)joined" once this single write lands, so if anything fails before it,

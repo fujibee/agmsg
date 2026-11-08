@@ -130,7 +130,7 @@ while true; do
       storage_store_exists "$_team" || continue
       u="$(storage_list_unread "$_team" "$_agent" 2>/dev/null || true)"
       [ -n "$u" ] || continue
-      uarr="[$(printf '%s' "$u" | paste -sd, -)]"
+      uarr="[$(printf '%s' "$u" | LC_ALL=C paste -sd, -)]"
       # #777: this pair's unread backlog grows with every message sent to it,
       # so interpolating it into ONE argv element eventually exceeds the OS's
       # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller
@@ -146,7 +146,7 @@ while true; do
       # not end the whole subscription's poll.
       _agmsg_wo_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-watchonce-ids.XXXXXX" 2>/dev/null) || continue
       trap 'rm -f "$_agmsg_wo_sql"' EXIT HUP INT TERM
-      printf "%s\n" "SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');" \
+      printf "%s\n" "SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | LC_ALL=C sed "s/'/''/g")');" \
         > "$_agmsg_wo_sql"
       ids="$(agmsg_sqlite ':memory:' < "$_agmsg_wo_sql" 2>/dev/null || true)"
       rm -f "$_agmsg_wo_sql"

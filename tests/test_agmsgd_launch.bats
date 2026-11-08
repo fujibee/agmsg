@@ -19,7 +19,7 @@ _seed_install_db() {
 }
 
 setup_install_db() {
-  mkdir -p "$TEST_SKILL_DIR/run"
+  mkdir -p "$TEST_SKILL_DIR/run" "$TEST_SKILL_DIR/.install-op"
   SKILLDIR_INSTALL_DB="$TEST_SKILL_DIR/run/install.db"
   _seed_install_db
 }
@@ -61,7 +61,7 @@ setup_install_db() {
   local fifo="$TEST_SKILL_DIR/run/holder.fifo"
   local ack_fifo="$TEST_SKILL_DIR/run/holder-ack.fifo"
   mkfifo "$fifo" "$ack_fifo"
-  sqlite3 -batch "$TEST_SKILL_DIR/run/install-op.lock.db" < "$fifo" > "$ack_fifo" &
+  sqlite3 -batch "$TEST_SKILL_DIR/.install-op/lock.db" < "$fifo" > "$ack_fifo" &
   local holder_pid=$!
   exec 8> "$fifo"
   exec 9< "$ack_fifo"
@@ -111,7 +111,7 @@ setup_install_db() {
 @test "agmsgd-launch: intent on, completion record present, but no usable Node recorded -> exits 0, records a start attempt" {
   setup_install_db
   sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on';"
-  echo '{"bootstrap_version":2}' > "$TEST_SKILL_DIR/run/install-manifest.json"
+  echo '{"bootstrap_version":3}' > "$TEST_SKILL_DIR/run/install-manifest.json"
   run bash "$LAUNCH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no usable Node"* ]]
@@ -122,7 +122,7 @@ setup_install_db() {
   local real_node
   real_node="$(command -v node)"
   sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on', op_gen = 7; UPDATE meta SET node_path = '$real_node';"
-  echo '{"bootstrap_version":2}' > "$TEST_SKILL_DIR/run/install-manifest.json"
+  echo '{"bootstrap_version":3}' > "$TEST_SKILL_DIR/run/install-manifest.json"
   # Stub the Node entrypoint so this test exercises only the launcher's
   # own decision to hand off, not agmsgd itself (a separate component with
   # its own tests).

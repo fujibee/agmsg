@@ -347,7 +347,7 @@ _agmsg_team_identity_detail() {
 
 _agmsg_team_json_quote() {
   local escaped
-  escaped="$(printf '%s' "$1" | sed "s/'/''/g")"
+  escaped="$(printf '%s' "$1" | LC_ALL=C sed "s/'/''/g")"
   sqlite3 :memory: "SELECT json_quote('$escaped');"
 }
 

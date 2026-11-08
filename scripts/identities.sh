@@ -15,7 +15,7 @@ set -euo pipefail
 
 PROJECT_PATH="${1:?Usage: identities.sh <project_path> <agent_type>}"
 AGENT_TYPE="${2:?Missing agent_type}"
-AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
+AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | LC_ALL=C sed "s/'/''/g")
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # resolve-project.sh requires SKILL_DIR
@@ -38,7 +38,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
   ")
   [ -z "$TEAM_NAME" ] && continue
   [ "$TEAM_NAME" = "null" ] && continue
-  TEAM_SQL=$(printf '%s' "$TEAM_NAME" | sed "s/'/''/g")
+  TEAM_SQL=$(printf '%s' "$TEAM_NAME" | LC_ALL=C sed "s/'/''/g")
 
   sqlite3 -separator $'\t' :memory: "
     WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
@@ -57,5 +57,5 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     WHERE json_extract(r.value, '\$.project') IN ($PROJECT_SQL_IN)
       AND json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL'
     ORDER BY team, name;
-  " | tr -d '\r'
+  " | LC_ALL=C tr -d '\r'
 done

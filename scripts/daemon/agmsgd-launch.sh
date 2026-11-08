@@ -16,13 +16,13 @@
 # change without install.sh's own extraction changing with it.
 set -euo pipefail
 
-BOOTSTRAP_VERSION=2
+BOOTSTRAP_VERSION=3
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INSTALL_DB="$SKILL_DIR/run/install.db"
 MANIFEST="$SKILL_DIR/run/install-manifest.json"
-LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
+LOCK_DB="$SKILL_DIR/.install-op/lock.db"
 
 # Records a start attempt without claiming ownership. Best-effort: if the
 # reason cannot be stored in install.db, it still reaches stderr.
@@ -30,13 +30,13 @@ _agmsgd_launch_record_attempt() {
   local reason="$1"
   if [ -f "$INSTALL_DB" ]; then
     sqlite3 "$INSTALL_DB" \
-      "INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), '$(printf '%s' "$reason" | sed "s/'/''/g")', $$);" \
+      "INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), '$(printf '%s' "$reason" | LC_ALL=C sed "s/'/''/g")', $$);" \
       2>/dev/null || true
   fi
   echo "agmsgd-launch: $reason" >&2
 }
 
-# Non-blocking probe of run/install-op.lock.db's BEGIN EXCLUSIVE (PR 2) --
+# Non-blocking probe of .install-op/lock.db's BEGIN EXCLUSIVE (PR 2) --
 # an empty file this process never writes to, only locks against, exactly
 # like lifecycle.mjs's own Node-side probe (kept in sync with it
 # deliberately: same busy_timeout=0-then-BEGIN-EXCLUSIVE idiom, so bash and
@@ -62,7 +62,7 @@ _agmsgd_launch_check_bootstrap_version() {
     manifest_path="$(cygpath -w "$manifest_path" 2>/dev/null || printf '%s' "$manifest_path")"
   fi
   recorded="$(sqlite3 :memory: "
-    WITH raw(json) AS (SELECT CAST(readfile('$(printf '%s' "$manifest_path" | sed "s/'/''/g")') AS TEXT))
+    WITH raw(json) AS (SELECT CAST(readfile('$(printf '%s' "$manifest_path" | LC_ALL=C sed "s/'/''/g")') AS TEXT))
     SELECT json_extract(json, '\$.bootstrap_version') FROM raw;
   " 2>/dev/null)"
   # Windows' sqlite3.exe ends its output \r\n, not \n (scripts/lib/storage.sh's

@@ -360,7 +360,7 @@ for team in "${TEAM_LIST[@]}"; do
     # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
-    _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
+    _arr="[$(printf '%s' "$UNREAD_JSONL" | LC_ALL=C paste -sd, -)]"
     # #777: this team's unread backlog grows with every message sent to it, so
     # interpolating it into ONE argv element eventually exceeds the OS's
     # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller still
@@ -394,7 +394,7 @@ for team in "${TEAM_LIST[@]}"; do
     *)     LOOP_RC=$_rc; LOOP_FAILED_TEAM="$team"; break ;;
   esac
 
-  COUNT=$(printf '%s\n' "$RESULT" | grep -c . || true)
+  COUNT=$(printf '%s\n' "$RESULT" | LC_ALL=C grep -c . || true)
   OUTPUT+="$COUNT new message(s) in $team:"$'\n'
   IDS=()
   while IFS=$'\x1f' read -r from body ts id; do
@@ -462,7 +462,7 @@ if [ -n "$OUTPUT" ]; then
     OUTPUT+="agmsg: teams after it were not checked; their messages stay unread and will be offered again."$'\n'
   fi
   # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
-  ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
+  ESCAPED=$(printf '%s' "$OUTPUT" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | LC_ALL=C awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
   if [ "$EVENT" = "PostToolUse" ]; then
     # Mid-turn delivery (#1003). The shape is data, from the manifest — not a
     # type-name branch. codex-cli 0.149.1 requires a hookSpecificOutput object

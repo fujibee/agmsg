@@ -54,7 +54,7 @@ _compat_cim_cmdline() {
   [ -z "${_AGMSG_COMPAT_NO_CIM:-}" ] || return 1
   powershell.exe -NoProfile -Command \
     "(Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\").CommandLine" 2>/dev/null \
-    | tr -d '\r' | tr '\\' '/'
+    | LC_ALL=C tr -d '\r' | tr '\\' '/'
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
@@ -182,7 +182,7 @@ compat_uuidgen() {
       substr('89ab', abs(random()) % 4 + 1, 1) ||
       substr(hex(randomblob(2)),2) || '-' ||
       hex(randomblob(6)));"
-  fi | tr -d '\r'
+  fi | LC_ALL=C tr -d '\r'
 }
 
 # Generate a UUIDv7: 48-bit millisecond timestamp, version 7, RFC 4122

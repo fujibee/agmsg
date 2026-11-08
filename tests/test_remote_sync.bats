@@ -113,10 +113,11 @@ prepare_push() {
   export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
   storage_send demo alice bob "first ok" >/dev/null
   storage_send demo alice bob "result=$(printf '\xe3\x81')" >/dev/null
+  storage_send demo alice bob "result=$(printf '\x80\x82')" >/dev/null
   storage_send demo alice bob "last ok" >/dev/null
   run prepare_push
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | jq -s '[.[] | select(.type=="sync_push_candidate")] | length')" -eq 3 ]
+  [ "$(printf '%s\n' "$output" | jq -s '[.[] | select(.type=="sync_push_candidate")] | length')" -eq 4 ]
 }
 
 @test "sync contract: a crash after sealing publishes neither wire nor envelope" {

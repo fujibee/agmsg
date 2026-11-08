@@ -36,7 +36,7 @@ agmsg_roster_has_journal() {
 # join.sh exited 1 in silence after creating the team (#669). The two names read
 # alike and do opposite things to a path, which is how the wrong one was picked.
 _agmsg_roster_sqlesc() {
-  printf '%s' "$1" | sed "s/'/''/g"
+  printf '%s' "$1" | LC_ALL=C sed "s/'/''/g"
 }
 
 _agmsg_roster_record() {
@@ -47,7 +47,7 @@ _agmsg_roster_record() {
     'member_id','$(_agmsg_roster_sqlesc "$member_id")',
     'name','$(_agmsg_roster_sqlesc "$name")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | tr -d '\r'
+  );" | LC_ALL=C tr -d '\r'
 }
 
 _agmsg_roster_rename_record() {
@@ -59,7 +59,7 @@ _agmsg_roster_rename_record() {
     'from','$(_agmsg_roster_sqlesc "$from")',
     'to','$(_agmsg_roster_sqlesc "$to")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | tr -d '\r'
+  );" | LC_ALL=C tr -d '\r'
 }
 
 _agmsg_key_rotated_record() {
@@ -71,7 +71,7 @@ _agmsg_key_rotated_record() {
     'key_id','$(_agmsg_roster_sqlesc "$key_id")',
     'fingerprint','$(_agmsg_roster_sqlesc "$fingerprint")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | tr -d '\r'
+  );" | LC_ALL=C tr -d '\r'
 }
 
 _agmsg_roster_append_record() {
@@ -133,7 +133,7 @@ agmsg_roster_name_owner() {
        WHERE json_extract(event,'\$.type') IN ('member_joined','member_renamed')
     )
     SELECT member_id FROM bindings
-     WHERE name='$name_sql' ORDER BY ord LIMIT 1;" 2>/dev/null | tr -d '\r'
+     WHERE name='$name_sql' ORDER BY ord LIMIT 1;" 2>/dev/null | LC_ALL=C tr -d '\r'
 }
 
 # The reverse of agmsg_roster_name_owner: the name a member_id answers to
@@ -175,7 +175,7 @@ agmsg_roster_owner_name() {
     )
     SELECT CASE type WHEN 'member_left' THEN NULL ELSE name END
       FROM bindings
-     WHERE member_id='$id_sql' ORDER BY ord DESC LIMIT 1;" 2>/dev/null | tr -d '\r'
+     WHERE member_id='$id_sql' ORDER BY ord DESC LIMIT 1;" 2>/dev/null | LC_ALL=C tr -d '\r'
 }
 
 # Start an id-bearing team journal from its current config. This is needed for
@@ -191,7 +191,7 @@ agmsg_roster_ensure() {
   config_sql="$(agmsg_sql_readfile_path "$config")"
   team_id="$(sqlite3 :memory: \
     "SELECT COALESCE(json_extract(CAST(readfile('$config_sql') AS TEXT), '\$.team_id'),'');" \
-    2>/dev/null | tr -d '\r')"
+    2>/dev/null | LC_ALL=C tr -d '\r')"
   [ -n "$team_id" ] || return 0
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   while IFS="$(printf '\t')" read -r name member_id; do
@@ -204,7 +204,7 @@ $(sqlite3 -separator "$(printf '\t')" :memory: "
   SELECT key, COALESCE(json_extract(value, '\$.member_id'),'')
     FROM json_each(json_extract(
       CAST(readfile('$config_sql') AS TEXT), '\$.agents'))
-   ORDER BY key;" 2>/dev/null | tr -d '\r')
+   ORDER BY key;" 2>/dev/null | LC_ALL=C tr -d '\r')
 EOF
   agmsg_write_atomic "$journal" "$lines"
 }
@@ -387,7 +387,7 @@ agmsg_roster_project_config() {
     SELECT json_set(CAST(readfile('$config_sql') AS TEXT),
                     '\$.agents',json(agents.value),
                     '\$.retired_members',json(retired.value))
-      FROM agents,retired;" 2>/dev/null | tr -d '\r')" || return 1
+      FROM agents,retired;" 2>/dev/null | LC_ALL=C tr -d '\r')" || return 1
   # Empty, after the precheck above already said both files open. Before #669
   # this line was a bare `return 1` and every way of arriving here looked the
   # same: join.sh printed "Created team:" and exited with nothing on stderr.

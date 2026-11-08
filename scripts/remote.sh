@@ -23,6 +23,7 @@ set -euo pipefail
 #   remote.sh status [<team>] [--json]
 #   remote.sh sync start <team>
 #   remote.sh sync restart <team>
+#   remote.sh sync stop <team>
 #   remote.sh reprocess <team>
 #   remote.sh disconnect <team>
 #   remote.sh forget [--yes] <team>
@@ -81,7 +82,7 @@ source "$SCRIPT_DIR/lib/down-notice.sh"
 TEAMS_DIR="$CONNECTION_ROOT/teams"
 CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
 
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+_agmsg_sqlesc() { printf %s "$1" | LC_ALL=C sed "s/'/''/g"; }
 
 # How many members this machine can actually name.
 #
@@ -92,7 +93,7 @@ _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 _remote_local_roster_count() {
   local cfg="$1" escaped
   [ -f "$cfg" ] || { echo 0; return; }
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   agmsg_sqlite_mem "SELECT COALESCE((SELECT count(*) FROM
     json_each(json_extract('$escaped', '\$.agents'))), 0);"
 }
@@ -117,7 +118,7 @@ _remote_sync_config_file() {
 _remote_read_config_field() {
   local cfg="$1" path="$2" escaped
   [ -f "$cfg" ] || { echo "null"; return; }
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   agmsg_sqlite_mem "SELECT json_extract('$escaped', '$path');"
 }
 
@@ -769,7 +770,7 @@ _remote_write_binding() {
   local resp_escaped cfg_escaped connected_at updated \
     server_instance_id remote_team_id remote_team_name protocol_version \
     current_binding_revision
-  resp_escaped="$(sed "s/'/''/g" "$resp_file")"
+  resp_escaped="$(LC_ALL=C sed "s/'/''/g" "$resp_file")"
   {
     IFS= read -r server_instance_id
     IFS= read -r remote_team_id
@@ -796,7 +797,7 @@ _remote_write_binding() {
       return 2
     fi
   fi
-  cfg_escaped="$(sed "s/'/''/g" "$cfg")"
+  cfg_escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
   # A write that points the team at a DIFFERENT server must not orphan the
   # binding it replaces (#849). The local sync rows and keys for the old server
   # survive this write untouched -- they are keyed on (server_instance_id,
@@ -808,7 +809,7 @@ _remote_write_binding() {
   local archived_doc
   archived_doc="$(_remote_archive_replaced_binding "$cfg_escaped" \
     "$server_instance_id" "$remote_team_id" "$protocol_version" "$connected_at")"
-  cfg_escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
+  cfg_escaped="$(printf '%s' "$archived_doc" | LC_ALL=C sed "s/'/''/g")"
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$cfg_escaped', '\$.remote_binding', json_object(
        'endpoint', '$(_agmsg_sqlesc "$endpoint")',
@@ -902,8 +903,8 @@ _remote_adopt_registration() {
     rm -f "$caps_file" "$members_file"; trap - EXIT INT TERM
     return 1
   fi
-  cfg_escaped="$(sed "s/'/''/g" "$cfg")"
-  members_escaped="$(sed "s/'/''/g" "$members_file")"
+  cfg_escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
+  members_escaped="$(LC_ALL=C sed "s/'/''/g" "$members_file")"
   local_ids="$(agmsg_sqlite_mem \
     "SELECT coalesce(group_concat(mid, ','), '') FROM
        (SELECT json_extract(value, '\$.member_id') AS mid
@@ -1004,7 +1005,7 @@ _remote_local_disconnect() {
     fi
   fi
   disconnected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   # <escaped> is spliced as a genuine SQL string literal, NOT bound via
   # `.param set` (same tokenizer caveat as `_remote_read_config_field` above).
   updated=$(agmsg_sqlite_mem \
@@ -1038,13 +1039,13 @@ _remote_local_disconnect() {
 # reason.
 _remote_json_field() {
   local doc="$1" path="$2" escaped
-  escaped=$(printf '%s' "$doc" | sed "s/'/''/g")
+  escaped=$(printf '%s' "$doc" | LC_ALL=C sed "s/'/''/g")
   agmsg_sqlite_mem "SELECT COALESCE(json_extract('$escaped', '$path'), '');"
 }
 
 _remote_json_array_length() {
   local doc="$1" path="$2" escaped
-  escaped=$(printf '%s' "$doc" | sed "s/'/''/g")
+  escaped=$(printf '%s' "$doc" | LC_ALL=C sed "s/'/''/g")
   agmsg_sqlite_mem "SELECT COALESCE(json_array_length(json_extract('$escaped', '$path')), 0);"
 }
 
@@ -1173,7 +1174,7 @@ _remote_resolve_team_id() {
   result="$(printf '%s\n' "$out" | grep '"team_lookup_result"' | tail -1)" || true
   [ -n "$result" ] || { echo "agmsg: the server did not answer the lookup for '$name'" >&2; return 1; }
 
-  doc="$(printf '%s' "$result" | sed "s/'/''/g")"
+  doc="$(printf '%s' "$result" | LC_ALL=C sed "s/'/''/g")"
   count="$(agmsg_sqlite_mem "SELECT json_array_length(json_extract('$doc', '\$.teams'));")"
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
 
@@ -1338,7 +1339,7 @@ cmd_pull() {
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
   local bind_at escaped caps_escaped updated archived_doc
   bind_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  escaped=$(sed "s/'/''/g" "$cfg")
+  escaped=$(LC_ALL=C sed "s/'/''/g" "$cfg")
   # This is the second wholesale writer of $.remote_binding (#849): a pull
   # into a team that already holds a binding to a DIFFERENT server would
   # otherwise replace it with no way back. Same archive primitive as
@@ -1346,8 +1347,8 @@ cmd_pull() {
   # writer boundary, not just on the connect path.
   archived_doc="$(_remote_archive_replaced_binding "$escaped" \
     "$pulled_sid" "$pulled_id" "$pulled_protocol" "$bind_at")"
-  escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
-  caps_escaped=$(printf '%s' "$pulled_caps" | sed "s/'/''/g")
+  escaped="$(printf '%s' "$archived_doc" | LC_ALL=C sed "s/'/''/g")"
+  caps_escaped=$(printf '%s' "$pulled_caps" | LC_ALL=C sed "s/'/''/g")
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$escaped', '\$.remote_binding', json_object(
        'endpoint', '$(_agmsg_sqlesc "$endpoint")',
@@ -1876,7 +1877,7 @@ _remote_last_fatal_message() {
     END { print fatal }
   ' "$log" 2>/dev/null)"
   [ -n "$line" ] || return 0
-  escaped=$(printf '%s' "$line" | sed "s/'/''/g")
+  escaped=$(printf '%s' "$line" | LC_ALL=C sed "s/'/''/g")
   # Folded to one line: the caller prints this as a single status row, and an
   # error message carrying a literal newline or other control character (a
   # stack-trace-shaped message, say) would otherwise break that (review,
@@ -2321,16 +2322,16 @@ _remote_mint_team_ids() {
   local team="$1" cfg="$2" cfg_json escaped names name mid
   agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
   cfg_json="$(cat "$cfg")"
-  escaped="$(printf '%s' "$cfg_json" | sed "s/'/''/g")"
+  escaped="$(printf '%s' "$cfg_json" | LC_ALL=C sed "s/'/''/g")"
   names="$(agmsg_sqlite_mem "SELECT key FROM json_each(json_extract('$escaped', '\$.agents'));")"
   cfg_json="$(agmsg_sqlite_mem "SELECT json_set('$escaped', '\$.team_id', '$(compat_uuid7)');")"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     mid="$(compat_uuid7)"
-    escaped="$(printf '%s' "$cfg_json" | sed "s/'/''/g")"
+    escaped="$(printf '%s' "$cfg_json" | LC_ALL=C sed "s/'/''/g")"
     # A quoted path key ("name") lets a member name carry characters a bare
     # path token could not; the whole statement is a single-quoted SQL literal.
-    cfg_json="$(agmsg_sqlite_mem "SELECT json_set('$escaped', '\$.agents.\"$(printf '%s' "$name" | sed "s/'/''/g")\".member_id', '$mid');")"
+    cfg_json="$(agmsg_sqlite_mem "SELECT json_set('$escaped', '\$.agents.\"$(printf '%s' "$name" | LC_ALL=C sed "s/'/''/g")\".member_id', '$mid');")"
   done <<EOF_MINT_NAMES
 $names
 EOF_MINT_NAMES
@@ -2340,7 +2341,7 @@ EOF_MINT_NAMES
 
 _remote_binding_allows_cipher() {
   local cfg="$1" cipher="$2" cfg_escaped
-  cfg_escaped="$(sed "s/'/''/g" "$cfg")"
+  cfg_escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
   [ "$(agmsg_sqlite_mem \
     "SELECT EXISTS(
        SELECT 1
@@ -2464,7 +2465,7 @@ cmd_connect() {
   # The body: the team's id and name, plus the roster from .agents — each
   # agent's key is its name and its minted member_id comes with it.
   local cfg_escaped body_file resp_file header_file http_code
-  cfg_escaped="$(sed "s/'/''/g" "$cfg")"
+  cfg_escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
   body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-body.XXXXXX")"
   resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-resp.XXXXXX")"
   header_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-hdr.XXXXXX")"
@@ -2672,7 +2673,7 @@ cmd_connect() {
 # function exists to classify, rather than answering false.
 _remote_config_shape_ok() {
   local content="$1" escaped top_type
-  escaped=$(printf '%s' "$content" | sed "s/'/''/g")
+  escaped=$(printf '%s' "$content" | LC_ALL=C sed "s/'/''/g")
   top_type=$(agmsg_sqlite_mem "SELECT CASE WHEN json_valid('$escaped') THEN json_type('$escaped') ELSE 'invalid' END;" 2>/dev/null || echo "")
   [ "$top_type" = "object" ]
 }
@@ -2858,9 +2859,9 @@ _remote_status_one() {
   while IFS= read -r prev_row; do
     [ -n "$prev_row" ] || continue
     prev_endpoint="$(agmsg_sqlite_mem \
-      "SELECT json_extract('$(printf '%s' "$prev_row" | sed "s/'/''/g")', '\$.e');")"
+      "SELECT json_extract('$(printf '%s' "$prev_row" | LC_ALL=C sed "s/'/''/g")', '\$.e');")"
     prev_replaced="$(agmsg_sqlite_mem \
-      "SELECT json_extract('$(printf '%s' "$prev_row" | sed "s/'/''/g")', '\$.a');")"
+      "SELECT json_extract('$(printf '%s' "$prev_row" | LC_ALL=C sed "s/'/''/g")', '\$.a');")"
     prev_endpoint="$(_remote_endpoint_display "$prev_endpoint")"
     prev_endpoint="${prev_endpoint//[[:cntrl:]]/}"
     prev_replaced="${prev_replaced//[[:cntrl:]]/}"
@@ -2869,7 +2870,7 @@ _remote_status_one() {
   done < <(agmsg_sqlite_mem \
     "SELECT json_object('e', json_extract(value, '\$.endpoint'),
                         'a', coalesce(json_extract(value, '\$.replaced_at'), 'an unrecorded time'))
-       FROM json_each(coalesce(json_extract('$(sed "s/'/''/g" "$cfg")', '\$.previous_bindings'), '[]'));")
+       FROM json_each(coalesce(json_extract('$(LC_ALL=C sed "s/'/''/g" "$cfg")', '\$.previous_bindings'), '[]'));")
   if [ "$prev_any" -eq 1 ]; then
     echo "		          to restore one, reconnect to its full endpoint — it is kept under previous_bindings in this team's config.json, and is not printed here because it can embed the access token"
   fi
@@ -3135,7 +3136,7 @@ _remote_quarantine_has_malformed() {
   fi
   count="$(agmsg_sqlite "$store_path" \
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_quarantine';" \
-    2>/dev/null | tr -d '\r')" || count=""
+    2>/dev/null | LC_ALL=C tr -d '\r')" || count=""
   case "$count" in
     1) ;;
     0) return 1 ;;
@@ -3144,10 +3145,10 @@ _remote_quarantine_has_malformed() {
       return 2
       ;;
   esac
-  team_lit="'$(printf '%s' "$team" | sed "s/'/''/g")'"
+  team_lit="'$(printf '%s' "$team" | LC_ALL=C sed "s/'/''/g")'"
   count="$(agmsg_sqlite "$store_path" \
     "SELECT COUNT(*) FROM sync_quarantine WHERE local_team=$team_lit AND status='malformed';" \
-    2>/dev/null | tr -d '\r')" || count=""
+    2>/dev/null | LC_ALL=C tr -d '\r')" || count=""
   case "$count" in
     ''|*[!0-9]*)
       echo "agmsg: cannot read quarantine state from local store '$store_path' for '$team'; $fix_hint" >&2
@@ -3482,12 +3483,40 @@ cmd_sync_restart() {
   cmd_sync_start "$team"
 }
 
+# Stops a running engine and leaves it stopped (an update that has to move files
+# the engine uses stops it, then `sync restart`s it). Nothing here is automatic:
+# it runs only when asked. A team with no engine running is already stopped.
+cmd_sync_stop() {
+  local team="${1:?Usage: remote.sh sync stop <team>}" systemd_state systemd_pid \
+    engine_state engine_pid
+  [ $# -eq 1 ] || { echo "Usage: remote.sh sync stop <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team'; stop the user unit instead of sync stop" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
+  if [ "$engine_state" = "running" ] && ! _remote_sync_engine_stop "$team"; then
+    echo "agmsg: sync engine pid $engine_pid for '$team' did not stop" >&2
+    agmsg_lock_release
+    return 1
+  fi
+  agmsg_lock_release
+  echo "Sync engine for '$team' is stopped."
+}
+
 cmd_sync() {
   local action="${1:-}"
   case "$action" in
     start) shift; cmd_sync_start "$@" ;;
     restart) shift; cmd_sync_restart "$@" ;;
-    *) echo "Usage: remote.sh sync start|restart <team>" >&2; exit 1 ;;
+    stop) shift; cmd_sync_stop "$@" ;;
+    *) echo "Usage: remote.sh sync start|restart|stop <team>" >&2; exit 1 ;;
   esac
 }
 
@@ -3600,7 +3629,7 @@ cmd_forget() {
   disconnected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
   binding_revision_before="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
   if [ -z "$binding_revision_before" ] || [ "$binding_revision_before" = "null" ]; then
-    escaped="$(sed "s/'/''/g" "$cfg")"
+    escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
     updated="$(agmsg_sqlite_mem \
       "SELECT json_set('$escaped', '\$.remote_binding.binding_revision', 1);")"
     agmsg_write_atomic "$cfg" "$updated"
@@ -3648,11 +3677,11 @@ cmd_forget() {
       legacy_dedupe=""
       if [ "$(agmsg_sqlite "$store_path" \
             "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='legacy_id';" \
-            2>/dev/null | tr -d '\r')" = "1" ]; then
+            2>/dev/null | LC_ALL=C tr -d '\r')" = "1" ]; then
         legacy_dedupe=" WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.legacy_id = m.id)"
       fi
       legacy_count="$(agmsg_sqlite "$store_path" \
-        "SELECT COUNT(*) FROM messages m$legacy_dedupe;" | tr -d '\r')" || {
+        "SELECT COUNT(*) FROM messages m$legacy_dedupe;" | LC_ALL=C tr -d '\r')" || {
         echo "agmsg: cannot count messages in team store '$store_path'; refusing to delete it" >&2
         exit 1
       }
@@ -3784,7 +3813,7 @@ _remote_snapshot_binding_for_update() {
   if [ -n "$endpoint" ] && [ "$endpoint" != "null" ]; then
     revision="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
     if [ -z "$revision" ] || [ "$revision" = "null" ]; then
-      escaped="$(sed "s/'/''/g" "$cfg")"
+      escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
       updated="$(agmsg_sqlite_mem \
         "SELECT json_set('$escaped', '\$.remote_binding.binding_revision', 1);")"
       agmsg_write_atomic "$cfg" "$updated"

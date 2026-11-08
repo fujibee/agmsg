@@ -88,7 +88,7 @@ trap 'rm -rf "$COV_DIR"' EXIT
 for cfg in "$SKILL_DIR"/teams/*/config.json; do
   [ -f "$cfg" ] || continue
   team="${cfg%/config.json}"; team="${team##*/}"
-  escaped="$(sed "s/'/''/g" "$cfg")"
+  escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
   # CAPTURED, not looped-over-directly: a query that fails outright must not
   # read as "this team has zero agents" (the same shape #1155 was BLOCKed on
   # in review -- an extraction failure silently becoming an empty result).

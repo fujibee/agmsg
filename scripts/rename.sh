@@ -94,7 +94,7 @@ agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
 # --- Update team config ---
 agmsg_roster_ensure "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
 agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
-CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
+CONFIG_ESCAPED=$(LC_ALL=C sed "s/'/''/g" "$TEAM_CONFIG")
 
 # Check old exists
 OLD_VAL=$(agmsg_sqlite_mem \
@@ -146,7 +146,7 @@ fi
 # the old name) so a name containing a single quote can't break the JSON path
 # expression the way `$.agents.$OLD_NAME` above requires it not to — from/to
 # are bound as ordinary SQL string values, never spliced into a path.
-UPDATED_ESCAPED=$(printf '%s' "$UPDATED" | sed "s/'/''/g")
+UPDATED_ESCAPED=$(printf '%s' "$UPDATED" | LC_ALL=C sed "s/'/''/g")
 UPDATED=$(agmsg_sqlite_mem \
   "SELECT json_set('$UPDATED_ESCAPED', '\$.renamed',
      json_insert(
@@ -171,17 +171,17 @@ if [ -f "$DB" ]; then
   OLD_LIT=$(agmsg_sqlesc "$OLD_NAME")
   NEW_LIT=$(agmsg_sqlesc "$NEW_NAME")
   RENAME_SQL=""
-  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events';" | tr -d '\r')" = 1 ]; then
+  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events';" | LC_ALL=C tr -d '\r')" = 1 ]; then
     RENAME_SQL="$RENAME_SQL
       UPDATE events SET from_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND from_agent='$OLD_LIT';
       UPDATE events SET to_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND to_agent='$OLD_LIT';
       UPDATE events SET agent='$NEW_LIT' WHERE type='message_read' AND team='$TEAM_LIT' AND agent='$OLD_LIT';"
   fi
-  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='read_cursors';" | tr -d '\r')" = 1 ]; then
+  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='read_cursors';" | LC_ALL=C tr -d '\r')" = 1 ]; then
     RENAME_SQL="$RENAME_SQL
       UPDATE read_cursors SET agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND agent='$OLD_LIT';"
   fi
-  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_read_members';" | tr -d '\r')" = 1 ]; then
+  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_read_members';" | LC_ALL=C tr -d '\r')" = 1 ]; then
     RENAME_SQL="$RENAME_SQL
       UPDATE sync_read_members SET agent='$NEW_LIT',
         name_mismatch=CASE WHEN remote_agent='$NEW_LIT' THEN 0 ELSE 1 END

@@ -88,7 +88,7 @@ agmsg_resolve_codex_thread() {
       [ -f "$f" ] || continue
       first=$(head -1 "$f" 2>/dev/null)
       case "$first" in *'"session_meta"'*) ;; *) continue ;; esac
-      esc=$(printf '%s' "$first" | sed "s/'/''/g")
+      esc=$(printf '%s' "$first" | LC_ALL=C sed "s/'/''/g")
       cwd=$(agmsg_sqlite_mem "SELECT COALESCE(json_extract('$esc','\$.payload.cwd'),'')" 2>/dev/null)
       cwd_phys=$(agmsg_canonical_path "$cwd")
       [ "$cwd_phys" = "$project_phys" ] || continue

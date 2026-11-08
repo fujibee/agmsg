@@ -554,15 +554,17 @@ _codex_proj() {
   export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
   bash "$SCRIPTS/send.sh" testteam alice bob "first ok"
   bash "$SCRIPTS/send.sh" testteam alice bob "result=$(printf '\xe3\x81')"
+  bash "$SCRIPTS/send.sh" testteam alice bob "result=$(printf '\x80\x82')"
   bash "$SCRIPTS/send.sh" testteam alice bob "last ok"
 
   run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
-  LC_ALL=C grep -qF "3 new message(s)" <<<"$output"
+  LC_ALL=C grep -qF "4 new message(s)" <<<"$output"
   LC_ALL=C grep -qF "first ok" <<<"$output"
   # The bad bytes themselves arrive unchanged (E3 81 right after "result="),
   # not dropped or replaced.
   LC_ALL=C grep -qF "result=$(printf '\xe3\x81')" <<<"$output"
+  LC_ALL=C grep -qF "result=$(printf '\x80\x82')" <<<"$output"
   LC_ALL=C grep -qF "last ok" <<<"$output"
   [ "$(unread_count bob)" -eq 0 ]
 }
@@ -571,6 +573,7 @@ _codex_proj() {
   export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
   bash "$SCRIPTS/send.sh" testteam alice bob "first ok"
   bash "$SCRIPTS/send.sh" testteam alice bob "result=$(printf '\xe3\x81')"
+  bash "$SCRIPTS/send.sh" testteam alice bob "result=$(printf '\x80\x82')"
   bash "$SCRIPTS/send.sh" testteam alice bob "last ok"
 
   run bash "$SCRIPTS/history.sh" testteam bob
@@ -579,5 +582,6 @@ _codex_proj() {
   # The bad bytes themselves arrive unchanged (E3 81 right after "result="),
   # not dropped or replaced.
   LC_ALL=C grep -qF "result=$(printf '\xe3\x81')" <<<"$output"
+  LC_ALL=C grep -qF "result=$(printf '\x80\x82')" <<<"$output"
   LC_ALL=C grep -qF "last ok" <<<"$output"
 }

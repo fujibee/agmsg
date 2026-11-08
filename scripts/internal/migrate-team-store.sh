@@ -98,8 +98,8 @@ has_table() { printf '%s\n' "$src_tables" | grep -qx "$1"; }
 EVENT_COLS=""
 if has_table events; then
   EVENT_COLS="$(agmsg_sqlite "$SHARED" "PRAGMA table_info(events);" \
-    | cut -d'|' -f2 | tr -d '\r' \
-    | sed 's/"/""/g; s/^/"/; s/$/"/' | paste -sd, -)"
+    | cut -d'|' -f2 | LC_ALL=C tr -d '\r' \
+    | sed 's/"/""/g; s/^/"/; s/$/"/' | LC_ALL=C paste -sd, -)"
   [ -n "$EVENT_COLS" ] || {
     echo "team store: could not read the events schema in the shared store" >&2
     exit 1

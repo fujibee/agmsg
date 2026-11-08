@@ -110,7 +110,7 @@ _agmsg_id_key_for() {   # <team> <agent>
   fi
   team_id="$(sqlite3 :memory: \
     "SELECT COALESCE(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.team_id'),'');" \
-    2>/dev/null | tr -d '\r')" || return 1
+    2>/dev/null | LC_ALL=C tr -d '\r')" || return 1
   [ -n "$team_id" ] || return 1
   if ! declare -F agmsg_roster_name_owner >/dev/null 2>&1; then
     # shellcheck disable=SC1091
@@ -142,7 +142,7 @@ _agmsg_team_name_for_id() {   # <team_id>
     [ -f "$config" ] || continue
     tid="$(sqlite3 :memory: \
       "SELECT COALESCE(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.team_id'),'');" \
-      2>/dev/null | tr -d '\r')" || continue
+      2>/dev/null | LC_ALL=C tr -d '\r')" || continue
     if [ -n "$tid" ] && [ "$tid" = "$want" ]; then
       d="${d%/}"
       printf '%s\n' "${d##*/}"

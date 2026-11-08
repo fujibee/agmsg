@@ -123,8 +123,8 @@ agmsg_daemon_seat_report() {
         fi
         case "$pid" in ''|*[!0-9]*) bridge=unknown ;; *)
           local registered_project=0 agent_match project_match
-          agent_match="$(printf '%s' "$agent" | sed "s/'/''/g")"
-          project_match="$(printf '%s' "$meta_project" | sed "s/'/''/g")"
+          agent_match="$(printf '%s' "$agent" | LC_ALL=C sed "s/'/''/g")"
+          project_match="$(printf '%s' "$meta_project" | LC_ALL=C sed "s/'/''/g")"
           registered_project="$(sqlite3 :memory: "SELECT count(*) FROM json_each(CAST(readfile('$cfg_sql') AS TEXT),'\$.agents') a, json_each(a.value,'\$.registrations') r WHERE a.key='$agent_match' AND json_extract(r.value,'\$.type')='codex' AND json_extract(r.value,'\$.project')='$project_match';" 2>/dev/null)" || registered_project=0
           if [ "$meta_pid" != "$pid" ] || [ "$meta_type" != codex ] || [ "$registered_project" = 0 ]; then
             bridge=unknown
@@ -140,11 +140,11 @@ agmsg_daemon_seat_report() {
       if [ "$record_type" != codex ] || [ -z "${AGMSG_ROLE_SESSION_UUID:-}" ] || [ -z "$record_home" ]; then
         record_status='no destination record; restart Codex and run actas again to record it'
       fi
-      key="$(printf '%s' "$team" | sed "s/'/''/g")"
+      key="$(printf '%s' "$team" | LC_ALL=C sed "s/'/''/g")"
       local agent_sql
-      agent_sql="$(printf '%s' "$agent" | sed "s/'/''/g")"
+      agent_sql="$(printf '%s' "$agent" | LC_ALL=C sed "s/'/''/g")"
       local thread_sql
-      thread_sql="$(printf '%s' "${AGMSG_ROLE_SESSION_UUID:-}" | sed "s/'/''/g")"
+      thread_sql="$(printf '%s' "${AGMSG_ROLE_SESSION_UUID:-}" | LC_ALL=C sed "s/'/''/g")"
       cached="$(_agmsg_daemon_seat_reason "[\"$team\",\"$agent\"]" "${AGMSG_ROLE_SESSION_UUID:-}")"
       pending="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT count(*) FROM beta_codex_queue WHERE seat=json_array('$key','$agent_sql') AND state='pending';" 2>/dev/null)" || pending=0
       # Ask for a refresh only on evidence about the current destination: the
@@ -156,7 +156,7 @@ agmsg_daemon_seat_report() {
       fi
       owner="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" owner)"
       updated="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" updated_at)"
-      updated="$(printf '%s' "$updated" | sed "s/'/''/g")"
+      updated="$(printf '%s' "$updated" | LC_ALL=C sed "s/'/''/g")"
       recent="$(sqlite3 :memory: "SELECT COALESCE(strftime('%s','$updated') >= strftime('%s','now','-1 day'),0);" 2>/dev/null)" || recent=0
       active=0
       chosen=""

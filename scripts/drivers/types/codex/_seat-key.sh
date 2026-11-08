@@ -112,7 +112,7 @@ _agmsg_codex_seat_witness() {   # <pid> -> "src<TAB>token" on stdout
   if _agmsg_codex_is_windows; then
     for bin in powershell.exe pwsh; do
       tok="$("$bin" -NoProfile -NonInteractive -Command \
-        "(Get-Process -Id $pid).StartTime.Ticks" 2>/dev/null | tr -d '\r' | head -n 1)"
+        "(Get-Process -Id $pid).StartTime.Ticks" 2>/dev/null | LC_ALL=C tr -d '\r' | head -n 1)"
       tok="${tok#"${tok%%[![:space:]]*}"}"
       tok="${tok%"${tok##*[![:space:]]}"}"
       case "$tok" in ''|*[!0-9]*) continue ;; esac

@@ -63,13 +63,13 @@ agmsg_daemon_read_state() {
       # own judgement (the one `agmsg daemon status` gives) through the node it
       # runs on, instead of repeating that evidence in shell.
       local node_path verdict
-      node_path="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null | tr -d '\r')" || node_path=""
+      node_path="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null | LC_ALL=C tr -d '\r')" || node_path=""
       if [ -z "$node_path" ] || [ ! -x "$node_path" ] || [ ! -f "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" ]; then
         AGMSGD_HEALTH=unchecked
         AGMSGD_REASON="the daemon's node cannot be run from here to check it"
         return 0
       fi
-      verdict="$("$node_path" "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" "$pid" "$boot" 2>/dev/null | tr -d '\r')" || verdict=""
+      verdict="$("$node_path" "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" "$pid" "$boot" 2>/dev/null | LC_ALL=C tr -d '\r')" || verdict=""
       case "$verdict" in
         alive) AGMSGD_HEALTH=ready; AGMSGD_REASON="" ;;
         dead) AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)" ;;

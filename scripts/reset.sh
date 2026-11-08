@@ -40,7 +40,7 @@ source "$SCRIPT_DIR/lib/role-session.sh"
 # concatenated into JSON paths below as `'$.agents.' || '<escaped>'` rather
 # than spliced into the path text, so a single quote can't break the
 # statement (#87 cluster).
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+_agmsg_sqlesc() { printf %s "$1" | LC_ALL=C sed "s/'/''/g"; }
 
 # Resolve the session's real project root (see #92) so a drop issued from a
 # subdir/worktree clears the registration on the project the session lives in.
@@ -100,7 +100,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   fi
   agmsg_roster_ensure "$TEAM_DIR" "$TEAM_CONFIG"
   agmsg_roster_project_config "$TEAM_DIR" "$TEAM_CONFIG"
-  CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
+  CONFIG_ESCAPED=$(LC_ALL=C sed "s/'/''/g" "$TEAM_CONFIG")
 
   # CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT
   # bound via `.param set`: the sqlite3 shell's dot-command tokenizer does
@@ -116,7 +116,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     continue
   fi
 
-  AGENT_ESCAPED=$(printf '%s' "$AGENT_JSON" | sed "s/'/''/g")
+  AGENT_ESCAPED=$(printf '%s' "$AGENT_JSON" | LC_ALL=C sed "s/'/''/g")
   NORMALIZED=$(agmsg_sqlite_mem "
     WITH agent(a) AS (SELECT '$AGENT_ESCAPED')
     SELECT CASE
@@ -131,7 +131,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     END
     FROM agent;
   ")
-  NORMALIZED_ESCAPED=$(printf '%s' "$NORMALIZED" | sed "s/'/''/g")
+  NORMALIZED_ESCAPED=$(printf '%s' "$NORMALIZED" | LC_ALL=C sed "s/'/''/g")
 
   MATCH_COUNT=$(agmsg_sqlite_mem "
     SELECT count(*)
@@ -158,7 +158,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
       ), '[]'))
     );
   ")
-  FILTERED_ESCAPED=$(printf '%s' "$FILTERED" | sed "s/'/''/g")
+  FILTERED_ESCAPED=$(printf '%s' "$FILTERED" | LC_ALL=C sed "s/'/''/g")
   REMAINING=$(agmsg_sqlite_mem "
     SELECT json_array_length(json_extract('$FILTERED_ESCAPED', '\$.registrations'));
   ")
@@ -173,7 +173,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
 
   AGENT_COUNT=$(agmsg_sqlite_mem "
     SELECT count(*)
-    FROM json_each(json_extract('$(printf '%s' "$UPDATED" | sed "s/'/''/g")', '\$.agents'));
+    FROM json_each(json_extract('$(printf '%s' "$UPDATED" | LC_ALL=C sed "s/'/''/g")', '\$.agents'));
   ")
 
   if [ "$REMAINING" -eq 0 ] && agmsg_roster_has_journal "$TEAM_DIR"; then
