@@ -77,6 +77,17 @@ if ! declare -F compat_uuid7 >/dev/null 2>&1; then
   fi
 fi
 
+# The CR-strip decision and agmsg_sqlite_mem live in their own file so the small
+# libraries that read a config through sqlite3 can use them without the storage
+# facade.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  # shellcheck disable=SC1091
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sqlite-crlf.sh"
+elif [ -n "${SKILL_DIR:-}" ]; then
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/sqlite-crlf.sh"
+fi
+
 # Echo the directory that holds (or will hold) the message store.
 #
 # Memoized for the life of the process (_AGMSG_STORAGE_DIR_CACHE): every
@@ -321,22 +332,6 @@ agmsg_pair_team() {
 # raw bytes. Older sqlite3 (< 3.50) doesn't know the option (and emits raw bytes
 # anyway), so probe once and only pass the flag when the build accepts it.
 _AGMSG_ESCAPE_FLAG=
-# Does this machine's sqlite3 end rows with \r\n? Only Windows' sqlite3.exe does
-# (measured, see agmsg_sqlite below); on macOS and Linux the CR strip is a
-# process that does nothing. Decided once per shell from the platform bash
-# reports (no process; $OSTYPE is msys/cygwin under MSYS2/Git Bash), and kept in
-# a variable. AGMSG_SQLITE_CRLF=1|0 overrides it (tests, an odd build).
-_AGMSG_SQLITE_CRLF=
-_agmsg_sqlite_crlf() {
-  case "${AGMSG_SQLITE_CRLF:-}" in
-    0|1) _AGMSG_SQLITE_CRLF="$AGMSG_SQLITE_CRLF" ;;
-    *) case "${OSTYPE:-}" in
-         msys*|cygwin*|win32*) _AGMSG_SQLITE_CRLF=1 ;;
-         *) _AGMSG_SQLITE_CRLF=0 ;;
-       esac ;;
-  esac
-}
-
 _AGMSG_ESCAPE_PROBED=
 _agmsg_escape_flag() {
   if [ -z "$_AGMSG_ESCAPE_PROBED" ]; then
@@ -669,23 +664,6 @@ agmsg_runtime_lock_release() {
   agmsg_sqlite "$(_agmsg_runtime_db_path)" \
     "DELETE FROM locks WHERE resource = '$resource_sql' AND owner_pid = $2;" \
     >/dev/null 2>&1 || true
-}
-
-# In-memory sqlite for JSON parsing / scalar lookups whose stdout is captured in
-# a command substitution ($(...)). On Windows, sqlite3.exe writes stdout in text
-# mode and turns every \n into \r\n; command substitution strips the trailing \n
-# but keeps the \r, so a captured "1" becomes "1\r" and string / integer
-# comparisons silently fail — hooks don't get written, counts misparse, etc.
-# (#130). Strip the CR; it is never a meaningful byte in a JSON or scalar result.
-# No busy_timeout (a :memory: db has no file lock) and no escape flag (these
-# call sites parse JSON/scalars, not the control-byte message stream).
-agmsg_sqlite_mem() {
-  [ -n "$_AGMSG_SQLITE_CRLF" ] || _agmsg_sqlite_crlf
-  if [ "$_AGMSG_SQLITE_CRLF" = 1 ]; then
-    sqlite3 :memory: "$@" | LC_ALL=C tr -d '\r'
-  else
-    sqlite3 :memory: "$@"
-  fi
 }
 
 # agmsg_sql_readfile_path lives in lib/sqlpath.sh — one definition, so the rule

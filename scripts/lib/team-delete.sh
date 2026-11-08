@@ -5,6 +5,13 @@
 # Requires: SKILL_DIR set; storage.sh, sqlpath.sh, roster-journal.sh,
 # actas-lock.sh and role-session.sh already sourced by the caller.
 
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 [ -n "${_AGMSG_TEAM_DELETE_SH:-}" ] && return 0
 _AGMSG_TEAM_DELETE_SH=1
 
@@ -23,9 +30,9 @@ _AGMSG_TEAM_SCOPED_TABLES="events read_cursors sync_bindings sync_messages sync_
 _agmsg_team_delete_all_names() {
   local team_dir="$1" config="$2" names="" journal jsql journal_names
   if [ -f "$config" ]; then
-    names="$(sqlite3 :memory: \
+    names="$(agmsg_sqlite_mem \
       "SELECT key FROM json_each(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.agents'));" \
-      2>/dev/null | LC_ALL=C tr -d '\r')"
+      2>/dev/null)"
   fi
   journal="$(agmsg_roster_journal_path "$team_dir")"
   if [ -f "$journal" ]; then

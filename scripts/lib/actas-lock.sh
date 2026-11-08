@@ -24,6 +24,13 @@
 # Required caller-set variable:
 #   SKILL_DIR — agmsg skill root.
 
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 : "${SKILL_DIR:?actas-lock.sh requires SKILL_DIR}"
 
 # shellcheck disable=SC1091
@@ -108,9 +115,9 @@ _agmsg_id_key_for() {   # <team> <agent>
     # shellcheck disable=SC1091
     source "$SKILL_DIR/scripts/lib/sqlpath.sh"
   fi
-  team_id="$(sqlite3 :memory: \
+  team_id="$(agmsg_sqlite_mem \
     "SELECT COALESCE(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.team_id'),'');" \
-    2>/dev/null | LC_ALL=C tr -d '\r')" || return 1
+    2>/dev/null)" || return 1
   [ -n "$team_id" ] || return 1
   if ! declare -F agmsg_roster_name_owner >/dev/null 2>&1; then
     # shellcheck disable=SC1091
@@ -140,9 +147,9 @@ _agmsg_team_name_for_id() {   # <team_id>
     [ -d "$d" ] || continue
     config="${d}config.json"
     [ -f "$config" ] || continue
-    tid="$(sqlite3 :memory: \
+    tid="$(agmsg_sqlite_mem \
       "SELECT COALESCE(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.team_id'),'');" \
-      2>/dev/null | LC_ALL=C tr -d '\r')" || continue
+      2>/dev/null)" || continue
     if [ -n "$tid" ] && [ "$tid" = "$want" ]; then
       d="${d%/}"
       printf '%s\n' "${d##*/}"

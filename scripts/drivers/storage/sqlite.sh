@@ -137,7 +137,11 @@ storage_init() {
   # observation failure must not skip the schema.
   if [ -f "$db" ]; then
     local schema_rev
-    schema_rev="$(agmsg_sqlite "$db" "PRAGMA user_version;" 2>/dev/null | tr -d '[:space:]')" || schema_rev=""
+    # The digits of the answer with any whitespace (a CR on Windows included)
+    # taken out by expansion, not by a tr process; a failed read still falls
+    # through to the full init.
+    schema_rev="$(agmsg_sqlite "$db" "PRAGMA user_version;" 2>/dev/null)" || schema_rev=""
+    schema_rev="${schema_rev//[[:space:]]/}"
     if [ "$schema_rev" = "$_AGMSG_STORAGE_SCHEMA_REV" ]; then
       echo ok
       return 0
@@ -162,7 +166,8 @@ storage_init() {
   # (review finding). Only a store that is actually in WAL proceeds to the
   # schema transaction and can be stamped.
   local journal_mode
-  journal_mode="$(agmsg_sqlite "$db" "PRAGMA journal_mode=WAL;" 2>/dev/null | tr -d '[:space:]')" || journal_mode=""
+  journal_mode="$(agmsg_sqlite "$db" "PRAGMA journal_mode=WAL;" 2>/dev/null)" || journal_mode=""
+  journal_mode="${journal_mode//[[:space:]]/}"
   if [ "$journal_mode" != wal ]; then
     echo runtime_error
     return 13

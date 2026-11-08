@@ -6,6 +6,13 @@
 # shape; registrations inside the cache remain machine-local and are never
 # journaled.
 
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 [ -n "${_AGMSG_ROSTER_JOURNAL_SH:-}" ] && return 0
 _AGMSG_ROSTER_JOURNAL_SH=1
 
@@ -41,37 +48,37 @@ _agmsg_roster_sqlesc() {
 
 _agmsg_roster_record() {
   local type="$1" member_id="$2" name="$3" at="$4"
-  sqlite3 :memory: "SELECT json_object(
+  agmsg_sqlite_mem "SELECT json_object(
     'type','$(_agmsg_roster_sqlesc "$type")',
     'id','$(compat_uuid7)',
     'member_id','$(_agmsg_roster_sqlesc "$member_id")',
     'name','$(_agmsg_roster_sqlesc "$name")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | LC_ALL=C tr -d '\r'
+  );"
 }
 
 _agmsg_roster_rename_record() {
   local member_id="$1" from="$2" to="$3" at="$4"
-  sqlite3 :memory: "SELECT json_object(
+  agmsg_sqlite_mem "SELECT json_object(
     'type','member_renamed',
     'id','$(compat_uuid7)',
     'member_id','$(_agmsg_roster_sqlesc "$member_id")',
     'from','$(_agmsg_roster_sqlesc "$from")',
     'to','$(_agmsg_roster_sqlesc "$to")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | LC_ALL=C tr -d '\r'
+  );"
 }
 
 _agmsg_key_rotated_record() {
   local epoch="$1" key_id="$2" fingerprint="$3" at="$4"
-  sqlite3 :memory: "SELECT json_object(
+  agmsg_sqlite_mem "SELECT json_object(
     'type','key_rotated',
     'id','$(compat_uuid7)',
     'epoch','$(_agmsg_roster_sqlesc "$epoch")',
     'key_id','$(_agmsg_roster_sqlesc "$key_id")',
     'fingerprint','$(_agmsg_roster_sqlesc "$fingerprint")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | LC_ALL=C tr -d '\r'
+  );"
 }
 
 _agmsg_roster_append_record() {
@@ -189,9 +196,9 @@ agmsg_roster_ensure() {
   [ -f "$journal" ] && return 0
   [ -f "$config" ] || return 0
   config_sql="$(agmsg_sql_readfile_path "$config")"
-  team_id="$(sqlite3 :memory: \
+  team_id="$(agmsg_sqlite_mem \
     "SELECT COALESCE(json_extract(CAST(readfile('$config_sql') AS TEXT), '\$.team_id'),'');" \
-    2>/dev/null | LC_ALL=C tr -d '\r')"
+    2>/dev/null)"
   [ -n "$team_id" ] || return 0
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   while IFS="$(printf '\t')" read -r name member_id; do

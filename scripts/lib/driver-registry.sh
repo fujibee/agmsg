@@ -26,6 +26,13 @@
 # Safe under `set -u`: every env read is guarded.
 
 # Resolve THIS lib's dir at source time (robust to later subshell/relative cwd).
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 _AGMSG_DRIVER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 
 if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
@@ -133,9 +140,9 @@ agmsg_driver_for_team() {
   [ -f "$cfg" ] || { printf '%s\n' "$default"; return 0; }
   # readfile() rather than a shell read: a config may contain any UTF-8, and
   # this mirrors how the rest of the tree reads these files.
-  name="$(sqlite3 :memory: \
+  name="$(agmsg_sqlite_mem \
     "SELECT COALESCE(json_extract(readfile('$(agmsg_sql_readfile_path "$cfg")'), '\$.drivers.$axis'), '')" \
-    2>/dev/null | LC_ALL=C tr -d '\r')"
+    2>/dev/null)"
   case "$name" in ''|null) printf '%s\n' "$default" ;; *) printf '%s\n' "$name" ;; esac
 }
 
