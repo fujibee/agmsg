@@ -979,7 +979,8 @@ EOF
   # (dirname of "_" is ".") resolves to the CALLER's CWD -- not $fake, not
   # $REPO_ROOT by necessity, just whatever directory the call happens to run
   # from. Pinned here to a disposable fixture under $FAKE_HOME (own,
-  # per-test, torn down by setup_test_env/teardown_test_env whether this
+  # per-test, torn down by this file's own setup/teardown (FAKE_HOME is a
+  # fresh mktemp per test, removed in teardown) whether this
   # test passes or fails) rather than the real checkout (review: an earlier
   # version used $REPO_ROOT itself, outside any fixture, cleaned up only
   # after every assertion -- a real leak on an early failure, and not
