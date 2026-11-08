@@ -607,3 +607,40 @@ test("a body that is not text is held to the same blob and body limits", () => {
   assert.throws(() => sealEnvelope({ ...bodyBase, max_blob_bytes: 8_388_608,
     projection: bodyProjection({ body_hex: Buffer.alloc(1_000_001, 0xff).toString("hex") }) }));
 });
+
+test("a byte order mark, alone or leading, is a character of the body and survives", async () => {
+  for (const text of ["\ufeffhello", "\ufeff", "a\ufeffb"]) {
+    const asString = sealEnvelope({ ...bodyBase, projection: bodyProjection({ body: text }) });
+    const asHex = sealEnvelope({ ...bodyBase,
+      projection: bodyProjection({ body_hex: Buffer.from(text, "utf8").toString("hex") }) });
+    assert.deepEqual(innerOf(asHex), innerOf(asString));
+    assert.equal(JSON.parse(innerOf(asHex).toString("utf8")).body, text);
+    assert.equal((await openEnvelope({ envelope: asHex, max_blob_bytes: 1_048_576 })).body, text);
+  }
+});
+
+test("a body holding U+0000 stays `body` on the wire and reaches the driver as bytes", async () => {
+  const envelope = sealEnvelope({ ...bodyBase,
+    projection: bodyProjection({ body_hex: Buffer.from("a\u0000b", "utf8").toString("hex") }) });
+  assert.equal(JSON.parse(innerOf(envelope).toString("utf8")).body, "a\u0000b");
+  const opened = await openEnvelope({ envelope, max_blob_bytes: 1_048_576 });
+  assert.equal(opened.body, "");
+  assert.equal(opened.body_hex, "610062");
+});
+
+test("body_hex is a local form, not a wire form", async () => {
+  const forge = (inner) => ({ v: 1, cipher: "none", key_id: null,
+    blob: Buffer.from(JSON.stringify({ created_at: "2026-07-20T13:00:01.000000Z",
+      from_agent: "carol", to_agent: "bob", ...inner }), "utf8").toString("base64") });
+  // In place of a body it is no body at all.
+  await assert.rejects(openEnvelope({ envelope: forge({ body_hex: "ff" }),
+    max_blob_bytes: 1_048_576 }), (error) => error.state === "malformed");
+  // Beside a valid one it is an unknown field, ignored as every earlier reader did.
+  const opened = await openEnvelope({ envelope: forge({ body: "hello", body_hex: "ff" }),
+    max_blob_bytes: 1_048_576 });
+  assert.equal(opened.body, "hello");
+  assert.equal(opened.body_hex, undefined);
+  // And a sender cannot seal a body_b64 of its own: the helper writes that field.
+  assert.throws(() => sealEnvelope({ ...bodyBase,
+    projection: bodyProjection({ body_b64: Buffer.from([0xff]).toString("base64") }) }));
+});

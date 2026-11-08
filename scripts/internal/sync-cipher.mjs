@@ -88,14 +88,19 @@ function requireName(value, label) {
 // can only carry text, so a body that is valid UTF-8 travels as `body` (a string,
 // byte-identical to every release before this one) and a body that is not travels
 // as `body_b64`, its bytes in canonical base64. Exactly one of the two is ever
-// present, and a body that IS valid UTF-8 is refused as `body_b64`: one body has
-// one wire form, so the same message can never hash or compare two ways.
+// present on the wire, and a body that IS valid UTF-8 is refused as `body_b64`:
+// one body has one wire form, so the same message can never hash or compare two
+// ways.
 //
-// A sender that has the bytes rather than a string (the storage driver, which
-// reads them out of SQLite as hex) passes `body_hex`; it is an input form only and
-// never appears in the envelope.
-function messageBodyBytes(projection) {
-  const given = ["body", "body_hex", "body_b64"].filter((key) => projection[key] !== undefined);
+// `body_hex` is not a wire form. It is how the storage driver hands the seal
+// helper the bytes it read out of SQLite (send input), and how this module hands
+// the driver a body it must not frame as text (receive output). On the wire it is
+// an unknown field like any other: ignored beside a valid body, and never
+// accepted in place of one.
+const UTF8_KEEPING_BOM = { fatal: true, ignoreBOM: true };
+
+function bodyBytes(projection, forms, decode) {
+  const given = forms.filter((key) => projection[key] !== undefined);
   if (given.length !== 1) malformed("message projection is invalid");
   const [key] = given;
   const value = projection[key];
@@ -120,16 +125,19 @@ function messageBodyBytes(projection) {
 // knows about. Used both to build the canonical send-side bytes (below) and,
 // on receive, to tolerate fields a newer sender added (see parseCanonicalProjection):
 // unknown fields are never read here, so they are dropped rather than rejected.
-function validateMessageFields(projection) {
+// `forms` names the body fields this caller may read: the wire's own two on
+// receive, and the sender's own input (`body`, `body_hex`) when sealing.
+function validateMessageFields(projection, forms = ["body", "body_b64"]) {
   if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
       typeof projection.created_at !== "string" || !TIMESTAMP.test(projection.created_at) ||
       !validTimestamp(projection.created_at)) {
     malformed("message projection is invalid");
   }
-  const bytes = messageBodyBytes(projection);
+  const bytes = bodyBytes(projection, forms);
   if (bytes.length < 1 || bytes.length > 1_000_000) malformed("message projection is invalid");
+  // ignoreBOM: a leading U+FEFF is a character of the body, not a marker to strip.
   let text = null;
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { /* not text */ }
+  try { text = new TextDecoder("utf-8", UTF8_KEEPING_BOM).decode(bytes); } catch { /* not text */ }
   if (text !== null && projection.body_b64 !== undefined) malformed("body_b64 carries valid UTF-8");
   requireName(projection.from_agent, "from_agent");
   requireName(projection.to_agent, "to_agent");
@@ -142,7 +150,8 @@ function validateMessageFields(projection) {
 }
 
 function canonicalMessage(projection) {
-  return Buffer.from(JSON.stringify(validateMessageFields(projection)), "utf8");
+  return Buffer.from(JSON.stringify(
+    validateMessageFields(projection, ["body", "body_hex"])), "utf8");
 }
 
 function canonicalRosterMutation(projection) {
@@ -238,11 +247,15 @@ function parseCanonicalProjection(bytes) {
     malformed("message is not valid UTF-8 JSON");
   }
   if (value?.kind === undefined) {
-    // The driver stores bytes, not JSON: a body that is not text reaches it as
-    // `body_hex` (and an empty `body`), which it writes back verbatim.
+    // The driver frames a page with NUL separators and stores bytes, so a body
+    // it must not read as text reaches it as `body_hex` (and an empty `body`):
+    // one that is not UTF-8, and one that is but holds a U+0000.
     const { body_b64: wireBytes, ...fields } = validateMessageFields(value);
-    return wireBytes === undefined ? fields :
-      { ...fields, body: "", body_hex: Buffer.from(wireBytes, "base64").toString("hex") };
+    if (wireBytes !== undefined) {
+      return { ...fields, body: "", body_hex: Buffer.from(wireBytes, "base64").toString("hex") };
+    }
+    return fields.body.includes("\u0000") ?
+      { ...fields, body: "", body_hex: Buffer.from(fields.body, "utf8").toString("hex") } : fields;
   }
   canonicalRosterMutation(value);
   assertKnownFields(value, ROSTER_MUTATION_FIELDS[value.kind], "roster mutation projection");

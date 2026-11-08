@@ -1809,9 +1809,12 @@ bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per li
   [ "$b_hex" = "$a_hex" ]
 }
 
-@test "sync contract: every shape of broken UTF-8 survives, and a batch with one of them still sends the rest" {
+@test "sync contract: every shape of broken or awkward UTF-8 survives, and a batch with one of them still sends the rest" {
   local db a_hex b_hex i
-  local -a shapes=(ff 80 c080 eda080 f4908080 e38182e3 6162ff6364)
+  # The last three are valid UTF-8 that a text pipeline still mishandles: a
+  # byte order mark (stripped by a default decoder), a mark alone, and a NUL
+  # (the apply frame's own separator).
+  local -a shapes=(ff 80 c080 eda080 f4908080 e38182e3 6162ff6364 efbbbf68656c6c6f efbbbf 610062)
   for i in "${!shapes[@]}"; do storage_send demo alice bob "slot-$i" >/dev/null; done
   storage_send demo alice bob "last, plain" >/dev/null
   db="$(_sqlite_db demo)"
