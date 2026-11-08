@@ -512,31 +512,45 @@ fn pane_error_line(addon: &str, message: &str, stack: Option<&str>) -> String {
 #[tauri::command]
 pub fn addon_pane_error(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, message: String, stack: Option<String>) {
     static COUNTS: std::sync::Mutex<Vec<((PaneId, u64), u32)>> = std::sync::Mutex::new(Vec::new());
-    let addon = {
+    let (addon, current) = {
         let reg = host.panes.registry.lock().unwrap();
-        if reg.authorize(id, generation, Need::Current).is_err() {
-            COUNTS.lock().unwrap().retain(|((p, _), _)| *p != id); // the pane is gone or reloaded: its count goes with it
-            return;
-        }
-        match reg.addon_of(id) {
-            Some(a) => a,
-            None => return,
-        }
+        (reg.addon_of(id), reg.generation(id))
     };
-    {
-        let mut counts = COUNTS.lock().unwrap();
-        counts.retain(|((p, g), _)| *p != id || *g == generation);
-        match counts.iter_mut().find(|(k, _)| *k == (id, generation)) {
-            Some((_, n)) => {
-                if *n >= MAX_PANE_ERRORS {
-                    return;
-                }
-                *n += 1;
-            }
-            None => counts.push(((id, generation), 1)),
-        }
+    if !admit_pane_error(&mut COUNTS.lock().unwrap(), id, generation, current) {
+        return;
     }
-    eprintln!("{}", pane_error_line(&addon, &message, stack.as_deref()));
+    if let Some(addon) = addon {
+        eprintln!("{}", pane_error_line(&addon, &message, stack.as_deref()));
+    }
+}
+
+/// Whether one more error report from `(id, generation)` is logged. `current` is the pane's current generation, or
+/// None when the pane is gone. A report from an older generation is refused and changes nothing but its own entry:
+/// a late report from an old port must not give the new load its budget back. Entries of older generations of the
+/// pane are dropped once a newer one reports; all of a pane's entries go when the pane is gone.
+fn admit_pane_error(counts: &mut Vec<((PaneId, u64), u32)>, id: PaneId, generation: u64, current: Option<u64>) -> bool {
+    match current {
+        None => {
+            counts.retain(|((p, _), _)| *p != id);
+            return false;
+        }
+        Some(g) if g != generation || generation == 0 => {
+            counts.retain(|(k, _)| *k != (id, generation));
+            return false;
+        }
+        Some(_) => {}
+    }
+    counts.retain(|((p, g), _)| *p != id || *g == generation);
+    match counts.iter_mut().find(|(k, _)| *k == (id, generation)) {
+        Some((_, n)) => {
+            if *n >= MAX_PANE_ERRORS {
+                return false;
+            }
+            *n += 1;
+        }
+        None => counts.push(((id, generation), 1)),
+    }
+    true
 }
 
 /// The watcher's `Message` has exactly the feed fields; keep only those.
@@ -565,6 +579,29 @@ mod tests {
 
     fn args(path: Option<&str>, url: Option<&str>, base: Option<&str>) -> OpenArgs {
         OpenArgs { path: path.map(Into::into), url: url.map(Into::into), base: base.map(Into::into) }
+    }
+
+    #[test]
+    fn pane_error_budget_is_per_generation_and_a_stale_report_cannot_refill_it() {
+        let mut counts = Vec::new();
+        // pane 7 reloaded to generation 2 and used its whole budget
+        for _ in 0..MAX_PANE_ERRORS {
+            assert!(admit_pane_error(&mut counts, 7, 2, Some(2)));
+        }
+        assert!(!admit_pane_error(&mut counts, 7, 2, Some(2)));
+        // a late report from the old port (generation 1) is refused and must not clear generation 2's count
+        assert!(!admit_pane_error(&mut counts, 7, 1, Some(2)));
+        assert!(!admit_pane_error(&mut counts, 7, 2, Some(2)));
+        // another pane has its own budget
+        assert!(admit_pane_error(&mut counts, 8, 1, Some(1)));
+        // a reload starts a new budget and drops the old entry
+        assert!(admit_pane_error(&mut counts, 7, 3, Some(3)));
+        assert!(!counts.iter().any(|((p, g), _)| *p == 7 && *g == 2));
+        // generation 0 never counts; a pane that is gone loses all its entries
+        assert!(!admit_pane_error(&mut counts, 7, 0, Some(3)));
+        assert!(!admit_pane_error(&mut counts, 7, 3, None));
+        assert!(!counts.iter().any(|((p, _), _)| *p == 7));
+        assert!(counts.iter().any(|((p, _), _)| *p == 8));
     }
 
     #[test]
