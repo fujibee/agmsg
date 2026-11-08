@@ -973,6 +973,19 @@ EOF
   ( . "$fake/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
   [ -f "$fake/run/down/agmsgd.json" ]
   fns="$(_install_fns)"
+  # The wrong root THIS SPECIFIC invocation shape resolves to (measured):
+  # `bash -c '...' _ "$fns" "$fake"` makes $0 literally "_", so
+  # install.sh's own top-level `$SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"`
+  # (dirname of "_" is ".") resolves to this shell's CWD at call time --
+  # $REPO_ROOT, since that is where bats itself runs from. A sentinel seeded
+  # there, sourced first (review): down_notice_clear cannot CREATE a file,
+  # so an absent-elsewhere check alone (the only assertion the first version
+  # of this test had) proves nothing about whether the wrong root was
+  # written to -- a present sentinel that survives proves it was not.
+  local wrong_root_notice="$REPO_ROOT/run/down/agmsgd.json"
+  [ ! -e "$wrong_root_notice" ] || skip "a real $wrong_root_notice already exists outside this test's fixtures; refusing to touch it"
+  mkdir -p "$REPO_ROOT/run/down"
+  printf '{"component":"agmsgd","state":"down","reason":"unrelated","recovery":"unrelated","since":"1970-01-01T00:00:00Z","updated":"1970-01-01T00:00:00Z"}\n' > "$wrong_root_notice"
   # A stub daemon.sh that always reports a successful start, unconditionally
   # -- real Node resolution (nvm, AGMSG_CODEX_NODE, ...) plays no part here,
   # so this result cannot be an accident of what happens to be on this
@@ -985,11 +998,13 @@ EOF
   chmod +x "$fake/scripts/daemon.sh"
   run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
   [ "$status" -eq 0 ]
-  # The bug: the sourcing root's OWN run/down/agmsgd.json (never created by
-  # anything in this test) would exist here if the clear silently hit the
-  # wrong root instead of $fake's.
-  [ ! -f "$BATS_TEST_TMPDIR/run/down/agmsgd.json" ]
   [ ! -f "$fake/run/down/agmsgd.json" ]
+  # The real wrong-root sentinel must survive, untouched -- the positive
+  # half of the claim an absence-only check could never make.
+  [ -f "$wrong_root_notice" ]
+  grep -q unrelated "$wrong_root_notice"
+  rm -f "$wrong_root_notice"
+  rmdir "$REPO_ROOT/run/down" "$REPO_ROOT/run" 2>/dev/null || true
 }
 
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
