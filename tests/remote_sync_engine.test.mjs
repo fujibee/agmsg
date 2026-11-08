@@ -5704,6 +5704,32 @@ test("the restart helper never starts an engine when the install lock is still h
   assert.equal(record.recovery, `bash ${remote} sync start demo`);
 });
 
+test("the recovery command the restart helper records runs as written, whatever characters the install path holds", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "agmsg-restart-recovery-"));
+  t.after(async () => { await rm(base, { recursive: true, force: true }); });
+  const root = join(base, "sync owner's \"review\" x");
+  await mkdir(join(root, "run"), { recursive: true });
+  await mkdir(join(root, "scripts", "lib"), { recursive: true });
+  const noticeLib = join(root, "scripts", "lib", "down-notice.sh");
+  await writeFile(noticeLib, readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "down-notice.sh")));
+  const argvLog = join(base, "argv");
+  const remote = join(root, "scripts", "remote.sh");
+  // A start that never succeeds: every attempt is used and the record is written.
+  writeFileSync(remote, "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+  const result = spawnSync("bash", standDownRestartArgs("demo", join(root, "scripts"), [0]),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, timeout: 30000 });
+  assert.equal(result.status, 1);
+  // Read the way the status and doctor readers decode it, then run it: it has to
+  // reach the owning script with its own arguments.
+  const listed = spawnSync("bash", ["-c", `. ${shellQuote(noticeLib)}; AGMSG_DOWN_NOTICE_ROOT=${shellQuote(root)} down_notice_list`], { encoding: "utf8" });
+  const recovery = listed.stdout.trim().split("\t")[4];
+  assert.ok(recovery.includes("sync start"), listed.stdout);
+  writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${shellQuote(argvLog)}\n`, { mode: 0o755 });
+  const ran = spawnSync("bash", ["-c", recovery], { encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(readFileSync(argvLog, "utf8"), "sync\nstart\ndemo\n");
+});
+
 test("a roster state file the driver set aside is reported in the engine log, not in the result", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-roster-reset-log-"));
   const previous = { driver: process.env.AGMSG_SYNC_ROSTER_DRIVER, log: process.env.AGMSG_SYNC_LOG_FILE };

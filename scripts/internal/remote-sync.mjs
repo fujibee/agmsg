@@ -3788,7 +3788,8 @@ export { collectInstallBaseline, installChangedAgainst };
 // clears it again if an engine does come up. An
 // engine it starts too early stands down again and asks again. The attempts are
 // bounded: the waits add up to 1110 seconds, plus at most 120 seconds per attempt
-// waiting for the install lock (600 seconds in all, about 28.5 minutes), after which a
+// waiting for the install lock (600 seconds in all, about 28.5 minutes of sleeping; the lock probes and the
+// start attempts add their own time), after which a
 // person has to run `remote.sh sync start`, as the stand-down event says.
 const STAND_DOWN_RESTART_DELAYS_SECONDS = [30, 60, 120, 300, 600];
 const STAND_DOWN_LOCK_POLLS = 60;
@@ -3800,7 +3801,7 @@ const standDownRestartScript = (polls, interval) => [
   'lib="$(dirname "$remote")/lib/down-notice.sh"; key=""',
   '[ ! -f "$lib" ] || { . "$lib" 2>/dev/null && key="$(down_notice_key sync "$team" 2>/dev/null)"; }',
   'note_up() { [ -z "$key" ] || AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_clear "$key" >/dev/null 2>&1 || :; }',
-  'note_down() { [ -z "$key" ] || AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_set "$key" down "the sync engine for $team stood down for an update and could not be started again by itself (an install or update was still running, or the start failed)" "bash $remote sync start $team" >/dev/null 2>&1 || :; }',
+  'note_down() { [ -z "$key" ] || AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_set "$key" down "the sync engine for $team stood down for an update and could not be started again by itself (an install or update was still running, or the start failed)" "bash $(printf %q "$remote") sync start $(printf %q "$team")" >/dev/null 2>&1 || :; }',
   'for delay in "$@"; do',
   '  sleep "$delay"',
   '  lock="$root/.install-op/lock.db"; held=0',
