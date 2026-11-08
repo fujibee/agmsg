@@ -808,8 +808,16 @@ storage_sync_prepare_push() {
      WHERE e.type='message_sent' AND e.team='$tl' AND e.seq>b.push_cursor
        AND m.server_seq IS NULL
        AND ($allow_new=1 OR m.wire_id IS NOT NULL)"
-  if [ -z "$recheck_positions" ]; then
+  # The position lists grow with the number of bad rows, so a query that carries
+  # one goes over stdin (no command-line limit, #882); one that carries none keeps
+  # the command-line form it always had.
+  if [ -z "$skip_positions" ] && [ -z "$recheck_positions" ]; then
     rows=$(_sqlite_data "$team" "
+    SELECT $row_columns $row_source
+     ORDER BY e.seq LIMIT $limit;
+  ") || { _sqlite_sync_why; return 13; }
+  elif [ -z "$recheck_positions" ]; then
+    rows=$(_sqlite_data_stdin "$team" "
     SELECT $row_columns $row_source $skip_filter
      ORDER BY e.seq LIMIT $limit;
   ") || { _sqlite_sync_why; return 13; }
@@ -817,7 +825,7 @@ storage_sync_prepare_push() {
     # The engine asked for these positions to be looked at again, whatever the
     # page limit: they are added to the page (a row in both is one row, the
     # compound's UNION), so a retry examines every row it names.
-    rows=$(_sqlite_data "$team" "
+    rows=$(_sqlite_data_stdin "$team" "
     SELECT j FROM (
       SELECT s, j FROM (SELECT e.seq AS s, $row_columns AS j $row_source $skip_filter
                          ORDER BY e.seq LIMIT $limit)

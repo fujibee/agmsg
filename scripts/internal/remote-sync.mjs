@@ -293,10 +293,18 @@ function hostOf(endpoint) {
 // seen, one `sync.skip-cleared` when it stops being skipped; not once per cycle.
 // Position, id, direction and the driver's own fixed-text reason; never a body.
 const SKIP_RETRY_CYCLES = 20;
-const SKIP_EXCLUDE_MAX = 1000;
+// How many remembered rows one retry looks at again. A row can be a megabyte, so
+// the retry's cost is bounded; the retries ROTATE (each continues after the last
+// position the previous one examined) so every remembered row is eventually
+// looked at. The exclusion list has no bound: every known row stays out of
+// ordinary pages, or a pile of bad rows would fill the page again.
+const SKIP_RECHECK_MAX = 100;
 
 export function newSkipState() {
-  return { rows: new Map(), cycles: 0, dirty: true };
+  // `dirty`: the record file is out of date. `noticeDirty`: the SET of rows
+  // changed (one added, one cleared), which is all the notice's text depends on, so
+  // a count that only went up does not start a process.
+  return { rows: new Map(), cycles: 0, dirty: true, noticeDirty: true, recheckAfter: null };
 }
 
 function skippedPath(team) {
@@ -307,12 +315,24 @@ function skippedPath(team) {
 
 // What to leave out of this prepare, and whether this is the retry of everything.
 //
-// A retry names every remembered position (`recheck`) for the driver to look at
-// again whatever its page limit, and nothing is left out of that prepare.
+// A retry names the next window of remembered positions (`recheck`) for the
+// driver to look at again whatever its page limit, continuing after the last one
+// the previous retry examined and wrapping at the end. Every known position stays
+// in `positions` (out of the ordinary page) either way.
+const byPosition = (left, right) =>
+  left.length - right.length || (left < right ? -1 : left > right ? 1 : 0);
+
 export function skipPlan(skips) {
   const retrying = skips.rows.size > 0 && skips.cycles >= SKIP_RETRY_CYCLES;
-  const keys = [...skips.rows.keys()].slice(0, SKIP_EXCLUDE_MAX);
-  return { retrying, positions: retrying ? [] : keys, recheck: retrying ? keys : [] };
+  const keys = [...skips.rows.keys()].sort(byPosition);
+  let recheck = [];
+  if (retrying) {
+    const after = skips.recheckAfter;
+    const start = after === null ? 0 : keys.findIndex((key) => byPosition(key, after) > 0);
+    const from = start === -1 ? 0 : start;
+    recheck = [...keys.slice(from), ...keys.slice(0, from)].slice(0, SKIP_RECHECK_MAX);
+  }
+  return { retrying, positions: keys, recheck };
 }
 
 // Fold one prepare's `sync_skipped` records into the memory. Returns what changed.
@@ -347,10 +367,11 @@ export function noteSkips(skips, plan, reported, resolved = [], now = new Date()
       if (row && !seen.has(key)) { skips.rows.delete(key); cleared.push(row); }
     }
     skips.cycles = 0;
+    if (plan.recheck.length > 0) skips.recheckAfter = plan.recheck.at(-1);
   } else {
     skips.cycles += 1;
   }
-  if (added.length > 0 || cleared.length > 0) skips.dirty = true;
+  if (added.length > 0 || cleared.length > 0) { skips.dirty = true; skips.noticeDirty = true; }
   return { added, cleared };
 }
 
@@ -400,7 +421,10 @@ export async function recordSkips(team, skips, writeFileCall = writeFile, rmCall
         type: "sync_skipped_rows", updated_at: new Date().toISOString(),
         rows: [...skips.rows.values()] })}\n`);
     }
-    await noticeCall(team, skips, resolve(dirname(fileURLToPath(import.meta.url)), ".."));
+    if (skips.noticeDirty) {
+      await noticeCall(team, skips, resolve(dirname(fileURLToPath(import.meta.url)), ".."));
+      skips.noticeDirty = false;
+    }
     skips.dirty = false;
   } catch { /* best-effort: the next change tries again */ }
 }

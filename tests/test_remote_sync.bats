@@ -1971,3 +1971,26 @@ bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per li
   [ "$status" -ne 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 0 ]
 }
+
+@test "sync contract: more known bad rows than a page holds do not keep the good row behind them out" {
+  # 1100 rows the wire cannot carry, then one good row, a page of 100. Every known
+  # bad position is left out, however many there are, so the page reaches the
+  # good row; with a cap on the list the page fills with bad rows again.
+  local db out
+  storage_send demo alice bob "seed" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<1100)
+    INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
+    SELECT 'message_sent','bulk-'||i,'demo','bad/name','bob','x','2026-11-08T00:00:00Z' FROM c;
+    UPDATE events SET from_agent='bad/name' WHERE id='bulk-1' OR body='seed';"
+  storage_send demo alice bob "the good one" >/dev/null
+  local good bad_list
+  good=$(sqlite3 "$db" "SELECT seq FROM events WHERE body='the good one'")
+  bad_list=$(sqlite3 "$db" "SELECT json_group_array(seq) FROM events WHERE from_agent='bad/name'")
+  [ "$(printf '%s' "$bad_list" | jq 'length')" -gt 1100 ]
+  out=$(printf '%s\n' "{\"type\":\"sync_prepare\",\"envelope_v\":1,\"cipher\":\"none\",\"key_id\":null,\"max_blob_bytes\":1048576,\"allow_new\":true,\"skip_positions\":$bad_list}" \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = "$good" ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+}
