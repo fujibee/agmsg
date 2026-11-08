@@ -1,5 +1,6 @@
-// The UNIX control socket, narrowed to beta's own two
-// requests: `stop` and `status`. Beta has no seat registration, no notice
+// The UNIX control socket, narrowed to beta's own
+// requests: `stop`, `status` and `seats` (what each channel last observed
+// about its seats, which is kept in memory only). Beta has no seat registration, no notice
 // stream, no hook `turn` -- every connection is one-shot: connect, `hello`,
 // exactly one request, exactly one response, close.
 //
@@ -136,6 +137,8 @@ export function createControlServer(socketPath, handlers) {
             finish({ type: "stop_ok", ...(await handlers.onStop()) });
           } else if (msg?.type === "status") {
             finish({ type: "status", ...(await handlers.onStatus()) });
+          } else if (msg?.type === "seats" && handlers.onSeats) {
+            finish({ type: "seats", ...(await handlers.onSeats()) });
           } else {
             finish({ type: "error", reason: `unknown request type: ${msg?.type}` });
           }

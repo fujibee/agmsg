@@ -308,7 +308,7 @@ _fake_agmsgd() {   # <obey|hang>
     net.createServer((c) => { let b = "";
       c.on("data", (d) => { b += d; if (!b.includes("\"stop\"")) return;
         fs.appendFileSync(log, fs.readFileSync(marker, "utf8").includes("OLD-SCRIPT") ? "stop-before-swap\n" : "stop-after-swap\n");
-        if (mode === "obey") { const x = new DatabaseSync(db); x.exec("PRAGMA busy_timeout=5000; UPDATE daemon_owner SET state=\"none\", socket=NULL, executor_pid=NULL;"); x.close(); process.exit(0); }
+        if (mode === "obey") { const x = new DatabaseSync(db); x.exec("PRAGMA busy_timeout=5000"); x.prepare("UPDATE daemon_owner SET state=?, socket=NULL, executor_pid=NULL").run("none"); x.close(); process.exit(0); }
       });
     }).listen(sock, () => fs.writeFileSync(log + ".up", "1"));
   ' "$sock" "$db" "$1" "$SK/scripts/daemon.sh" "$FAKE_HOME/fake.log" &

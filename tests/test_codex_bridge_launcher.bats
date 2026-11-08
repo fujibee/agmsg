@@ -279,6 +279,203 @@ run_launcher() {
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
+@test "launcher: a bridge that keeps ending at once is given up on after the window, with one line and a down record" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=6 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  printf 'agmsg watch: not serving these pairs (held by another session, or unverified): team\talice\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q '"state":"down"' "$notice"
+  grep -q 'no longer being started' "$notice"
+  grep -q 'not serving these pairs' "$notice"
+  grep -q 'delivery.sh status codex' "$notice"
+  # The recovery field is the restart, never a command that only looks.
+  grep -q '"recovery":"restart this seat'"'"'s Codex session"' "$notice"
+  grep -q 'restart this seat' "$notice"
+  [ "$(grep -c 'not starting it again' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+  # The role's launcher ended on its own and nothing starts a bridge afterwards.
+  local launches; launches="$(grep -c . "$CAPTURE")"
+  sleep 4
+  [ "$(grep -c . "$CAPTURE")" -eq "$launches" ]
+  agmsg_stop_pid "$p"
+}
+
+@test "launcher: giving up names the last bridge message, not an older refusal, and does not blame another session" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  # An old refusal, then a newer different failure written by each bridge start.
+  printf 'agmsg watch: not serving these pairs (held by another session, or unverified): team\talice\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sed -i.bak 's|^exit 0$|echo "Error: connect ECONNREFUSED 127.0.0.1:9999" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'ECONNREFUSED 127.0.0.1:9999' "$notice"
+  refute grep -q 'another session' "$notice"
+  refute grep -q 'close the session' "$notice"
+  grep -q "restart this seat's Codex session" "$notice"
+  grep -q 'ECONNREFUSED' "$RUN_DIR/codex-bridge.team.alice.log"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: giving up looks past the bridge's closing line to the failure before it" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  # Production-shaped: the refusal arrives as a watch-once failure, then the
+  # bridge's closing line. An older different failure sits before them.
+  printf '[1] 2026-11-06T00:00:00.000Z codex-bridge: connect ECONNREFUSED 127.0.0.1:9999\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sed -i.bak 's|^exit 0$|printf "[2] 2026-11-06T00:01:00.000Z codex-bridge: watch-once failed (exit 1): agmsg watch: not serving these pairs (held by another session, or unverified): team\\talice\\n[2] 2026-11-06T00:01:01.000Z codex-bridge: stopping after 3 consecutive watch-once failure(s)\\n" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'not serving these pairs' "$notice"
+  grep -q 'close the session that holds this role' "$notice"
+  refute grep -q 'ECONNREFUSED' "$notice"
+  refute grep -q 'last bridge message: .*stopping after' "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: giving up on a non-refusal failure names it, not the closing line" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  printf '[1] 2026-11-06T00:00:00.000Z codex-bridge: watch-once failed (exit 1): agmsg watch: not serving these pairs (held by another session, or unverified): team\talice\n' > "$RUN_DIR/codex-bridge.team.alice.log"
+  sed -i.bak 's|^exit 0$|printf "[2] 2026-11-06T00:01:00.000Z codex-bridge: watch-once failed (exit 1): connect ECONNREFUSED 127.0.0.1:9999\\n[2] 2026-11-06T00:01:01.000Z codex-bridge: stopping after 3 consecutive watch-once failure(s)\\n" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'connect ECONNREFUSED 127.0.0.1:9999' "$notice"
+  refute grep -q 'close the session' "$notice"
+  grep -q "restart this seat's Codex session" "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: giving up names the stamped failure line, not the watcher's detail lines after it" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_STABLE_SECS=60
+  : > "$RUN_DIR/codex-bridge.team.alice.log"
+  # As the real bridge writes it: the stamped refusal naming the holder, the
+  # watcher's unstamped detail lines, then the closing line.
+  sed -i.bak 's|^exit 0$|printf "[2] 2026-11-06T00:01:00.000Z codex-bridge: watch-once failed with exit 1: agmsg watch: not serving these pairs (held by another session, or unverified): team/alice(holder-9)\\nagmsg watch:   lock=/x cc-instance=absent\\nwatch-once: no available subscription for project=/p type=codex name=* team=*\\n[2] 2026-11-06T00:01:01.000Z codex-bridge: stopping after 3 consecutive watch-once failure(s)\\n" >> "$RUN_DIR/codex-bridge.team.alice.log"\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..200}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  local notice; notice="$(ls "$RUN_DIR"/down/bridge.* 2>/dev/null | head -1)"
+  [ -n "$notice" ]
+  grep -q 'team/alice(holder-9)' "$notice"
+  grep -q 'close the session that holds this role' "$notice"
+  refute grep -q 'no available subscription' "$notice"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: a bridge that stays up is never given up on, and the quick-death count starts over" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  # The second start stays up past the stable time; the first ends at once.
+  sed -i.bak 's|^exit 0$|[ "$(grep -c . "$CAPTURE")" -lt 2 ] \|\| sleep 4\nexit 0|' "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=8 AGMSG_CODEX_BRIDGE_STABLE_SECS=2
+  sleep 30 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$!
+  sleep 20
+  kill -0 "$launcher"
+  refute ls "$RUN_DIR"/down/bridge.*
+  refute grep -q 'not starting it again' "$RUN_DIR/codex-bridge.team.alice.log"
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: a down record that cannot be written is tried again and the error is logged once" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_GIVE_UP_SECS=4 AGMSG_CODEX_BRIDGE_NOTICE_RETRY_SECS=1
+  # A file where the notice directory belongs: every write fails.
+  : > "$RUN_DIR/down"
+  sleep 60 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..150}; do grep -q 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log" 2>/dev/null && break; sleep 0.2; done
+  grep -q 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log"
+  # The cause goes away: the record is written on a later try and the launcher ends.
+  rm -f "$RUN_DIR/down"
+  for i in {1..150}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 && break; sleep 0.2; done
+  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
+  [ "$(grep -c 'could not update the down notice' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: a healthy bridge of a fresh launcher clears a down notice an earlier launcher left" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  # The record an earlier launcher for this seat wrote.
+  AGMSG_DOWN_NOTICE_ROOT="$TEST_SKILL_DIR" bash -c '. "$1/lib/down-notice.sh"; down_notice_set "$(down_notice_key bridge team.alice)" down "left by an earlier launcher" "x"' _ "$SCRIPTS"
+  ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1
+  export AGMSG_CODEX_BRIDGE_STABLE_SECS=2 MOCK_BRIDGE_SLEEP=25
+  sleep 30 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..100}; do ls "$RUN_DIR"/down/bridge.* >/dev/null 2>&1 || break; sleep 0.2; done
+  refute ls "$RUN_DIR"/down/bridge.*
+  agmsg_stop_pid "$p"
+  wait "$launcher" 2>/dev/null || true
+}
+
+@test "launcher: a bare unix:// app-server address starts no bridge, says so once, and drops the request" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  printf 'codex\trec-thread-1\tunix://\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  sleep 6 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "unix://" "$p" >/dev/null 2>&1 3>&- || true
+  # The role child is detached; give it the time a relaunch loop would need to
+  # start the bridge more than once.
+  sleep 4
+  agmsg_stop_pid "$p"
+  wait "$p" 2>/dev/null || true
+
+  [ ! -f "$CAPTURE" ]
+  [ ! -f "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY" ]
+  [ "$(grep -c 'has no socket path' "$RUN_DIR/codex-bridge.team.alice.log")" -eq 1 ]
+}
+
+@test "launcher: a bridge log over the size limit is moved aside before the next bridge starts" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES=1000
+  head -c 5000 /dev/zero | tr '\0' 'x' > "$RUN_DIR/codex-bridge.team.alice.log"
+  run_launcher
+  [ -f "$CAPTURE" ]
+  [ -f "$RUN_DIR/codex-bridge.team.alice.log.1" ]
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log.1")" -ge 5000 ]
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log" 2>/dev/null || echo 0)" -lt 1000 ]
+}
+
+@test "launcher: a bridge log that cannot be moved aside is reported with the cause, and the bridge still starts" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES=1000
+  head -c 5000 /dev/zero | tr '\0' 'x' > "$RUN_DIR/codex-bridge.team.alice.log"
+  # A mv that fails only for the rotation.
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/sh\ncase "$*" in *.log.1*) echo "mv: simulated I/O failure" >&2; exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$BATS_TEST_TMPDIR/shim/mv"
+  chmod +x "$BATS_TEST_TMPDIR/shim/mv"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" run_launcher
+  [ -f "$CAPTURE" ]
+  grep -q 'could not be moved aside (mv: simulated I/O failure)' "$RUN_DIR/codex-bridge.team.alice.log"
+  [ "$(wc -c < "$RUN_DIR/codex-bridge.team.alice.log")" -ge 5000 ]
+}
+
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3

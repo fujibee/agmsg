@@ -8,6 +8,7 @@
 // No CLI child process or transcript confirmation is needed: a completed
 // socket write advances this seat's notification cursor.
 
+import { createSeatBook } from "../seat-book.mjs";
 import { assertPollActive, pollSignal, SEAT_DEADLINE_MS } from '../poll-deadline.mjs';
 import { createSeatPoller } from '../seat-poll.mjs';
 import { homedir } from "node:os";
@@ -22,6 +23,8 @@ import {
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
 import { sameProject, seatKey } from "./codex-queue.mjs";
+import { findSessionSocket, pidAlive } from "./claude-code-sessions.mjs";
+import { downNoticeClear, downNoticeKey, downNoticeSet } from "../down-notice.mjs";
 import {
   listClaudeCodeRegistrations,
   readClaudeRoleSession,
@@ -36,6 +39,10 @@ import {
 } from "./claude-code-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
+// A live seat that stays unaddressable this long gets a down record (#1910).
+const DOWN_AFTER_MS = 10 * 60 * 1000;
+// A seat whose socket is gone is looked up again at most this often.
+const LOOKUP_EVERY_MS = 60 * 1000;
 
 function registrationProjects(teamConfig, agent) {
   const registrations = teamConfig?.agents?.[agent]?.registrations;
@@ -53,16 +60,9 @@ function latestNotifiedCursor(db, seat) {
   return row?.up_to ?? "";
 }
 
-function saveSeat(db, { seat, messagingSocket = null, state, reason = "" }, now) {
+function saveSeat(book, { seat, messagingSocket = null, state, reason = "" }) {
   assertPollActive();
-  withImmediateTransaction(db, () => {
-    db.prepare(`
-      INSERT INTO beta_claude_seat (seat, messaging_socket, state, reason, checked_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(seat) DO UPDATE SET messaging_socket=COALESCE(excluded.messaging_socket, beta_claude_seat.messaging_socket),
-        state=excluded.state, reason=excluded.reason, checked_at=excluded.checked_at
-    `).run(seat, messagingSocket, state, reason, new Date(now()).toISOString());
-  });
+  book.set(seat, { messagingSocket, state, reason });
 }
 
 function setQueueState(db, id, state) {
@@ -117,15 +117,65 @@ export function createClaudeCodeQueueChannel({
   hostPlatform = process.platform,
   readMode = latestPermissionMode,
   transcriptPathOf = resolveTranscriptPath,
+  lookupSession = findSessionSocket,
+  alive = pidAlive,
+  downAfterMs = DOWN_AFTER_MS,
+  downSet = (key, state, reason, recovery) => downNoticeSet(installRoot, key, state, reason, recovery, now),
+  downClear = (key) => downNoticeClear(installRoot, key),
 }) {
   let stopped = false;
+  const book = createSeatBook(now);
   let rosterReasons = new Map();
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
+  // Per seat: the socket found in Claude Code's sessions file, when the record's
+  // own path is gone; and since when the seat could not be reached.
+  const found = new Map();
+  const lastLookup = new Map();
+  const unreachable = new Map();
+  const downKept = new Set();
+  const clearedOnce = new Set();
+
+  const downKeyOf = (team, agent) => downNoticeKey("agmsgd.seat", `${team}/${agent}`);
+
+  // Reached again, or never was a live seat: no record, and the clock restarts.
+  function seatReachable(team, agent) {
+    const seat = seatKey(team, agent);
+    unreachable.delete(seat);
+    // Once per daemon life even when this process wrote none: a record left by
+    // an earlier agmsgd must go once the seat answers.
+    // A clear that failed keeps its retry state for the next healthy poll.
+    if (downKept.has(seat) || !clearedOnce.has(seat)) {
+      if (downClear(downKeyOf(team, agent)) !== false) {
+        downKept.delete(seat);
+        clearedOnce.add(seat);
+      }
+    }
+  }
+
+  // A live session whose socket cannot be reached: after downAfterMs a record
+  // that doctor and session start show. `degraded` when the sessions source
+  // could not even say whether the session is alive.
+  function seatUnreachable(team, agent, state, reason) {
+    const seat = seatKey(team, agent);
+    const first = unreachable.get(seat) ?? now();
+    unreachable.set(seat, first);
+    if (now() - first < downAfterMs) return;
+    const recovery = `run /agmsg actas ${agent} in that session`;
+    if (downSet(downKeyOf(team, agent), state, `agmsgd cannot reach ${agent}@${team} (${reason}); messages are stored but not delivered`, recovery)) downKept.add(seat);
+  }
+
+  // The session is over (or was never live): not down, and no stale record.
+  function seatEnded(team, agent) {
+    const seat = seatKey(team, agent);
+    unreachable.delete(seat);
+    downKept.delete(seat);
+    downClear(downKeyOf(team, agent));
+  }
   const seatPoller = createSeatPoller({
-    db, installRoot, channel: 'claude-code', log, timeoutMs: seatDeadlineMs,
-    saveTimeout: (seat, reason) => saveSeat(db, { seat, state: 'blocked', reason }, now),
+    db, book, installRoot, channel: 'claude-code', log, timeoutMs: seatDeadlineMs,
+    saveTimeout: (seat, reason) => saveSeat(book, { seat, state: 'blocked', reason }),
   });
 
   async function pollSeat(registration, paths) {
@@ -137,87 +187,143 @@ export function createClaudeCodeQueueChannel({
       ? optedOutOfAgmsgd(installRoot, "claude-code", chosen.record.project)
       : "";
     if (optedOut) {
-      saveSeat(db, { seat, messagingSocket: chosen.record.messaging_socket, state: "unaddressable", reason: `delivery_chosen_${optedOut}` }, now);
+      saveSeat(book, { seat, messagingSocket: chosen.record.messaging_socket, state: "unaddressable", reason: `delivery_chosen_${optedOut}` });
       return;
     }
     const session = readSession(join(installRoot, "run"), team, agent);
     if (session.state !== "present") {
-      saveSeat(db, { seat, state: "unaddressable", reason: session.reason ?? "role_session_missing" }, now);
+      saveSeat(book, { seat, state: "unaddressable", reason: session.reason ?? "role_session_missing" });
       return;
     }
     const record = session.record;
     if (record.team !== team || record.agent !== agent) {
-      saveSeat(db, { seat, state: "blocked", reason: "role_session_identity_mismatch" }, now);
+      saveSeat(book, { seat, state: "blocked", reason: "role_session_identity_mismatch" });
       return;
     }
     if (record.type !== "claude-code") {
-      saveSeat(db, { seat, state: "blocked", reason: "role_session_type_mismatch" }, now);
+      saveSeat(book, { seat, state: "blocked", reason: "role_session_type_mismatch" });
       return;
     }
     if (record.messaging_blocked) {
-      saveSeat(db, { seat, state: "unaddressable", reason: record.messaging_blocked }, now);
+      saveSeat(book, { seat, state: "unaddressable", reason: record.messaging_blocked });
       return;
     }
     if (!record.messaging_socket) {
-      saveSeat(db, { seat, state: "unaddressable", reason: "messaging_destination_missing" }, now);
+      saveSeat(book, { seat, state: "unaddressable", reason: "messaging_destination_missing" });
       return;
     }
     const registeredProjects = registrationProjects(teamConfig, agent);
     if (registeredProjects.length === 0 || !registeredProjects.some((project) => sameProject(project, record.project))) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "role_session_project_mismatch" }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "role_session_project_mismatch" });
       return;
     }
     let driver;
     try {
       driver = readDriver(paths.configPath);
     } catch (error) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `storage_config_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `storage_config_unreadable:${error.message}` });
       return;
     }
     if (driver.state !== "ok") {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: driver.reason }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: driver.reason });
       return;
     }
     if (driver.driver !== "sqlite") {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "storage_driver_unsupported" }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "storage_driver_unsupported" });
       return;
     }
     let storePath;
     try {
       storePath = messageStorePath({ storageDir: paths.storageDir, team, teamConfig });
     } catch (error) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_path_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_path_unreadable:${error.message}` });
       return;
     }
     let store;
     try {
       store = openStore(storePath);
     } catch (error) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_unreadable:${error.message}` });
       return;
     }
     let snapshot;
     try {
       snapshot = readSnapshot(store, team, agent, latestNotifiedCursor(db, seat));
     } catch (error) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_unreadable:${error.message}` }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_unreadable:${error.message}` });
       return;
     } finally {
       try { store.close(); } catch { /* keep the read result */ }
     }
     // Check every poll, including idle seats. A socket recreated at the same
     // path is eligible immediately; there is no persistent absence cache.
-    const socketCheck = socketAlive(record.messaging_socket);
+    // The record's path is primary. When it is gone, the socket of the session's
+    // live process in Claude Code's own sessions file is the second source (#1910);
+    // it is used only when the process and its start time match, and it is never
+    // written into the record.
+    let socketPath = record.messaging_socket;
+    let source = "";
+    let socketCheck = socketAlive(socketPath);
+    let lookupState = "";
+    let lookupReason = "";
     if (socketCheck.reason === "messaging_socket_missing") {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
+      // Both caches belong to the destination the record names now: a new
+      // session or config dir starts from a fresh lookup.
+      const identity = `${record.claude_config_dir ?? ""}\u0000${record.session ?? ""}`;
+      if (found.get(seat)?.identity !== identity) found.delete(seat);
+      if (lastLookup.get(seat)?.identity !== identity) lastLookup.delete(seat);
+      const cached = found.get(seat);
+      const cachedAlive = cached ? alive(cached.pid) : false;
+      if (cached && cachedAlive === true && socketAlive(cached.socket).state === "ok") {
+        socketPath = cached.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
+      } else if (cached && cachedAlive === null) {
+        // The pid check failed: keep the cache, and do not call the session ended or down.
+        lookupState = "unknown"; lookupReason = "session_pid_unreadable";
+      } else {
+        found.delete(seat);
+        const before = lastLookup.get(seat);
+        if (!before || now() - before.at >= LOOKUP_EVERY_MS) {
+          let result;
+          try {
+            result = await lookupSession({ configDir: record.claude_config_dir, sessionId: record.session });
+          } catch (error) {
+            result = { state: "unknown", reason: `sessions_lookup_failed:${error?.code ?? error?.message ?? error}` };
+          }
+          lookupState = result.state;
+          lookupReason = result.reason ?? "";
+          lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
+          if (result.state === "found" && socketAlive(result.socket).state === "ok") {
+            found.set(seat, { socket: result.socket, pid: result.pid, identity });
+            socketPath = result.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
+          } else if (result.state === "found") {
+            lookupState = "unreachable"; lookupReason = "sessions_file_socket_missing";
+            lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
+          }
+        } else {
+          // A socket found earlier that no longer answers: reachable by nobody.
+          lookupState = before.state === "found" ? "unreachable" : before.state;
+          lookupReason = before.state === "found" ? "sessions_file_socket_missing" : before.reason;
+        }
+      }
+    }
+    if (socketCheck.reason === "messaging_socket_missing") {
+      if (lookupState === "ended") {
+        seatEnded(team, agent);
+        saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "session_ended" });
+        return;
+      }
+      if (lookupState === "unreachable") seatUnreachable(team, agent, "down", lookupReason);
+      else if (lookupState === "unknown") seatUnreachable(team, agent, "degraded", lookupReason || "sessions_source_unknown");
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" });
       return;
     }
     if (socketCheck.state !== "ok") {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: socketCheck.reason ?? "messaging_socket_unreadable" }, now);
+      saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: socketCheck.reason ?? "messaging_socket_unreadable" });
       return;
     }
+    seatReachable(team, agent);
     if (!snapshot.unread || stopped) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
+      saveSeat(book, { seat, messagingSocket: socketPath, state: "addressable", reason: source });
       return;
     }
 
@@ -234,7 +340,7 @@ export function createClaudeCodeQueueChannel({
     const nonce = newNonce();
     let id;
     try {
-      id = createSendAttempt(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: null, upTo: snapshot.upTo, nonce, triedModes: [mode], expectedOpGen }, now);
+      id = createSendAttempt(db, { seat, messagingSocket: socketPath, transcriptPath, transcriptPos: null, upTo: snapshot.upTo, nonce, triedModes: [mode], expectedOpGen }, now);
     } catch (error) {
       if (error.message !== "daemon_intent_changed") throw error;
       return;
@@ -242,16 +348,16 @@ export function createClaudeCodeQueueChannel({
 
     let result;
     try {
-      result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
+      result = await send({ socketPath, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     } catch (error) {
       result = { state: "failed", reason: `send_error:${error?.code ?? error?.message ?? String(error)}` };
     }
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
       if (result.reason === "socket_error:ENOENT" || result.reason === "messaging_socket_missing") {
-        saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
+        saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" });
       } else {
-        saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
+        saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` });
       }
       return;
     }
@@ -259,7 +365,7 @@ export function createClaudeCodeQueueChannel({
     // existing confirmed row; neither inbox reads nor transcript evidence gate
     // later nudges for unread messages beyond that cursor.
     setQueueState(db, id, "confirmed");
-    saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
+    saveSeat(book, { seat, messagingSocket: socketPath, state: "addressable", reason: source });
   }
 
   // A team whose roster entry is unusable is skipped alone. Its reason is kept
@@ -270,16 +376,15 @@ export function createClaudeCodeQueueChannel({
     for (const [team, reason] of current) {
       if (rosterReasons.get(team) === reason) continue;
       log(`channel: Claude Code roster for team ${team} skipped (${reason})`);
-      saveSeat(db, { seat: seatKey(team, ""), state: "unaddressable", reason }, now);
+      saveSeat(book, { seat: seatKey(team, ""), state: "unaddressable", reason });
     }
-    // Compare against the stored rows, not only this process's memory: a row
-    // written before a restart must go once its team is readable again.
-    for (const { seat } of db.prepare("SELECT seat FROM beta_claude_seat").all()) {
+    // A team-level row goes once its team is readable again.
+    for (const seat of book.keys()) {
       let parsed;
       try { parsed = JSON.parse(seat); } catch { continue; }
       if (Array.isArray(parsed) && parsed[1] === "" && !current.has(parsed[0])) {
         assertPollActive();
-        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_claude_seat WHERE seat = ?").run(seat));
+        book.delete(seat);
       }
     }
     rosterReasons = current;
@@ -300,9 +405,9 @@ export function createClaudeCodeQueueChannel({
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
       for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
-      for (const row of db.prepare("SELECT seat FROM beta_claude_seat").all()) {
-        if (!registeredKeys.has(row.seat)) {
-          seatPoller.changeState(row.seat, () => saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now));
+      for (const key of book.keys()) {
+        if (!registeredKeys.has(key)) {
+          seatPoller.changeState(key, () => saveSeat(book, { seat: key, state: "unaddressable", reason: "seat_registration_missing" }));
         }
       }
       // Continue after an interrupted seat so repeated cycle deadlines cannot
@@ -319,6 +424,7 @@ export function createClaudeCodeQueueChannel({
           log(`channel: Claude Code seat ${seat.team}/${seat.agent} could not be checked (${error.message})`);
         }
       }
+      book.pollFinished();
     })().finally(() => { if (activePoll === operation) activePoll = null; });
     activePoll = operation;
     return operation;
@@ -327,6 +433,8 @@ export function createClaudeCodeQueueChannel({
   return {
     name: 'claude-code',
     reportTimeout: seatPoller.reportTimeout,
+    seatKind: 'claude_code',
+    seats: () => book.snapshot(),
     pollOnce,
     async stop() {
       stopped = true;

@@ -225,6 +225,16 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
         setImmediate(() => doStop("normal"));
         return { gen };
       },
+      // What the channels last observed about their seats. Held in memory, so
+      // this is the only place it can be read.
+      onSeats: async () => {
+        const out = { codex: { polled: false, seats: [] }, claude_code: { polled: false, seats: [] } };
+        for (const hook of channelHooks) {
+          if (typeof hook.seats !== 'function' || !out[hook.seatKind]) continue;
+          out[hook.seatKind] = hook.seats();
+        }
+        return out;
+      },
       onStatus: async () => classify({ owner: { gen, state: "ready", version }, intent: {}, alive: true, reachable: true }),
     },
   });

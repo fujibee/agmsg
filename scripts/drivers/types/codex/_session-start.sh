@@ -214,9 +214,22 @@ agmsg_session_start() {
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
     if [ -n "$agent_pid" ]; then
       agent_cmd=$(compat_get_cmdline "$agent_pid" 2>/dev/null || true)
+      # A `unix://` with a path. The managed daemon's own command line carries a
+      # bare `--listen unix://` (its default control socket); that is not an
+      # address a bridge can connect to, so it is resolved below instead.
       app_server=$(printf '%s\n' "$agent_cmd" \
-        | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
+        | sed -n 's/.*\(unix:\/\/[^[:space:]][^[:space:]]*\).*/\1/p' \
         | head -1)
+      if [ -z "$app_server" ]; then
+        case " $agent_cmd " in
+          *" unix:// "*|*"=unix:// "*)
+            default_socket="${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
+            if [ -S "$default_socket" ]; then
+              app_server="unix://$default_socket"
+            fi
+            ;;
+        esac
+      fi
     fi
   fi
   if [ -z "$app_server" ]; then
@@ -273,6 +286,39 @@ EOF
       printf '%s\t%s\t%s\t\n' "$request_type_value" "$thread_id" "$app_server" > "$tmp_request"
     fi
     mv "$tmp_request" "$request_file"
+    exit 0
+  fi
+
+  # The direct path below starts a bridge from this hook. With agmsgd turned on
+  # for this project, agmsgd delivers Codex notices (codex-shim.sh and
+  # codex-monitor.sh already start plain Codex for the same reason), so a bridge
+  # here would deliver the same notice a second time. Step aside and say so.
+  # Turning agmsgd off, or the project choosing another delivery, restores the
+  # bridge at the next session start; an unknown state changes nothing. The
+  # launcher branch above only writes a request file and is not touched.
+  if ! declare -F agmsg_daemon_read_state >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/daemon-state.sh"
+  fi
+  agmsg_daemon_read_state
+  agmsg_daemon_apply_project_choice codex "$PROJECT"
+  if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
+    # The bridge stays off whether or not agmsgd is up (no implicit fallback),
+    # so the line says which state it is: only a ready agmsgd delivers, only a
+    # stopped one is "not running", and one whose state cannot be established
+    # (unchecked / unverifiable) is reported as unchecked. Every command names
+    # THIS install's own scripts/agmsg, never a bare `agmsg`, which on a --cmd
+    # install would operate the default one.
+    gate_cmd="\"$SKILL_DIR/scripts/agmsg\""
+    gate_back="To use the bridge instead, run: $gate_cmd daemon disable (or choose another delivery for this project)."
+    case "${AGMSGD_HEALTH:-}" in
+      ready)
+        echo "AGMSG delivery: agmsgd delivers notices for this session; no Codex bridge is started. $gate_back" ;;
+      stopped)
+        echo "AGMSG delivery: agmsgd is on for this project but is not running (${AGMSGD_REASON:-no reason recorded}), so notices are NOT delivered to this session and no Codex bridge is started. Start it with: $gate_cmd daemon start. $gate_back" ;;
+      *)
+        echo "AGMSG delivery: agmsgd is on for this project and no Codex bridge is started, but agmsgd's state could not be checked (${AGMSGD_REASON:-no reason recorded}), so delivery to this session is not confirmed. Check it with: $gate_cmd daemon status. $gate_back" ;;
+    esac
     exit 0
   fi
 

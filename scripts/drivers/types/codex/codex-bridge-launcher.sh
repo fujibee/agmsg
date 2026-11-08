@@ -87,6 +87,8 @@ TAB="$(printf '\t')"
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
 # shellcheck source=../../../lib/resolve-project.sh
 source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+# shellcheck source=../../../lib/down-notice.sh
+source "$SCRIPT_DIR/../../../lib/down-notice.sh"
 # Canonicalize once so the record's project (stored from the codex actas flow's
 # cwd) compares equal to this launcher's project even across a symlinked path.
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
@@ -720,6 +722,35 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
+# The seat's bridge log keeps the last ~1 MiB and one older generation. Checked
+# when a bridge is about to be started, which is also when its writer is not
+# running; one `wc` per start.
+BRIDGE_LOG_MAX_BYTES="${AGMSG_CODEX_BRIDGE_LOG_MAX_BYTES:-1048576}"
+rotate_bridge_log() {
+  local size err
+  [ -f "$log" ] || return 0
+  if ! size="$(wc -c < "$log" 2>&1)"; then
+    _bridge_log_note "could not measure its size ($size)"
+    return 0
+  fi
+  size="${size//[[:space:]]/}"
+  case "$size" in
+    ''|*[!0-9]*) _bridge_log_note "its size could not be read (got '$size')"; return 0 ;;
+  esac
+  [ "$size" -gt "$BRIDGE_LOG_MAX_BYTES" ] || return 0
+  if ! err="$(mv -f "$log" "$log.1" 2>&1)"; then
+    _bridge_log_note "could not be moved aside (${err:-no message})"
+  fi
+  return 0
+}
+# A rotation that cannot happen is said once per start, in the log itself (or on
+# stderr when the log cannot be written); the bridge is started either way.
+_bridge_log_note() {
+  local line
+  line="$(printf '[%s] codex-bridge-launcher: the bridge log for %s %s; it keeps growing until this is fixed' "$$" "$bridge_key" "$1")"
+  printf '%s\n' "$line" >>"$log" 2>/dev/null || printf '%s\n' "$line" >&2 || true
+}
+
 # Retire this role's bridge only when its lease proves the pid is the bridge
 # previously launched for this exact project and pair. A numeric pid alone is
 # not enough: after a quick exit it may already name an unrelated process.
@@ -740,8 +771,141 @@ retire_recorded_bridge() {
   kill "$old_pid" 2>/dev/null || true
 }
 
+# A bridge that dies within BRIDGE_STABLE_SECS of being started is a quick
+# death. When this seat's bridges have only had quick deaths for
+# BRIDGE_GIVE_UP_SECS (about five minutes), the launcher stops starting bridges
+# for this seat, says so (one log line and a down record) and exits. Nothing
+# restarts it on a timer: the seat's next launcher (a restarted Codex session)
+# starts it again, and the first bridge of that launcher that stays up
+# BRIDGE_STABLE_SECS removes the record. Clocked by $SECONDS (this process), so
+# the bookkeeping starts no process.
+BRIDGE_STABLE_SECS="${AGMSG_CODEX_BRIDGE_STABLE_SECS:-60}"
+BRIDGE_GIVE_UP_SECS="${AGMSG_CODEX_BRIDGE_GIVE_UP_SECS:-300}"
+bridge_launch_at=""
+bridge_death_counted=""
+bridge_quick_deaths=0
+bridge_spell_start=""
+bridge_down_key="$(down_notice_key bridge "$bridge_key" 2>/dev/null || true)"
+# The down notice is a wish the loop keeps trying to make true, separate from the
+# one-time log line: bridge_notice_reason non-empty means
+# "set this", bridge_notice_clear=1 means "remove it". A write that fails stays
+# wished and is tried again every BRIDGE_NOTICE_RETRY_SECS, with the error kept
+# in the seat's bridge log (once per failing spell).
+BRIDGE_NOTICE_RETRY_SECS="${AGMSG_CODEX_BRIDGE_NOTICE_RETRY_SECS:-30}"
+bridge_notice_reason=""
+bridge_notice_clear=0
+bridge_notice_next_try=0
+bridge_notice_err_logged=0
+bridge_stable_cleared=0
+bridge_notice_flush() {
+  local err
+  [ -n "$bridge_down_key" ] || return 0
+  [ "$bridge_notice_clear" = 1 ] || [ -n "$bridge_notice_reason" ] || return 0
+  [ "$SECONDS" -ge "$bridge_notice_next_try" ] || return 0
+  if [ -n "$bridge_notice_reason" ]; then
+    if err="$(down_notice_set "$bridge_down_key" down "$bridge_notice_reason" \
+        "restart this seat's Codex session" 2>&1)"; then
+      bridge_notice_reason=""; bridge_notice_err_logged=0; return 0
+    fi
+  else
+    if err="$(down_notice_clear "$bridge_down_key" 2>&1)"; then
+      bridge_notice_clear=0; bridge_notice_err_logged=0; return 0
+    fi
+  fi
+  bridge_notice_next_try=$((SECONDS + BRIDGE_NOTICE_RETRY_SECS))
+  if [ "$bridge_notice_err_logged" = 0 ]; then
+    bridge_notice_err_logged=1
+    printf '[%s] codex-bridge-launcher: could not update the down notice for %s (%s); trying again every %ss\n' \
+      "$$" "$bridge_key" "${err:-no message}" "$BRIDGE_NOTICE_RETRY_SECS" >>"$log" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Called once per bridge death, just before this loop would launch again.
+bridge_note_death() {
+  local lived
+  [ -n "$bridge_launch_at" ] || return 0
+  [ "$bridge_death_counted" != "$bridge_launch_at" ] || return 0
+  bridge_death_counted="$bridge_launch_at"
+  lived=$((SECONDS - bridge_launch_at))
+  if [ "$lived" -ge "$BRIDGE_STABLE_SECS" ]; then
+    bridge_quick_deaths=0
+    bridge_spell_start=""
+    return 0
+  fi
+  bridge_quick_deaths=$((bridge_quick_deaths + 1))
+  [ -n "$bridge_spell_start" ] || bridge_spell_start="$SECONDS"
+  [ $((SECONDS - bridge_spell_start)) -ge "$BRIDGE_GIVE_UP_SECS" ] || return 0
+  bridge_stop_retrying
+}
+
+# Says plainly that this seat's notices are not arriving and why, leaves the
+# down record doctor and session start show, and ends this launcher. A record
+# that cannot be written is tried again every BRIDGE_NOTICE_RETRY_SECS (its
+# error logged once); this is the only wait left, and it ends when the record
+# is written or the seat's session is gone.
+bridge_stop_retrying() {
+  local cause fix lead
+  # The last thing the bridge itself logged is the cause, whatever it is; this
+  # launcher's own lines do not count, and an older refusal is not picked over a
+  # newer different failure. The bridge's closing "stopping after N consecutive
+  # failures" line follows every such failure and says nothing about its cause.
+  cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . || true)"
+  # A failure is one stamped line ("[pid] ... codex-bridge: ...") that the
+  # watcher's own detail lines follow unstamped; the stamped line is the cause.
+  # A log with no stamped line falls back to its last line.
+  cause="$(printf '%s\n' "$cause" | { grep -E '^\[[0-9]+\] ' || true; } | tail -n 1 | cut -c1-300)"
+  [ -n "$cause" ] || cause="$(tail -n 60 "$log" 2>/dev/null | grep -v -e 'codex-bridge-launcher:' -e 'codex-bridge: stopping after' | grep . | tail -n 1 | cut -c1-300 || true)"
+  case "$cause" in
+    *'not serving these pairs'*|*'was claimed by session'*)
+      lead="another session holds this role (last bridge message: $cause)"
+      fix="close the session that holds this role (delivery.sh status codex $PROJECT shows what holds it; it does not restart anything), then restart this seat's Codex session" ;;
+    '')
+      lead="cause unknown (the bridge log has no bridge message)"
+      fix="restart this seat's Codex session (the bridge log: $log)" ;;
+    *)
+      lead="last bridge message: $cause"
+      fix="fix that, then restart this seat's Codex session (the bridge log: $log)" ;;
+  esac
+  bridge_notice_reason="the Codex bridge for $bridge_key ended right after starting ${bridge_quick_deaths} times in $((SECONDS - bridge_spell_start))s and is no longer being started, so messages are not reaching this seat; ${lead}. To fix: ${fix}"
+  printf '[%s] codex-bridge-launcher: the bridge for %s ended within %ss, %s times in a row over %ss; not starting it again, so messages are not reaching this seat; %s. To fix: %s\n' \
+    "$$" "$bridge_key" "$BRIDGE_STABLE_SECS" "$bridge_quick_deaths" "$((SECONDS - bridge_spell_start))" "$lead" "$fix" >>"$log" 2>/dev/null || true
+  bridge_notice_clear=0
+  bridge_notice_next_try=0
+  while :; do
+    bridge_notice_flush
+    [ -n "$bridge_notice_reason" ] || break
+    _agmsg_pid_alive_local "$PARENT_PID" || break
+    sleep "$BRIDGE_NOTICE_RETRY_SECS"
+  done
+  exit 0
+}
+
+# A bridge that is still running after BRIDGE_STABLE_SECS ends the quick-death
+# count and removes a record without waiting for it to die. Only the bridge this loop launched
+# and that is alive now counts: one that already died is a death (the next
+# launch attempt counts it) and the long wait that follows must not be read as
+# recovery.
+bridge_note_stable() {
+  [ -n "$bridge_launch_at" ] || return 0
+  [ "$bridge_death_counted" != "$bridge_launch_at" ] || return 0
+  [ $((SECONDS - bridge_launch_at)) -ge "$BRIDGE_STABLE_SECS" ] || return 0
+  _agmsg_pid_alive_local "${launched_pid:-}" || return 0
+  # Once per stable spell: the first healthy bridge of this launcher also clears
+  # a record an earlier launcher left (the notice is keyed by the seat, not by
+  # this process), so a restart cannot leave a false "down" behind.
+  if [ "$bridge_stable_cleared" = 0 ]; then
+    bridge_notice_reason=""; bridge_notice_clear=1; bridge_notice_next_try=0
+  fi
+  bridge_stable_cleared=1
+  bridge_quick_deaths=0
+  bridge_spell_start=""
+}
+
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
+  bridge_note_stable
+  bridge_notice_flush
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.
@@ -869,6 +1033,10 @@ EOF
     fi
   fi
 
+  # A bridge that keeps ending at once is given up on after a few minutes
+  # (bridge_stop_retrying exits). Before the spawn-rate reservation below.
+  bridge_note_death
+
   # Bound the spawn rate first (a rate-limited tick changes nothing), then reap
   # any orphan for this exact (project, role) so exactly one bridge remains. If a
   # reaped bridge will not exit, do not spawn beside it this tick.
@@ -906,8 +1074,22 @@ EOF
       continue
     fi
   fi
+  # An app-server address the bridge can never use is not a transient failure
+  # to retry: a bare `unix://` (no socket path) makes the bridge exit at once,
+  # and this loop would start it again every second for as long as the seat
+  # lives. Say so once, in this seat's bridge log, drop the request that carried
+  # it, and stop. The next SessionStart publishes a new request.
+  case "$req_app_server" in
+    unix://)
+      printf '[%s] codex-bridge-launcher: not starting a bridge for %s: the app-server address "unix://" has no socket path; request %s dropped, the next SessionStart publishes a new one\n' \
+        "$$" "$bridge_key" "$REQUEST_FILE" >>"$log" 2>/dev/null || true
+      rm -f "$REQUEST_FILE"
+      exit 0
+      ;;
+  esac
   # Committed to spawning now: clear the stale records immediately before writing
   # the new ones, so no gate can bail out between the wipe and the rewrite.
+  rotate_bridge_log
   rm -f "$pidfile" "$appserver_file" "$thread_file"
   bridge_owner_args=(--owner "$rec_owner")
 
@@ -925,6 +1107,7 @@ EOF
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
   printf '%s\n' "$launched_pid" > "$pidfile"
+  bridge_launch_at=$SECONDS
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     # A custom bridge is foregrounded by the test harness, so a plain wait
     # would hide a role change until the bridge exits on its own. Poll the

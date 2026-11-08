@@ -28,6 +28,14 @@ function temporaryDirectory(t) {
   return dir;
 }
 
+// What the channel last observed about its seat, held in memory (never in
+// install.db).
+function seatBrief(channel, seat) {
+  const rows = channel.seats().seats;
+  const row = seat ? rows.find((item) => item.seat === seat) : rows[0];
+  return row && { state: row.state, reason: row.reason };
+}
+
 function channelFixture(t, hostPlatform = 'linux') {
   const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-claude-queue-'));
   mkdirSync(path.join(root, 'run'));
@@ -110,7 +118,7 @@ for (const unread of [false, true]) {
       ...state.options, readSnapshot: () => ({ state: 'ok', unread, upTo: '{}' }),
     });
     await channel.pollOnce();
-    assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() },
+    assert.deepEqual(seatBrief(channel),
       { state: 'unaddressable', reason: 'messaging_socket_missing' });
     assert.equal(state.sent, 0);
     assert.equal(db.prepare('SELECT count(*) AS n FROM beta_claude_queue').get().n, 0);
@@ -127,7 +135,7 @@ test('an idle seat is addressable only after its socket check succeeds', async (
   });
   await channel.pollOnce();
   assert.equal(checks, 1);
-  assert.equal(db.prepare('SELECT state FROM beta_claude_seat').get().state, 'addressable');
+  assert.equal(seatBrief(channel).state, 'addressable');
   await channel.stop();
 });
 
@@ -138,7 +146,7 @@ test('an idle seat whose socket cannot be checked reports the uncertainty', asyn
     ...state.options, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
   });
   await channel.pollOnce();
-  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() },
+  assert.deepEqual(seatBrief(channel),
     { state: 'blocked', reason: 'messaging_socket_stat_failed' });
   assert.equal(state.sent, 0);
   await channel.stop();
@@ -211,7 +219,7 @@ test('transcript evidence is not read and cannot block subsequent nudges', async
   state.sequence += 1;
   await channel.pollOnce();
   assert.equal(state.sent, 2);
-  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'addressable', reason: '' });
+  assert.deepEqual(seatBrief(channel), { state: 'addressable', reason: '' });
   await channel.stop();
 });
 
@@ -279,7 +287,7 @@ test('Windows: a seat is no longer blocked as unsupported', async (t) => {
   const { db, channel, state } = channelFixture(t, 'win32');
   await channel.pollOnce();
   assert.equal(state.sent, 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM beta_claude_seat WHERE reason = ?').get('windows_not_supported_yet').n, 0);
+  assert.equal(channel.seats().seats.filter((row) => row.reason === 'windows_not_supported_yet').length, 0);
   await channel.stop();
 });
 
@@ -290,8 +298,7 @@ for (const reason of ['socket_error:ENOENT', 'messaging_socket_missing', 'connec
     const channel = createClaudeCodeQueueChannel({ ...state.options, send: async () => ++calls === 1 ? { state: 'failed', reason } : { state: 'sent' } });
     await channel.pollOnce();
     const missing = ['socket_error:ENOENT', 'messaging_socket_missing'].includes(reason);
-    assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, missing ? 'messaging_socket_missing' : `send_failed:${reason}`);
-    assert.equal(readOwnerAndIntentReadOnly(state.options.installRoot).claudeCodeSeats.seats[0].reason, missing ? 'messaging_socket_missing' : `send_failed:${reason}`, 'daemon status exposes the failure reason');
+    assert.equal(seatBrief(channel).reason, missing ? 'messaging_socket_missing' : `send_failed:${reason}`);
     assert.equal(db.prepare('SELECT state FROM beta_claude_queue').get().state, 'expired');
     await channel.pollOnce();
     assert.equal(calls, 2, 'the same path is retried without a new destination record');
@@ -334,7 +341,7 @@ test('a seat whose hook could not publish a destination is reported with that re
     assert.equal(read.record.messaging_blocked, reason);
     const channel = createClaudeCodeQueueChannel({ ...state.options, readSession: () => read });
     await channel.pollOnce();
-    assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, `unaddressable/${reason}`);
+    assert.equal(`${seatBrief(channel).state}/${seatBrief(channel).reason}`, `unaddressable/${reason}`);
     assert.equal(state.sent, 0);
     await channel.stop();
   }
@@ -352,11 +359,11 @@ test('a project that opts out gets no new nudges, and choosing agmsgd again resu
   writeFileSync(path.join(root, 'run', 'delivery-choice'), `claude-code\t${root}\tmonitor\n`);
   for (let i = 0; i < 3; i += 1) await channel.pollOnce();
   assert.equal(state.sent, 1, 'no further nudge for an opted-out project');
-  assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, 'unaddressable/delivery_chosen_monitor');
+  assert.equal(`${seatBrief(channel).state}/${seatBrief(channel).reason}`, 'unaddressable/delivery_chosen_monitor');
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state = 'pending'").get().n, 0);
   writeFileSync(path.join(root, 'run', 'delivery-choice'), `claude-code\t${root}\tagmsgd\n`);
   await channel.pollOnce();
-  assert.equal(db.prepare("SELECT state FROM beta_claude_seat").get().state, 'addressable');
+  assert.equal(seatBrief(channel).state, 'addressable');
   assert.equal(state.sent, 2, 'the previously opted-out new unread gets a nudge');
 });
 
@@ -510,7 +517,7 @@ for (const reason of ['messaging_socket_stat_failed', 'messaging_socket_symlink'
     await channel.pollOnce();
     state.alive = { state: 'unreadable', reason };
     await channel.pollOnce();
-    assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'blocked', reason });
+    assert.deepEqual(seatBrief(channel), { state: 'blocked', reason });
     assert.equal(state.sent, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='confirmed'").get().n, 1);
@@ -526,11 +533,11 @@ test('a stuck Claude send has a seat deadline and late success cannot publish de
     send: () => new Promise(resolve => { release = resolve; }),
   });
   await channel.pollOnce();
-  assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
+  assert.equal(seatBrief(channel).reason, 'seat_poll_deadline');
   assert.ok(logs.some(line => line.includes('poll_timeout')));
   release({ state: 'sent' });
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
+  assert.equal(seatBrief(channel).reason, 'seat_poll_deadline');
   await channel.stop();
   await unused.stop();
 });
@@ -555,14 +562,218 @@ test('one unusable team is skipped alone: the other teams are still notified and
   await channel.pollOnce();
   await channel.pollOnce();
   assert.equal(state.sent, 2, 'the two healthy teams are notified');
-  const reasons = Object.fromEntries(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats
+  const reasons = Object.fromEntries(channel.seats().seats
     .filter((row) => JSON.parse(row.seat)[1] === '').map((row) => [JSON.parse(row.seat)[0], row.reason]));
   assert.deepEqual(reasons, { broken: 'team_roster_malformed', linked: 'team_roster_symlink' });
   assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
-  await channel.stop();
   writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
-  const restarted = createClaudeCodeQueueChannel({ ...state.options, listSeats: listClaudeCodeRegistrations, readSession: () => ({ state: 'absent' }) });
-  await restarted.pollOnce();
-  assert.equal(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats.some((row) => JSON.parse(row.seat)[0] === 'broken' && JSON.parse(row.seat)[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
-  await restarted.stop();
+  await channel.pollOnce();
+  assert.equal(channel.seats().seats.some((row) => JSON.parse(row.seat)[0] === 'broken' && JSON.parse(row.seat)[1] === ''), false, 'the reason goes away once the team is readable');
+  await channel.stop();
+});
+
+function countSeatTableWrites(db) {
+  db.exec(`CREATE TABLE seat_writes (n INTEGER);
+    CREATE TRIGGER seat_writes_i AFTER INSERT ON beta_claude_seat BEGIN INSERT INTO seat_writes VALUES (1); END;
+    CREATE TRIGGER seat_writes_u AFTER UPDATE ON beta_claude_seat BEGIN INSERT INTO seat_writes VALUES (1); END;`);
+  return () => db.prepare('SELECT count(*) AS n FROM seat_writes').get().n;
+}
+
+test('seat state lives in memory: polling writes nothing to install.db and the seat is readable from the channel', async (t) => {
+  const { db, state } = channelFixture(t);
+  const writes = countSeatTableWrites(db);
+  const before = db.prepare('PRAGMA data_version').get().data_version;
+  let nowMs = Date.UTC(2026, 9, 14);
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options, now: () => nowMs, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
+    socketAlive: () => state.alive,
+  });
+  assert.deepEqual(channel.seats(), { polled: false, seats: [] });
+  for (let i = 0; i < 25; i += 1) { await channel.pollOnce(); nowMs += 5000; }
+  assert.equal(writes(), 0);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM beta_claude_seat').get().n, 0);
+  assert.equal(db.prepare('PRAGMA data_version').get().data_version, before);
+  const first = channel.seats();
+  assert.equal(first.polled, true);
+  assert.equal(first.seats.length, 1);
+  assert.equal(first.seats[0].state, 'addressable');
+  const since = first.seats[0].since;
+
+  // Same answer: `since` stays. A different answer: it moves to that poll.
+  await channel.pollOnce();
+  assert.equal(channel.seats().seats[0].since, since);
+  state.alive = { state: 'blocked', reason: 'messaging_socket_unreadable' };
+  await channel.pollOnce();
+  const changed = channel.seats().seats[0];
+  assert.equal(changed.state, 'blocked');
+  assert.notEqual(changed.since, since);
+  assert.equal(writes(), 0);
+  await channel.stop();
+});
+
+test('a seat that left the roster is marked unaddressable, not deleted, and a skipped team row goes when its team is readable again', async (t) => {
+  const { state } = channelFixture(t);
+  let roster = { state: 'ok', seats: state.options.listSeats().seats, skipped: [] };
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options, listSeats: () => roster, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
+  });
+  await channel.pollOnce();
+  assert.equal(seatBrief(channel, JSON.stringify(['test', 'alice'])).state, 'addressable');
+  roster = { state: 'ok', seats: [], skipped: [{ team: 'broken', reason: 'team_roster_unreadable' }] };
+  await channel.pollOnce();
+  assert.equal(seatBrief(channel, JSON.stringify(['test', 'alice'])).reason, 'seat_registration_missing');
+  assert.equal(seatBrief(channel, JSON.stringify(['broken', ''])).reason, 'team_roster_unreadable');
+  roster = { state: 'ok', seats: [], skipped: [] };
+  await channel.pollOnce();
+  assert.equal(seatBrief(channel, JSON.stringify(['broken', ''])), undefined);
+  await channel.stop();
+});
+
+// --- #1910: a live seat whose recorded socket is gone ---
+
+function missingSocketFixture(t, lookup, socketAlive = null, alive = () => true) {
+  const calls = { sets: [], clears: [], sends: [], lookups: 0 };
+  const { db, state } = channelFixture(t);
+  state.record = { messaging_token: 'tok-1' };
+  state.minutes = 0;
+  const options = {
+    ...state.options,
+    now: () => Date.UTC(2026, 9, 14) + state.minutes * 60_000,
+    socketAlive: socketAlive ?? ((p) => (p === state.socket ? { state: 'unreadable', reason: 'messaging_socket_missing' } : { state: 'ok' })),
+    lookupSession: async (args) => { calls.lookups += 1; calls.args = args; return lookup(state); },
+    alive,
+    send: async (args) => { calls.sends.push(args); return { state: 'sent' }; },
+    downSet: (key, st, reason, recovery) => { calls.sets.push({ key, st, reason, recovery }); return true; },
+    downClear: (key) => { calls.clears.push(key); return true; },
+  };
+  return { db, state, calls, channel: createClaudeCodeQueueChannel(options) };
+}
+
+test('a missing recorded socket is replaced by the live process socket of the same session, token kept', async (t) => {
+  const { channel, calls } = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  await channel.pollOnce();
+  assert.equal(calls.sends.length, 1);
+  assert.equal(calls.sends[0].socketPath, '/tmp/cc-socks/9.sock');
+  assert.equal(calls.sends[0].token, 'tok-1');
+  assert.equal(calls.args.sessionId, 'sess-1');
+  const seat = channel.seats().seats[0];
+  assert.deepEqual({ state: seat.state, reason: seat.reason, messaging_socket: seat.messaging_socket }, { state: 'addressable', reason: 'socket_from_sessions_file', messaging_socket: '/tmp/cc-socks/9.sock' });
+  assert.equal(calls.sets.length, 0);
+});
+
+test('the sessions file is not read again while the found socket still answers', async (t) => {
+  const { state, channel, calls } = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  await channel.pollOnce();
+  state.sequence += 1;
+  await channel.pollOnce();
+  assert.equal(calls.lookups, 1);
+  assert.equal(calls.sends.length, 2);
+});
+
+test('a live session that cannot be reached gets a down record after 10 minutes, not before', async (t) => {
+  const f = missingSocketFixture(t, () => ({ state: 'unknown', reason: 'sessions_dir_unreadable' }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 0);
+  f.state.minutes = 9; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 0);
+  f.state.minutes = 10; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'degraded');
+  assert.match(f.calls.sets[0].key, /^agmsgd\.seat\.test-alice-[0-9a-f]{8}$/);
+  assert.match(f.calls.sets[0].reason, /stored but not delivered/);
+  assert.equal(seatBrief(f.channel).state, 'unaddressable');
+});
+
+test('a process that is alive but whose socket is gone is down; an ended session is no record and clears one', async (t) => {
+  const down = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }), () => ({ state: 'unreadable', reason: 'messaging_socket_missing' }));
+  await down.channel.pollOnce();
+  down.state.minutes = 10; await down.channel.pollOnce();
+  assert.equal(down.calls.sets.length, 1);
+  assert.equal(down.calls.sets[0].st, 'down');
+  const gone = missingSocketFixture(t, () => ({ state: 'ended' }));
+  gone.state.minutes = 0; await gone.channel.pollOnce();
+  gone.state.minutes = 30; await gone.channel.pollOnce();
+  assert.equal(gone.calls.sets.length, 0);
+  assert.ok(gone.calls.clears.length >= 1);
+  assert.equal(seatBrief(gone.channel).reason, 'session_ended');
+});
+
+test('a seat that answers again clears its record', async (t) => {
+  let mode = 'unknown';
+  const f = missingSocketFixture(t, () => (mode === 'unknown' ? { state: 'unknown', reason: 'x' } : { state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  mode = 'found';
+  f.state.minutes = 13; await f.channel.pollOnce();
+  assert.ok(f.calls.clears.length >= 1);
+  assert.equal(seatBrief(f.channel).state, 'addressable');
+});
+
+test('a found socket that stops answering is down after 10 minutes without waiting for the next lookup', async (t) => {
+  let up = true;
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }),
+    (p) => (p === '/tmp/cc-socks/9.sock' && up ? { state: 'ok' } : { state: 'unreadable', reason: 'messaging_socket_missing' }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.length, 1);
+  up = false;
+  f.state.minutes = 0.5; await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'down');
+});
+
+test('a new session on the same seat starts from a fresh lookup, even inside the throttle minute', async (t) => {
+  const f = missingSocketFixture(t, (state) => (state.session === 'sess-1'
+    ? { state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }
+    : { state: 'found', socket: '/tmp/cc-socks/10.sock', pid: 10 }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.at(-1).socketPath, '/tmp/cc-socks/9.sock');
+  f.state.session = 'sess-2';
+  f.state.sequence += 1;
+  f.state.minutes = 0.2; await f.channel.pollOnce();
+  assert.equal(f.calls.lookups, 2);
+  assert.equal(f.calls.args.sessionId, 'sess-2');
+  assert.equal(f.calls.sends.at(-1).socketPath, '/tmp/cc-socks/10.sock');
+});
+
+test('a clear that failed is tried again on the next healthy poll', async (t) => {
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }));
+  let results = [false, true];
+  const clears = [];
+  const channel = createClaudeCodeQueueChannel({
+    ...f.state.options,
+    now: () => Date.UTC(2026, 9, 14),
+    socketAlive: () => ({ state: 'ok' }),
+    send: async () => ({ state: 'sent' }),
+    downSet: () => true,
+    downClear: (key) => { clears.push(key); return results.shift() ?? true; },
+  });
+  await channel.pollOnce();
+  f.state.sequence += 1;
+  await channel.pollOnce();
+  f.state.sequence += 1;
+  await channel.pollOnce();
+  assert.equal(clears.length, 2, 'false then true: two calls, then no more');
+  await channel.stop();
+});
+
+test('a cached pid that cannot be checked is unknown: the seat is degraded, not ended, and no record is cleared', async (t) => {
+  let pid = true;
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }),
+    (p) => (p === '/tmp/cc-socks/9.sock' && pid === true ? { state: 'ok' } : { state: 'unreadable', reason: 'messaging_socket_missing' }),
+    () => pid);
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.length, 1);
+  const clearsBefore = f.calls.clears.length;
+  pid = null;
+  f.state.minutes = 0.5; await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'degraded');
+  assert.match(f.calls.sets[0].reason, /session_pid_unreadable/);
+  assert.equal(f.calls.clears.length, clearsBefore);
+  const seat = f.channel.seats().seats[0];
+  assert.notEqual(seat.reason, 'session_ended');
+  assert.equal(seat.state, 'unaddressable');
 });

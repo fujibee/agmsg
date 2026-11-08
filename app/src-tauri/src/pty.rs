@@ -73,11 +73,17 @@ impl PtyManager {
             for (id, tail, detection) in snapshots {
                 let tail = tail.lock().unwrap().detection_tail();
                 if let Some(state) = detection.lock().unwrap().observe(&tail, now) {
+                    eprintln!("[agmsg-app] agent-state {id} -> {state:?} emitted at {} ms", unix_ms());
                     let _ = app.emit("agent-state", AgentStateEvent { id, state });
                 }
             }
         });
     }
+}
+
+/// Wall-clock milliseconds for log lines, so the app's lines can be lined up with an agent's own transcript.
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
 #[derive(Clone, Serialize)]
@@ -540,6 +546,36 @@ mod tests {
     #[test]
     fn wraps_an_argless_launch() {
         assert_eq!(windows_shell_argv("codex", &[]), vec!["/d", "/c", "codex"]);
+    }
+
+    // The real launch path on Windows (cmd /d /c through a pty, as pty_spawn_inner builds it) must hand the startup
+    // prompt to the program byte for byte. A tiny PowerShell script is the argv dumper.
+    #[cfg(windows)]
+    #[test]
+    fn the_startup_prompt_reaches_a_program_unchanged_through_cmd() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("dump.ps1");
+        let out = dir.path().join("arg.txt");
+        std::fs::write(&script, "[System.IO.File]::WriteAllText($env:DUMP_OUT, $args[0])").unwrap();
+        let prompt = "/agmsg actas white and then read your inbox with: bash ~/.agents/skills/agmsg/scripts/inbox.sh chess white and act on what is waiting, reply with: bash ~/.agents/skills/agmsg/scripts/send.sh chess white SENDER followed by your reply, a reply written in this chat is not delivered".to_string();
+        let args = vec!["-NoProfile".to_string(), "-File".to_string(), script.to_string_lossy().into_owned(), prompt.clone()];
+        let pair = native_pty_system().openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut b = CommandBuilder::new(comspec);
+        for a in windows_shell_argv("powershell", &args) {
+            b.arg(a);
+        }
+        b.env("DUMP_OUT", out.to_string_lossy().into_owned());
+        let mut child = pair.slave.spawn_command(b).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 4096];
+            while matches!(std::io::Read::read(&mut reader, &mut sink), Ok(n) if n > 0) {}
+        });
+        child.wait().unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), prompt);
     }
 
     // resolve_windows_cwd is behind cfg(windows); this test runs on the

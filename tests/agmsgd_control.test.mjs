@@ -142,3 +142,27 @@ test("control server cuts a connection that exceeds the 1 MiB frame ceiling befo
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("control server: a seats request returns what the handler holds, and is refused when there is no handler", async () => {
+  const dir = socketDir();
+  const socketPath = join(dir, "c.sock");
+  const hello = `${JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, role: "control" })}\n`;
+  const seats = `${JSON.stringify({ type: "seats" })}\n`;
+  try {
+    const handle = await createControlServer(socketPath, {
+      onStop: async () => ({ gen: 1 }),
+      onStatus: async () => ({ state: "ready", gen: 1 }),
+      onSeats: async () => ({ codex: { polled: true, seats: [{ seat: '["t","a"]', state: "addressable" }] }, claude_code: { polled: false, seats: [] } }),
+    });
+    const received = await talk(socketPath, [hello, seats]);
+    assert.deepEqual(received[1], { type: "seats", codex: { polled: true, seats: [{ seat: '["t","a"]', state: "addressable" }] }, claude_code: { polled: false, seats: [] } });
+    await handle.close();
+
+    const bare = await createControlServer(socketPath, { onStop: async () => ({}), onStatus: async () => ({}) });
+    const refused = await talk(socketPath, [hello, seats]);
+    assert.equal(refused[1].type, "error");
+    await bare.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
