@@ -754,23 +754,11 @@ cmd_start() {
       echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed. Install Node from https://nodejs.org/en/download, then run agmsg daemon start." >&2
       _path_hint start >&2
       # A real daemon_start_attempts row, same as every other refusal here
-      # -- this one was simply missing before. "no usable Node" keys both
-      # this and daemon-state.sh's existing *Node*/*node* recovery text.
+      # -- this one was simply missing before. "no usable Node" keys
+      # daemon-state.sh's existing *Node*/*node* recovery text.
       agmsg_sqlite "$INSTALL_DB" "INSERT INTO daemon_start_attempts VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'no usable Node found', $$);" 2>/dev/null || true
-      # The signature of what was actually tried, recorded separately so
-      # self-heal's own guard (never this call site itself, which already
-      # knows it must not retry blindly) can tell "the Node it would see
-      # now" apart from "the Node that already failed here" without
-      # running anything -- see _agmsg_node_signature /
-      # _agmsg_daemon_node_signature_changed. A plain file, not a
-      # daemon_start_attempts column: that table's shorthand `VALUES
-      # (...)` inserts (no column list) are relied on by many existing
-      # tests, and a new NOT NULL-shaped column would break every one of
-      # them for a signal only this one failure site and one reader need.
-      _agmsg_node_signature > "$SKILL_DIR/run/agmsgd-node-failure-signature" 2>/dev/null || true
       return 1
     }
-    rm -f "$SKILL_DIR/run/agmsgd-node-failure-signature" 2>/dev/null || true
     found_version="$("$found_node" -e 'console.log(process.versions.node)')"
     record_node_sql="UPDATE meta SET node_path = '$(printf '%s' "$found_node" | sed "s/'/''/g")', node_version = '$found_version';"
   fi

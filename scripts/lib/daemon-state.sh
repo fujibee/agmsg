@@ -185,10 +185,6 @@ _agmsg_down_notice_clear_if_present() {
   # A notice is diagnostic, not load-bearing: an I/O failure clearing it
   # (rc 1, per the shared contract) must never fail or abort the caller.
   down_notice_clear "$1" || :
-  # A stale "no usable Node" failure signature would otherwise outlive the
-  # recovery it was recorded for -- same component, same "it's fine now"
-  # observation, so it goes together with the notice.
-  [ "$1" != agmsgd ] || rm -f "$_AGMSG_DAEMON_ROOT/run/agmsgd-node-failure-signature" 2>/dev/null || :
 }
 
 # ONE detached, best-effort retry of `agmsg daemon start`, scoped to the
@@ -209,53 +205,6 @@ _agmsg_daemon_self_heal() {
   AGMSG_DAEMON_SELF_HEAL=1 bash "$_AGMSG_DAEMON_ROOT/scripts/daemon.sh" start --only-if-op-gen "$gen" \
     </dev/null >/dev/null 2>&1 &
   disown 2>/dev/null || true
-}
-
-# A file's mtime as an integer, without ever running it -- Darwin's stat
-# flags differ from everyone else's (Linux, and Git Bash's coreutils).
-_agmsg_mtime() {
-  [ -n "${1:-}" ] && [ -e "$1" ] || { printf -- '-'; return 0; }
-  case "$(uname -s)" in
-    Darwin) stat -f %m "$1" 2>/dev/null || printf -- '-' ;;
-    *) stat -c %Y "$1" 2>/dev/null || printf -- '-' ;;
-  esac
-}
-
-# The three places a Node resolution could find one BEFORE running
-# anything: the recorded node_path (meta), AGMSG_NODE, and PATH
-# (`command -v node`, a builtin) -- "none" for an empty slot, each with
-# its own mtime (so a new binary written to the same old path still
-# counts as changed). The real failure site (daemon.sh's cmd_start, where
-# _resolve_node actually gives up) records this alongside that attempt's
-# own daemon_start_attempts row; self-heal's guard below recomputes the
-# same thing fresh and compares the two, also without running anything.
-_agmsg_node_signature() {
-  local recorded fresh
-  recorded="$(sqlite3 -readonly "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null || true)"
-  fresh="$(command -v node 2>/dev/null || true)"
-  printf '%s|%s|%s|%s|%s|%s\n' \
-    "${recorded:-none}" "$(_agmsg_mtime "$recorded")" \
-    "${AGMSG_NODE:-none}" "$(_agmsg_mtime "${AGMSG_NODE:-}")" \
-    "${fresh:-none}" "$(_agmsg_mtime "$fresh")"
-}
-
-# True (worth one self-heal try) when the Node self-heal would see now
-# differs from the signature the REAL failure site (daemon.sh's cmd_start,
-# where _resolve_node actually gave up) recorded at that failure -- see
-# _agmsg_node_signature, compared WITHOUT ever running either candidate.
-# No such file (an attempt from before this existed, or self-heal's own
-# detached child becoming ready and clearing it) cannot be compared at
-# all -- that is "cannot tell", not "unchanged", so it gets the one try
-# decision 11-04 class C requires rather than going quiet indefinitely.
-# Trying records a fresh signature either way (the real failure site
-# writes one on another failure; success removes the file entirely), so
-# the NEXT call has something real to compare against either way.
-_agmsg_daemon_node_signature_changed() {
-  local sigfile="$_AGMSG_DAEMON_ROOT/run/agmsgd-node-failure-signature" recorded_sig
-  [ -f "$sigfile" ] || return 0
-  IFS= read -r recorded_sig < "$sigfile" || recorded_sig=""
-  [ -n "$recorded_sig" ] || return 0
-  [ "$(_agmsg_node_signature)" != "$recorded_sig" ]
 }
 
 agmsg_daemon_warn_if_stopped() {
@@ -333,24 +282,16 @@ agmsg_daemon_warn_if_stopped() {
     # window. Only for a CONFIRMED stopped daemon -- unchecked/unverifiable
     # never reach here (the "unchecked" skip above already excluded them,
     # and this whole branch is guarded by AGMSGD_HEALTH=stopped below).
-    # A reason already known to be "no usable Node" still gets re-observed
-    # here, not skipped outright (decision 11-04 class C: bounded self-heal
-    # stays, it must not go indefinitely quiet) -- but the re-observation
-    # itself must not be the same mistake this is fixing (self-heal used
-    # to EXECUTE whatever is on PATH named "node" every single window,
-    # even though nothing about it had changed since the last failure).
-    # _agmsg_daemon_node_signature_changed answers "did the Node this
-    # would try actually change" from recorded node_path + `command -v
-    # node` + each one's mtime alone, never running either candidate; only
-    # a real change earns the one execution self-heal itself will do.
-    if [ "$AGMSGD_HEALTH" = stopped ]; then
-      case "$AGMSGD_REASON" in
-        *'no usable Node'*)
-          ! _agmsg_daemon_node_signature_changed || _agmsg_daemon_self_heal
-          ;;
-        *) _agmsg_daemon_self_heal ;;
-      esac
-    fi
+    # Tried even when the reason is already "no usable Node": a cheap,
+    # non-executing "did Node actually change" pre-check was tried and
+    # dropped on review -- it cannot see every path agmsg_resolve_node's
+    # own fallback chain (AGMSG_CODEX_NODE, nvm/fnm/volta/system) tries,
+    # and a replacement binary at the same path with the same mtime looks
+    # unchanged to an mtime check even when its content is not -- either
+    # gap means a real fix could be excluded from recovery indefinitely.
+    # No exclusions: every reason gets the same one bounded try per window,
+    # through the real resolver, same as any other stopped reason.
+    [ "$AGMSGD_HEALTH" != stopped ] || _agmsg_daemon_self_heal
   fi
   # The claimed window remains as an empty directory. Only past windows are
   # removed; none of them can grant a fresh claim in the current window.
