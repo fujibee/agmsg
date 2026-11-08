@@ -76,8 +76,8 @@ agmsg_codex_stale_writable_paths() {
 # AGMSG_STALE_PREFIXES (a path, or anything under it, is dropped),
 # AGMSG_WANT_ROOTS (paths to add to [sandbox_workspace_write]'s array, which is
 # created with the table when missing; arrays of other tables are never added
-# to), AGMSG_DROP_EMPTY=1 (uninstall: an array left without elements is removed,
-# and the sandbox table with it when nothing else is in it).
+# to). Uninstall only takes its own elements out: an array left empty, and the
+# table around it, stay as they are, so nothing of anyone else's is judged.
 agmsg_codex_roots_scan() {
   awk '
     # position just after the closing delimiter of a multi-line string, or 0
@@ -171,15 +171,15 @@ agmsg_codex_roots_scan() {
             c = e + 1
             if (match(substr($0, c), /^[ \t]*,[ \t]*/)) c += RLENGTH
             else if (substr($0, c) ~ /^[ \t]*\]/) sub(/[ \t]*,[ \t]*$/, "", out)   # the last one: no dangling comma
-            gone = 1; removed = 1; rem[narr]++
+            gone = 1; removed = 1
             continue
           }
-          if (ed) { present[narr SUBSEP val] = 1; kept[narr]++ }
+          if (ed) present[narr SUBSEP val] = 1
           out = out tok; c = e + 1
         } else if (ch == "#") {
           out = out substr($0, c); break
         } else if (ch == "]" && ed) {
-          out = out substr($0, c); inr = 0; arrend[narr] = nl + 1; break
+          out = out substr($0, c); inr = 0; break
         } else { out = out ch; c++ }
       }
       if (!(gone && out ~ /^[ \t]*$/)) L[++nl] = out
@@ -203,20 +203,7 @@ agmsg_codex_roots_scan() {
           else { L[++nl] = ""; L[++nl] = "[sandbox_workspace_write]"; L[++nl] = "writable_roots = [" ent "]" }
         }
       }
-      # uninstall: an array that held only this installs roots goes, and the
-      # sandbox table with it when nothing else is left in it
-      if (ENVIRON["AGMSG_DROP_EMPTY"] == "1") {
-        for (i = 1; i <= narr; i++)
-          if (rem[i] > 0 && kept[i] == 0 && arrend[i] > 0) {
-            for (k = arrline[i]; k <= arrend[i]; k++) del[k] = 1
-            if (arrbase[i]) dropped_base = 1
-          }
-        if (dropped_base && basehdr) {
-          for (k = basehdr + 1; k <= nl && (k in del); k++) ;
-          if (k > nl || L[k] ~ /^[ \t]*$/ || L[k] ~ /^[ \t]*\[/) del[basehdr] = 1
-        }
-      }
-      for (i = 1; i <= nl; i++) if (!(i in del)) print L[i]
+      for (i = 1; i <= nl; i++) print L[i]
       exit 10 + (removed ? 1 : 0) + (added ? 2 : 0)
     }
   ' "$1"

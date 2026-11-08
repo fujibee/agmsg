@@ -495,7 +495,37 @@ EOF
   cmp "$cfg" "$BATS_TEST_TMPDIR/original.toml"
 }
 
-@test "uninstall removes an array that held only this install's roots, and the sandbox table with it, and keeps a multi-line example" {
+# The uninstall side of the scanner on its own: prints the result for a config.
+scan_uninstall() {   # <config.toml> <directory of the install>
+  run env AGMSG_STALE_PREFIXES="$2" bash -c '
+    . "$1/scripts/lib/codex-config.sh"
+    agmsg_codex_roots_scan "$2"
+  ' _ "$REPO_ROOT" "$1"
+}
+
+@test "uninstall takes only its own elements out: the emptied array and the table around it stay, whatever follows them" {
+  local cfg="$BATS_TEST_TMPDIR/c.toml"
+  printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = ["/fixture/skill/db"]' '' 'network_access = true' > "$cfg"
+  scan_uninstall "$cfg" /fixture/skill
+  [ "$status" -eq 11 ]
+  [ "$output" = "$(printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = []' '' 'network_access = true')" ]
+  printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = ["/fixture/skill/db"]' '' '[other]' 'a = 1' > "$cfg"
+  scan_uninstall "$cfg" /fixture/skill
+  [ "$output" = "$(printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = []' '' '[other]' 'a = 1')" ]
+}
+
+@test "uninstall keeps a multi-line element and any other content of the array byte for byte" {
+  local cfg="$BATS_TEST_TMPDIR/c.toml"
+  printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = [' '"/fixture/skill/db",' "'''" "/unrelated'''" ']' > "$cfg"
+  scan_uninstall "$cfg" /fixture/skill
+  [ "$status" -eq 11 ]
+  [ "$output" = "$(printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = [' "'''" "/unrelated'''" ']')" ]
+  printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = ["/fixture/skill/db", 7]' > "$cfg"
+  scan_uninstall "$cfg" /fixture/skill
+  [ "$output" = "$(printf '%s\n' '[sandbox_workspace_write]' 'writable_roots = [7]')" ]
+}
+
+@test "uninstall of a config that held only this install's roots leaves an empty list and the table, and keeps a multi-line example" {
   mkdir -p "$FAKE_HOME/.codex"
   local cfg="$FAKE_HOME/.codex/config.toml"
   printf 'developer_instructions = """\nKeep: writable_roots = ["x"]\n"""\n' > "$cfg"
@@ -504,8 +534,8 @@ EOF
   run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
   [ "$status" -eq 0 ]
   grep -qxF 'Keep: writable_roots = ["x"]' "$cfg"
-  refute grep -q '^writable_roots' "$cfg"
-  refute grep -qxF '[sandbox_workspace_write]' "$cfg"
+  grep -qxF '[sandbox_workspace_write]' "$cfg"
+  grep -qxF 'writable_roots = []' "$cfg"
 }
 
 @test "uninstall --keep-data keeps the state and drops the backup copies" {

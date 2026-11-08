@@ -150,6 +150,9 @@ _uninstall_checked_rm() {
 # (agmsg_codex_roots_scan in scripts/lib/codex-config.sh), so only the real
 # writable_roots array is looked at: the same text inside a multi-line value
 # elsewhere (an example in developer_instructions, say) stays byte for byte.
+# Only this install's elements are taken out: an array that is left empty, and
+# the table around it, stay as they are (an empty list is harmless to Codex),
+# so nothing of anyone else's is ever judged or removed.
 # It is transformed into a candidate file first, and the config is backed up
 # and replaced only when that changes it: a config that only mentions a
 # SIBLING install's root is never touched, backed up, or reported "cleaned".
@@ -160,7 +163,7 @@ _uninstall_clean_codex_config() {
   for _dir in "$@"; do
     prefixes="${prefixes}$(agmsg_codex_native_path "$_dir")"$'\n'
   done
-  AGMSG_STALE_PREFIXES="$prefixes" AGMSG_DROP_EMPTY=1 \
+  AGMSG_STALE_PREFIXES="$prefixes" \
     agmsg_codex_roots_scan "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" || scan=$?
   if [ "$scan" -eq 10 ]; then
     rm -f "$CODEX_CONFIG.tmp"
