@@ -145,6 +145,8 @@ pub trait World: Send + Sync {
     /// The team's current name, from its id.
     fn team_name(&self, team_id: &str) -> Option<String>;
     fn join(&self, team: &str, name: &str, agent_type: &str, project: &str) -> Result<(), String>;
+    /// A member was just added to `team` by an add-on call: the window re-reads that team's member list once.
+    fn roster_changed(&self, _team: &str) {}
     fn send(&self, team: &str, from: &str, to: &str, body: &str) -> Result<(), String>;
     fn spawnable(&self) -> Result<Vec<SpawnType>, String>;
     /// The models Codex itself lists (a short-lived `codex app-server`); the caller caches the answer.
@@ -183,6 +185,8 @@ pub struct RealWorld {
     /// Asks the window to open a terminal. Set by `init_global`; kept as a closure so that nothing in this file
     /// that the unit tests reach names the window runtime (a test binary that links it cannot start on Windows).
     pub opener: Mutex<Option<Box<dyn Fn(&OpenPane) -> Result<(), String> + Send + Sync>>>,
+    /// Tells the window that a team's member list changed. Set by `init_global`.
+    pub roster_notifier: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
 }
 
 impl World for RealWorld {
@@ -215,6 +219,11 @@ impl World for RealWorld {
     fn process_start(&self, pid: u32) -> Option<String> {
         process_start_token(pid)
     }
+    fn roster_changed(&self, team: &str) {
+        if let Some(notify) = self.roster_notifier.lock().unwrap().as_ref() {
+            notify(team);
+        }
+    }
     fn open_pane(&self, req: &OpenPane) -> Result<(), String> {
         match self.opener.lock().unwrap().as_ref() {
             Some(open) => open(req),
@@ -236,6 +245,9 @@ fn read_team_id(config: &Path) -> Option<String> {
 
 /// The window opens a terminal pane for the entry named in the payload (`OpenPane`).
 pub const OPEN_EVENT: &str = "addon-agent-open";
+
+/// A member joined a team through an add-on call (`team.join`, `agents.spawn`); the payload is the team's name.
+pub const ROSTER_EVENT: &str = "addon-roster-changed";
 
 /// A token for "this process, started then": the start time as the OS prints it. One `ps` launch on
 /// macOS and Linux, none on Windows (the creation time from the process handle); asked when an agent's pane has started and once per
@@ -380,11 +392,16 @@ static GLOBAL: OnceLock<Manager> = OnceLock::new();
 /// The app's one manager. Set once at startup.
 pub fn init_global(app: tauri::AppHandle) -> &'static Manager {
     GLOBAL.get_or_init(|| {
+        let handle = app.clone();
         let opener: Box<dyn Fn(&OpenPane) -> Result<(), String> + Send + Sync> = Box::new(move |req| {
             use tauri::Emitter;
             app.emit(OPEN_EVENT, req).map_err(|e| e.to_string())
         });
-        Manager::new(Arc::new(RealWorld { opener: Mutex::new(Some(opener)) }), crate::agmsg::base_dir().join("addons").join("agents-journal.json"))
+        let notifier: Box<dyn Fn(&str) + Send + Sync> = Box::new(move |team| {
+            use tauri::Emitter;
+            let _ = handle.emit(ROSTER_EVENT, team.to_string());
+        });
+        Manager::new(Arc::new(RealWorld { opener: Mutex::new(Some(opener)), roster_notifier: Mutex::new(Some(notifier)) }), crate::agmsg::base_dir().join("addons").join("agents-journal.json"))
     })
 }
 
@@ -548,7 +565,10 @@ impl Manager {
             return Err(BrokerError::new("not_available", format!("could not join the team: {e}")));
         }
         match phase("join: confirm", || self.confirm_ours(team, &name, MEMBER_TYPE, &project_s)) {
-            Ok(()) => self.set_state(&key, State::Joined, None)?,
+            Ok(()) => {
+                self.set_state(&key, State::Joined, None)?;
+                self.world.roster_changed(team);
+            }
             Err(why) => {
                 self.set_state(&key, State::Failed, Some(why.clone()))?;
                 return Err(BrokerError::new("conflict", why));
@@ -752,6 +772,7 @@ impl Manager {
             return Err(BrokerError::new("conflict", why));
         }
         self.set_state(&key, State::Joined, None)?;
+        self.world.roster_changed(team);
         self.open(&key)
     }
 
@@ -1005,6 +1026,8 @@ mod tests {
         sent: Mutex<Vec<(String, String, String, String)>>,
         opened: Mutex<Vec<OpenPane>>,
         joins: AtomicUsize,
+        /// the teams the window was told to re-read, one entry per notice
+        roster_notices: Mutex<Vec<String>>,
         /// what `codex app-server` answers (None: a one-model list), and how many times it was asked
         codex_answer: Mutex<Option<Result<Vec<ModelOption>, String>>>,
         codex_calls: AtomicUsize,
@@ -1034,6 +1057,9 @@ mod tests {
         fn team_name(&self, id: &str) -> Option<String> {
             let old = id.strip_prefix("id-")?;
             Some(self.renamed.lock().unwrap().get(old).cloned().unwrap_or_else(|| old.to_string()))
+        }
+        fn roster_changed(&self, team: &str) {
+            self.roster_notices.lock().unwrap().push(team.to_string());
         }
         fn join(&self, _team: &str, name: &str, t: &str, project: &str) -> Result<(), String> {
             self.joins.fetch_add(1, Ordering::SeqCst);
@@ -1216,6 +1242,25 @@ mod tests {
         g.reg.lock().unwrap().set_power(g.id, Power::Join, false).unwrap();
         assert_eq!(code(call(&g, "agents.types", json!({}))), "not_granted", "spawn needs the join power too");
         assert_eq!(code(call(&g, "nope", json!({}))), "bad_args");
+    }
+
+    #[test]
+    fn the_window_is_told_once_per_join_and_per_spawn_and_not_for_a_retry() {
+        let f = fx(all_powers());
+        call(&f, "team.join", json!({})).unwrap();
+        assert_eq!(f.world.roster_notices.lock().unwrap().len(), 1, "one notice for the join");
+        call(&f, "team.join", json!({})).unwrap();
+        assert_eq!(f.world.roster_notices.lock().unwrap().len(), 1, "a retry joins nobody, so it tells nobody");
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap();
+        assert_eq!(f.world.roster_notices.lock().unwrap().len(), 2, "one notice for the spawn");
+    }
+
+    #[test]
+    fn a_failed_join_does_not_tell_the_window() {
+        let f = fx(all_powers());
+        *f.world.outside.lock().unwrap() = None;
+        let _ = call(&f, "agents.spawn", json!({"type": "not-a-type", "name": "w"}));
+        assert!(f.world.roster_notices.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1778,7 +1823,7 @@ mod tests {
         let team = std::env::var("AGMSG_REAL_TEAM").expect("AGMSG_REAL_TEAM names a throwaway team");
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().canonicalize().unwrap();
-        let w = Arc::new(Real { inner: RealWorld { opener: Mutex::new(None) }, root: base.join("members"), home: base.join("agmsg-agents"), opened: Mutex::new(vec![]) });
+        let w = Arc::new(Real { inner: RealWorld { opener: Mutex::new(None), roster_notifier: Mutex::new(None) }, root: base.join("members"), home: base.join("agmsg-agents"), opened: Mutex::new(vec![]) });
         std::fs::create_dir_all(&w.home).unwrap();
         let mut m = Manager::new(w.clone(), base.join("journal.json"));
         m.open_wait = std::time::Duration::from_millis(100);
