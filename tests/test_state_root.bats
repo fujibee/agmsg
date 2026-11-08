@@ -287,15 +287,15 @@ EOF
 
 # The removal on its own, without the addition that follows it in an update
 # (which reads the file by lines and is changed separately).
-drop_stale_alone() {   # <config.toml> <stale path>
+drop_stale_alone() {   # <config.toml> <stale path> [path to add]
   run env STALE_PATH="$2" bash -c '
     SKILL_DIR=/fixture/skill
     eval "$(sed -n "/^_sync_codex_roots()/,/^}/p" "$1/install.sh")"
     agmsg_install_op_require() { return 0; }
     move_into_place() { mv "$1" "$2"; }
     agmsg_codex_stale_writable_paths() { echo "$STALE_PATH"; }
-    _sync_codex_roots "$2"
-  ' _ "$REPO_ROOT" "$1"
+    _sync_codex_roots "$2" ${3:+"$3"}
+  ' _ "$REPO_ROOT" "$1" "${3:-}"
 }
 
 @test "--update on a config with a writable_roots example inside a multi-line string: the note stays byte for byte, the real array gets the real roots" {
@@ -353,6 +353,40 @@ EOF
   grep -qxF '[sandbox_workspace_write]' "$cfg"
   grep -qF "\"$real/db\"" "$cfg"
   grep -qxF 'model = "m"' "$cfg"
+}
+
+@test "roots are added to [sandbox_workspace_write] only: a profile table's array is left alone and the table is created when missing" {
+  local cfg="$BATS_TEST_TMPDIR/c.toml"
+  cat > "$cfg" <<'EOF'
+[profiles.review.sandbox_workspace_write]
+writable_roots = ["/keep"]
+EOF
+  drop_stale_alone "$cfg" /fixture/skill/db /fixture/state/db
+  [ "$status" -eq 0 ]
+  [ "$(cat "$cfg")" = "$(printf '%s\n' \
+    '[profiles.review.sandbox_workspace_write]' \
+    'writable_roots = ["/keep"]' \
+    '' \
+    '[sandbox_workspace_write]' \
+    'writable_roots = ["/fixture/state/db"]')" ]
+}
+
+@test "roots are added under an existing [sandbox_workspace_write] that has no writable_roots, whatever a profile table holds" {
+  local cfg="$BATS_TEST_TMPDIR/c.toml"
+  cat > "$cfg" <<'EOF'
+[profiles.review.sandbox_workspace_write]
+writable_roots = ["/keep"]
+[sandbox_workspace_write]
+network_access = true
+EOF
+  drop_stale_alone "$cfg" /fixture/skill/db /fixture/state/db
+  [ "$status" -eq 0 ]
+  [ "$(cat "$cfg")" = "$(printf '%s\n' \
+    '[profiles.review.sandbox_workspace_write]' \
+    'writable_roots = ["/keep"]' \
+    '[sandbox_workspace_write]' \
+    'writable_roots = ["/fixture/state/db"]' \
+    'network_access = true')" ]
 }
 
 @test "the removal reads only the real array: writable_roots text inside a multi-line string elsewhere is kept byte for byte" {
@@ -428,9 +462,15 @@ EOF
   run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
   [ "$status" -eq 0 ]
   [ ! -e "$ST/db" ] && [ ! -e "$ST/teams" ]
-  # nothing of this install is left: no link (dangling or not), no lock, no directory
-  [ ! -e "$SK" ] && [ ! -L "$SK/run" ] && [ ! -e "$SK/.install-op" ]
-  [ ! -e "$ST" ]
+  # nothing of this install is left but the lock database, whose removal could
+  # give a waiter a different lock from the next installer's: no link
+  # (dangling or not), no state root
+  [ ! -L "$SK/run" ]
+  [ "$(ls -A "$SK")" = .install-op ]
+  [ -f "$SK/.install-op/lock.db" ]
+  # the state root keeps only the old-layout lock file of the run/ it had
+  [ ! -e "$ST/db" ] && [ ! -e "$ST/teams" ] && [ ! -e "$ST/.owner" ]
+  [ "$(cd "$ST" && find . -mindepth 1 | sort | grep -vE 'install-op.lock.db|^\./run$' | wc -l | tr -d ' ')" -eq 0 ]
   # the entries carry the resolved spelling (/private/var for /var on macOS)
   ! grep -q '/\.agmsg/agmsg' "$FAKE_HOME/.codex/config.toml"
 }

@@ -851,7 +851,8 @@ move_into_place() {
 # decoded value, in whichever string spelling it is written. Every other
 # element, the user's own and other installs', stays. When the array is missing
 # the key is added under [sandbox_workspace_write], and that table when it is
-# missing too.
+# missing too. Entries are added to that table only; an array in a profile
+# table is never added to (obsolete entries are dropped from any of them).
 #
 # The awk exit status says what it did: 10 nothing, 11 removed, 12 added,
 # 13 both. Only a changed file is backed up (once) and replaced.
@@ -967,10 +968,10 @@ _sync_codex_roots() {
       if (!(gone && out ~ /^[ \t]*$/)) L[++nl] = out
     }
     END {
-      # the array to add to: the one under [sandbox_workspace_write], else the first
+      # the array to add to: the one under [sandbox_workspace_write], and no other
+      # (a profile table is left alone); without one it is created
       t = 0
       for (i = 1; i <= narr; i++) if (arrbase[i]) { t = i; break }
-      if (!t && narr > 0) t = 1
       for (i = 1; i <= nw; i++) if (!t || !((t SUBSEP want[i]) in present)) miss[++nm] = want[i]
       if (nm > 0) {
         added = 1

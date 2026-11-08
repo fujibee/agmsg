@@ -670,37 +670,36 @@ _uninstall_one() {
       return 1
     }
   fi
-  agmsg_install_op_unlock
-  AGMSG_INSTALL_OP_ACTIVE=false
-  unset AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER
-  # Only while nothing has been installed here since: an install that started
-  # after the lock was let go has written its own skill files and links.
   if [ "$full_remove" = true ] && [ ! -e "$SKILL_DIR/SKILL.md" ] && [ ! -e "$SKILL_DIR/scripts" ]; then
-    # The lock is let go and the record cleared: take away what is left of this
-    # install, and only that -- its own link to the state, the lock database
-    # and its sidecars, and the directories that are then empty (rmdir, which
-    # leaves any directory that still holds something).
+    # Still holding the install lock and with the record cleared: take away what
+    # is left of this install, and only that -- its own link to the state, the
+    # state root's owner file and whatever else the state's run/ holds, and the
+    # directories that are then empty (rmdir, which leaves any directory that
+    # still holds something). Nothing else can be installing here while the lock
+    # is held, so no later install's link or file is taken (and nothing is
+    # touched if one has already written its skill files). The lock databases
+    # stay, as they always have: a waiter that holds one open would otherwise be
+    # left with a different lock from the next installer's.
     local _left
     if [ -L "$SKILL_DIR/run" ]; then
       rm -f "$SKILL_DIR/run"
     fi
     if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
-      for _left in "$STATE_PARENT/run"/install-op.lock.db*; do
-        [ -e "$_left" ] && rm -f "$_left"
+      for _left in "$STATE_PARENT/run"/* "$STATE_PARENT/run"/.[!.]*; do
+        [ -e "$_left" ] || continue
+        case "${_left##*/}" in install-op.lock.db*) continue ;; esac
+        rm -f "$_left"
       done
-      rmdir "$STATE_PARENT/run" 2>/dev/null || true
     fi
-    for _left in "$SKILL_DIR/.install-op"/lock.db*; do
-      [ -e "$_left" ] && rm -f "$_left"
-    done
-    rmdir "$SKILL_DIR/.install-op" 2>/dev/null || true
+    if [ -n "$STATE_PARENT" ] && [ -f "$STATE_PARENT/.owner" ]; then
+      rm -f "$STATE_PARENT/.owner"
+    fi
     rmdir "$SKILL_DIR" 2>/dev/null || true
-    if [ -n "$STATE_PARENT" ]; then
-      [ -f "$STATE_PARENT/.owner" ] && rm -f "$STATE_PARENT/.owner"
-      rmdir "$STATE_PARENT" 2>/dev/null || true
-    fi
     unset _left
   fi
+  agmsg_install_op_unlock
+  AGMSG_INSTALL_OP_ACTIVE=false
+  unset AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER
 }
 
 # Machine-wide pieces, shared by every install: only safe to remove once NO

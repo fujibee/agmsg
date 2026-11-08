@@ -3027,7 +3027,7 @@ CYG
   [ ! -e "$SK/run/install-op-incomplete.json" ]
 }
 
-@test "uninstall removes everything, the lock and the links included, once it has let go of the lock" {
+@test "uninstall removes everything but .install-op/lock.db once it has let go of the lock" {
   _restore_install
   [ -f "$SK/.install-op/lock.db" ]
   [ -f "$SK/run/install.db" ]
@@ -3035,13 +3035,14 @@ CYG
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
 
-  [ ! -e "$SK/.install-op/lock.db" ]
+  [ -f "$SK/.install-op/lock.db" ]
   [ ! -e "$SK/run/install.db" ]
   [ ! -e "$SK/run/install-manifest.json" ]
   [ ! -e "$SK/scripts" ]
   [ ! -e "$SK/SKILL.md" ]
-  # no link (dangling or not) and no directory is left behind
-  [ ! -e "$SK" ] && [ ! -L "$SK/run" ]
+  # no link (dangling or not) is left behind; the lock directory is all that stays
+  [ ! -L "$SK/run" ]
+  [ "$(ls -A "$SK")" = .install-op ]
 }
 
 @test "uninstall preserves recovery through removal and cannot delete a later install entrypoint" {
