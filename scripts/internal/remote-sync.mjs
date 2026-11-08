@@ -3779,32 +3779,46 @@ export { collectInstallBaseline, installChangedAgainst };
 // start` itself refuses a team that is disconnected or owned by systemd. While an
 // install or update holds the install lock (the SQLite lock in .install-op/) the
 // helper does not start anything: it polls the lock every two seconds, for at
-// most five minutes per attempt, and starts once, in the layout the update leaves.
-// The installer starts the engines it stopped itself after letting the lock go; a
-// start that finds one already running under another pid ends the helper. An
+// most two minutes per attempt, and starts once, in the layout the update leaves.
+// An attempt whose lock is still held at the end of the wait starts nothing and
+// counts as used. The installer starts the engines it stopped itself after letting
+// the lock go; a start that finds one already running under another pid ends the
+// helper. When every attempt is used up the helper writes a down record for the
+// team (sync.* family) with `remote.sh sync start <team>` as the recovery, and
+// clears it again if an engine does come up. An
 // engine it starts too early stands down again and asks again. The attempts are
-// bounded: the waits add up to 1110 seconds (about 18.5 minutes), after which a
+// bounded: the waits add up to 1110 seconds, plus at most 120 seconds per attempt
+// waiting for the install lock (600 seconds in all, about 28.5 minutes), after which a
 // person has to run `remote.sh sync start`, as the stand-down event says.
 const STAND_DOWN_RESTART_DELAYS_SECONDS = [30, 60, 120, 300, 600];
-const STAND_DOWN_RESTART_SCRIPT = [
+const STAND_DOWN_LOCK_POLLS = 60;
+const STAND_DOWN_LOCK_POLL_SECONDS = 2;
+const standDownRestartScript = (polls, interval) => [
   'remote="$1"; team="$2"; shift 2',
   'root="${AGMSG_SYNC_CONNECTION_DIR:-$(cd "$(dirname "$remote")/.." && pwd)}"',
   'old="$(cat "$root/run/remote-sync.$team.pid" 2>/dev/null)"',
+  'lib="$(dirname "$remote")/lib/down-notice.sh"; key=""',
+  '[ ! -f "$lib" ] || { . "$lib" 2>/dev/null && key="$(down_notice_key sync "$team" 2>/dev/null)"; }',
+  'note_up() { [ -z "$key" ] || AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_clear "$key" >/dev/null 2>&1 || :; }',
+  'note_down() { [ -z "$key" ] || AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_set "$key" down "the sync engine for $team stood down for an update and could not be started again by itself (an install or update was still running, or the start failed)" "bash $remote sync start $team" >/dev/null 2>&1 || :; }',
   'for delay in "$@"; do',
   '  sleep "$delay"',
   '  lock="$root/.install-op/lock.db"; held=0',
-  '  while [ "$held" -lt 150 ] && [ -f "$lock" ] && ! sqlite3 -cmd ".timeout 200" "$lock" "SELECT count(*) FROM sqlite_master;" >/dev/null 2>&1; do sleep 2; held=$((held + 1)); done',
+  `  while [ "$held" -lt ${polls} ] && [ -f "$lock" ] && ! sqlite3 -cmd ".timeout 200" "$lock" "SELECT count(*) FROM sqlite_master;" >/dev/null 2>&1; do sleep ${interval}; held=$((held + 1)); done`,
+  `  [ "$held" -lt ${polls} ] || continue`,
   '  out="$(bash "$remote" sync start "$team" 2>&1)"; rc=$?',
   '  [ "$rc" = 0 ] || continue',
   '  case "$out" in',
-  '    *started*) exit 0 ;;',
-  '    *already*running*) case "$out" in *"pid $old)"*) ;; *) exit 0 ;; esac ;;',
+  '    *started*) note_up; exit 0 ;;',
+  '    *already*running*) case "$out" in *"pid $old)"*) ;; *) note_up; exit 0 ;; esac ;;',
   '  esac',
   'done',
+  'note_down',
   'exit 1',
 ].join("\n");
-export function standDownRestartArgs(team, scriptsRoot, delays = STAND_DOWN_RESTART_DELAYS_SECONDS) {
-  return ["-c", STAND_DOWN_RESTART_SCRIPT, "bash", join(scriptsRoot, "remote.sh"), team, ...delays.map(String)];
+export function standDownRestartArgs(team, scriptsRoot, delays = STAND_DOWN_RESTART_DELAYS_SECONDS,
+  { lockPolls = STAND_DOWN_LOCK_POLLS, lockPollSeconds = STAND_DOWN_LOCK_POLL_SECONDS } = {}) {
+  return ["-c", standDownRestartScript(lockPolls, lockPollSeconds), "bash", join(scriptsRoot, "remote.sh"), team, ...delays.map(String)];
 }
 export function restartAfterStandDown(team, scriptsRoot, { spawnCall = spawn, environment = process.env } = {}) {
   const childEnvironment = { ...environment };

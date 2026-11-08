@@ -286,24 +286,36 @@ agmsg_install_daemon_active() {   # <skill_dir>
   return 2
 }
 
-# 0 = the pidfile of this install names a live process that is this team's sync
-# engine (the same two conditions remote.sh's engine status asks: the command
-# line names remote-sync.mjs and ends with this team's arguments); 1 = no such
-# engine. An engine that stood down on its own when the update began (it sees the
-# completion record move) is already gone, and is not a failure to stop it.
-# Where the command line cannot be read (no ps), a live pid counts as the engine.
+# 0 = the sync engine of <team> is not proven stopped; 1 = it is. The proof is
+# the installed remote.sh's own answer (`status --json`), which looks at the
+# supervisor first (a systemd-owned engine is running, starting, inactive or
+# unknown, and has no pidfile of ours) and then at the pidfile's process with the
+# engine command-line comparison: only "stopped" and "stale" count. An engine
+# that stood down on its own when the update began (it sees the completion record
+# move) reads "stale" here, and is not a failure to stop it. An answer that
+# cannot be read, or has no row for the team, is not proof.
 agmsg_install_engine_alive() {   # <skill_dir> <team>
-  local pid command
-  pid="$(cat "$1/run/remote-sync.$2.pid" 2>/dev/null || true)"
-  pid="${pid%$'\r'}"
-  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
-  if agmsg_install_pid_gone "$pid"; then return 1; fi
-  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [ -n "$command" ] || return 0
-  case "$command" in
-    *"remote-sync.mjs"*" run --team $2") return 0 ;;
-  esac
-  return 1
+  local row state
+  command -v python3 >/dev/null 2>&1 || return 0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    state="$(printf '%s' "$row" | python3 -c '
+import json, sys
+try:
+    r = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+if isinstance(r, dict) and r.get("local_team") == sys.argv[1]:
+    print(r.get("engine_state", ""))
+' "$2" 2>/dev/null || true)"
+    state="${state%$'\r'}"
+    case "$state" in
+      stopped|stale) return 1 ;;
+      '') ;;
+      *) return 0 ;;
+    esac
+  done < <(bash "$1/scripts/remote.sh" status --json 2>/dev/null || true)
+  return 0
 }
 
 # A state that stays where Codex watches is shown where a person already looks

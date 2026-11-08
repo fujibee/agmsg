@@ -749,11 +749,17 @@ fake_engine() {   # <team> -> sets ENGINE_PID, writes the pidfile
   sleep 0.3
 }
 
-stub_remote() {   # <sync stop exit code>
+# remote.sh as an old install has it: the first `status --json` (the update's
+# snapshot) says the engine runs, a later one (asked after a failed stop) says
+# <state after>; `sync stop` exits <stop code>.
+stub_remote() {   # <sync stop exit code> <engine_state after the first answer>
+  rm -f "$BATS_TEST_TMPDIR/status-asked"
   cat > "$SK/scripts/remote.sh" <<EOS
 #!/usr/bin/env bash
 case "\$1 \$2" in
-  "status --json") echo '{"local_team":"t1","engine_state":"running"}' ;;
+  "status --json")
+    if [ -e "$BATS_TEST_TMPDIR/status-asked" ]; then s=$2; else s=running; : > "$BATS_TEST_TMPDIR/status-asked"; fi
+    echo "{\"local_team\":\"t1\",\"engine_state\":\"\$s\"}" ;;
   "sync stop") exit $1 ;;
   "sync restart") echo "\$3" >> "\$(dirname "\$0")/../restarted.txt" ;;
 esac
@@ -764,7 +770,7 @@ EOS
   inst
   demote
   fake_engine t1
-  stub_remote 1
+  stub_remote 1 running
   run inst --update
   grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
@@ -789,19 +795,26 @@ EOS
 @test "an engine that already stood down on its own is a stopped engine: a failing 'sync stop' does not keep the state in place" {
   inst
   demote
-  printf '99999999\n' > "$SK/run/remote-sync.t1.pid"
-  stub_remote 1
+  stub_remote 1 stale
   run inst --update
   [ "$status" -eq 0 ]
   refute grep -qF "could not be stopped" <<<"$output"
   [ "$(readlink "$SK/db")" = "$ST/db" ]
-  # a live process that is not this team's engine is not the engine either
-  printf '%s\n' "$$" > "$ST/run/remote-sync.t1.pid"
-  demote
-  printf '%s\n' "$$" > "$SK/run/remote-sync.t1.pid"
-  stub_remote 1
-  run inst --update
-  [ "$(readlink "$SK/db")" = "$ST/db" ]
+}
+
+@test "an engine that systemd owns, or whose state cannot be told, is not a stopped engine: the state stays in place and says why" {
+  local engine_state
+  for engine_state in running starting inactive unknown garbled; do
+    command rm -rf "$FAKE_HOME" "$BATS_TEST_TMPDIR/status-asked"
+    mkdir -p "$FAKE_HOME"
+    inst
+    demote
+    stub_remote 1 "$engine_state"
+    run inst --update
+    grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
+    [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+    [ -f "$SK/run/down/state.json" ]
+  done
 }
 
 @test "the sync engine is started after the completion record is written and the lock is let go, once per team" {
