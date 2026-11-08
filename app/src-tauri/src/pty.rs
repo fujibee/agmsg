@@ -393,6 +393,26 @@ fn inject_transaction(
     write(b"\r")
 }
 
+/// How long after the Enter the pane is looked at for the diagnostic line.
+const AFTER_ENTER_LOOK: Duration = Duration::from_millis(1500);
+
+/// A short-lived thread that looks at the pane once, `AFTER_ENTER_LOOK` after the Enter, and logs what it showed (see
+/// `after_enter_line`). It runs outside the injection, holds no pane lock and writes nothing to the pane, so it
+/// cannot change delivery. No process is started.
+fn log_after_enter(sessions: Arc<Mutex<HashMap<String, PtySession>>>, id: String, text: String) {
+    thread::spawn(move || {
+        thread::sleep(AFTER_ENTER_LOOK);
+        let seen = sessions.lock().unwrap().get(&id).map(|s| {
+            let tail = s.tail.lock().unwrap();
+            let agent_type = s.detection.lock().unwrap().agent_type().to_string();
+            (agent_type, tail.detection_tail(), tail.last_lines(5, 120))
+        });
+        if let Some((agent_type, tail, lines)) = seen {
+            eprintln!("[agmsg-app] after Enter into {id}: {}", crate::agent_state::after_enter_line(&agent_type, &tail, &lines, &text));
+        }
+    });
+}
+
 /// Inject `text` (then Enter) into the agent's stdin — the universal,
 /// agent-agnostic agmsg delivery. No idle wait before writing the text; see
 /// the module doc comment for why waiting for quiescence was worse than not
@@ -414,12 +434,16 @@ pub async fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String
     let sessions = Arc::clone(&manager.sessions);
     let lock = pane_lock(&manager.inject_locks, &id);
     tauri::async_runtime::spawn_blocking(move || {
-        inject_transaction(&lock, Duration::from_millis(300), text.as_bytes(), |bytes| {
+        let sent = inject_transaction(&lock, Duration::from_millis(300), text.as_bytes(), |bytes| {
             match sessions.lock().unwrap().get_mut(&id) {
                 Some(s) => write_and_flush(&mut s.writer, bytes),
                 None => Err("no such pty session".to_string()),
             }
-        })
+        });
+        if sent.is_ok() {
+            log_after_enter(sessions, id, text);
+        }
+        sent
     })
     .await
     .map_err(|e| e.to_string())?

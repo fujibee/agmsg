@@ -40,6 +40,10 @@ impl DetectionTracker {
         self.state
     }
 
+    pub fn agent_type(&self) -> &str {
+        &self.agent_type
+    }
+
     pub fn observe(&mut self, tail: &str, now: Instant) -> Option<PaneState> {
         if now.saturating_duration_since(self.created_at) < STARTUP_GRACE {
             return None;
@@ -161,6 +165,18 @@ fn grok_working_line(line: &str) -> bool {
 const GROK_PERMISSION_DIALOG_SENTINEL: &str = "\u{1}GROK_PERMISSION_DIALOG\u{1}";
 const GROK_QUESTION_DIALOG_SENTINEL: &str = "\u{1}GROK_QUESTION_DIALOG\u{1}";
 const GROK_WORKING_SENTINEL: &str = "\u{1}GROK_WORKING\u{1}";
+
+/// What the pane showed a moment after an app-typed notice was submitted, as one log line: whether it went Working,
+/// whether the start of the notice is still among the bottom lines (the composer, not the transcript above it), and
+/// those lines. Diagnostic only; nothing acts on it.
+pub fn after_enter_line(agent_type: &str, tail: &str, lines: &[String], injected: &str) -> String {
+    let working = classify(agent_type, tail) == PaneState::Working;
+    let marker: String = injected.chars().take(16).collect();
+    let bottom = &lines[lines.len().saturating_sub(6)..];
+    let in_composer = !marker.trim().is_empty() && bottom.iter().any(|l| l.contains(marker.trim()));
+    let yn = |b: bool| if b { "yes" } else { "no" };
+    format!("working={} text_in_composer={} last lines: {}", yn(working), yn(in_composer), lines.join(" | "))
+}
 
 pub fn classify(agent_type: &str, tail: &str) -> PaneState {
     if !matches!(
@@ -312,6 +328,16 @@ impl TailBuffer {
         } else {
             self.bytes.extend(input);
         }
+    }
+
+    /// The last `n` non-empty screen lines (escapes stripped, split like `detection_tail`), each cut to `width`
+    /// characters. For a log line about what a pane showed; it does not take part in detection.
+    pub fn last_lines(&self, n: usize, width: usize) -> Vec<String> {
+        let raw: Vec<u8> = self.bytes.iter().copied().collect();
+        let (text, _) = strip_ansi(&String::from_utf8_lossy(&raw));
+        let mut lines: Vec<String> = text.split(['\r', '\n']).filter(|l| !l.trim().is_empty()).map(|l| l.trim().chars().take(width).collect()).collect();
+        lines.drain(..lines.len().saturating_sub(n));
+        lines
     }
 
     pub fn detection_tail(&self) -> String {
@@ -622,6 +648,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
+        after_enter_line,
         after_last_horizontal_rule, bottom_non_empty_lines, classify, grok_working_line,
         is_chevron_menu_line, is_horizontal_rule, prompt_box_body, DetectionTracker, PaneState,
         TailBuffer, TAIL_CAPACITY,
@@ -804,6 +831,42 @@ Would you like to proceed?\n\
             classify("codex", &working.detection_tail()),
             PaneState::Working
         );
+    }
+
+    const NOTICE: &str = "[agmsg] white: \"your move\" - read your inbox with: bash x";
+
+    fn after_enter(agent_type: &str, screen: &str) -> String {
+        let mut tail = TailBuffer::default();
+        tail.push(screen.as_bytes());
+        after_enter_line(agent_type, &tail.detection_tail(), &tail.last_lines(5, 120), NOTICE)
+    }
+
+    #[test]
+    fn a_notice_still_in_the_composer_with_no_working_signal_is_reported_as_such() {
+        let line = after_enter("codex", "earlier output\n\n> [agmsg] white: \"your move\" - read your inbox with: bash x\n  gpt  100% left");
+        assert!(line.starts_with("working=no text_in_composer=yes"), "{line}");
+        assert!(line.contains("gpt  100% left"), "the last lines are in the line: {line}");
+    }
+
+    #[test]
+    fn a_submitted_notice_that_started_working_is_reported_as_such() {
+        let line = after_enter("codex", "[agmsg] white: \"your move\" - read\nthinking\nl1\nl2\nl3\nl4\nbottom\x1b]2;⠙ codex\u{7}");
+        assert!(line.starts_with("working=yes text_in_composer=no"), "{line}");
+    }
+
+    #[test]
+    fn the_notice_far_above_the_bottom_is_the_transcript_not_the_composer() {
+        let line = after_enter("codex", "[agmsg] white: \"your move\" - read\na\nb\nc\nd\ne\nf\ng\nh");
+        assert!(line.starts_with("working=no text_in_composer=no"), "{line}");
+    }
+
+    #[test]
+    fn last_lines_are_cut_and_skip_blank_lines() {
+        let mut tail = TailBuffer::default();
+        tail.push(b"one\n\n  two  \r\x1b[31mthree-is-long\x1b[0m\n");
+        assert_eq!(tail.last_lines(2, 5), vec!["two", "three"]);
+        assert_eq!(tail.last_lines(9, 5), vec!["one", "two", "three"]);
+        assert!(TailBuffer::default().last_lines(3, 5).is_empty());
     }
 
     #[test]
