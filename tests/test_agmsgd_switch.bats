@@ -99,6 +99,27 @@ setup() {
   # replacement binary at an unchanged mtime) from ever being tried
   # again. This test controls and observes that one bounded async
   # attempt rather than asserting it never happens.
+  #
+  # The attempt is counted by wrapping the real daemon.sh itself (review
+  # round 2): cmd_start's own _resolve_node calls the Node stub more than
+  # once per attempt, so counting Node-stub invocations cannot tell "the
+  # first attempt is still running" from "a second attempt started" --
+  # reproduced directly (a slow stub plus a fixed sleep before snapshotting
+  # its log landed on the wrong count). Counting completed daemon.sh start
+  # attempts instead is correct regardless of how many times the resolver
+  # probes Node inside one of them. identities.sh itself never calls
+  # daemon.sh, so every line this wrapper writes is self-heal's own doing.
+  local attempts="$TEST_SKILL_DIR/attempts"
+  mv "$SCRIPTS/daemon.sh" "$SCRIPTS/daemon.sh.real"
+  cat > "$SCRIPTS/daemon.sh" <<WRAP
+#!/usr/bin/env bash
+echo "entered \$\$" >> "$attempts"
+bash "$SCRIPTS/daemon.sh.real" "\$@"
+rc=\$?
+echo "completed \$\$ rc=\$rc" >> "$attempts"
+exit "\$rc"
+WRAP
+  chmod +x "$SCRIPTS/daemon.sh"
   mkdir -p "$TEST_SKILL_DIR/no-node"
   printf '#!/usr/bin/env bash\necho unexpected-node >> "$CALL_LOG"\nexit 1\n' > "$TEST_SKILL_DIR/no-node/node"
   chmod +x "$TEST_SKILL_DIR/no-node/node"
@@ -112,13 +133,16 @@ setup() {
   assert_contains 'agmsg daemon enable'
   assert_contains alice
   assert_lacks unexpected-node
-  # The one bounded try lands within this window; give the detached
-  # child the same time budget the other self-heal tests here do.
-  sleep 1
-  [ -f "$CALL_LOG" ]
-  local tries_after_first
-  tries_after_first="$(wc -l < "$CALL_LOG")"
-  [ "$tries_after_first" -ge 1 ]
+  # Bounded wait for the one attempt to actually FINISH (not just start)
+  # -- never a fixed sleep guessing how long that takes.
+  local waited=0
+  while { [ ! -f "$attempts" ] || [ "$(grep -c '^completed' "$attempts")" -lt 1 ]; } && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -f "$attempts" ]
+  [ "$(grep -c '^completed' "$attempts")" -eq 1 ]
+  [ "$(grep -c '^entered' "$attempts")" -eq 1 ]
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   [ "$status" -eq 0 ]
   assert_lacks 'stopped while enabled'
@@ -126,8 +150,9 @@ setup() {
   [ -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
   sleep 1
   # Still the SAME window (claimed by call #1): a second ordinary call
-  # must not trigger a second try.
-  [ "$(wc -l < "$CALL_LOG")" -eq "$tries_after_first" ]
+  # must not start a second attempt.
+  [ "$(grep -c '^entered' "$attempts")" -eq 1 ]
+  [ "$(grep -c '^completed' "$attempts")" -eq 1 ]
 }
 
 @test "warning interval is rolling across clock windows and expires after ten minutes" {
