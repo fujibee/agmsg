@@ -296,12 +296,26 @@ agmsg_install_daemon_active() {   # <skill_dir>
 #   1 = positively no engine of ours: no pidfile, no valid pid, the process is
 #       gone, or its command line was read and is not the engine
 #   2 = the team has a systemd unit: not ours to stop, not proof of anything
-#   3 = unknown: the process is alive but its command line could not be read
+#   3 = unknown: the process is alive but its command line could not be read, or
+#       an observation failed (the systemd probe that exists but errors, a pidfile
+#       that is there and cannot be read)
 agmsg_install_engine_owned_pid() {   # <skill_dir> <team>
-  local skill="$1" team="$2" pid command load
-  load="$("${AGMSG_SYSTEMCTL:-systemctl}" --user show "agmsg-remote-sync-$team.service" -p LoadState 2>/dev/null || true)"
-  case "$load" in ''|*not-found*) ;; *) return 2 ;; esac
-  pid="$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)"
+  local skill="$1" team="$2" pid command load systemctl_bin="${AGMSG_SYSTEMCTL:-systemctl}" pidfile
+  # Only a machine without systemctl is known to have no unit. A probe that is
+  # there and fails (no user bus, no permission) or answers nothing readable is
+  # not "no unit": a supervisor's engine has no pidfile of ours.
+  if command -v "$systemctl_bin" >/dev/null 2>&1; then
+    load="$("$systemctl_bin" --user show "agmsg-remote-sync-$team.service" -p LoadState 2>/dev/null)" || return 3
+    case "$load" in
+      *not-found*) ;;
+      *LoadState=*) return 2 ;;
+      *) return 3 ;;
+    esac
+  fi
+  # An absent pidfile is "no engine"; one that is there and cannot be read is not.
+  pidfile="$skill/run/remote-sync.$team.pid"
+  [ -e "$pidfile" ] || [ -L "$pidfile" ] || return 1
+  pid="$(cat "$pidfile" 2>/dev/null)" || return 3
   pid="${pid%$'\r'}"
   _agmsg_pid_valid "$pid" || return 1
   _agmsg_pid_alive_local "$pid" || return 1

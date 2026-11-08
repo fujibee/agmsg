@@ -14,6 +14,11 @@ setup() {
   export ST="$FAKE_HOME/.agmsg/agmsg"
   unset CODEX_HOME AGMSG_HOME AGMSG_STORAGE_PATH AGMSG_CONFIG AGMSG_STORAGE_DRIVER AGMSG_APP_BASE AGMSG_SPAWN_OPTIONS_FILE
   export AGMSG_AGENT_PID=""
+  # No systemd unit for any team, on any machine the suite runs on: a real
+  # systemctl may be missing, answer or fail (no user bus) depending on the host.
+  printf '#!/bin/sh\necho LoadState=not-found\n' > "$FAKE_HOME/systemctl"
+  chmod +x "$FAKE_HOME/systemctl"
+  export AGMSG_SYSTEMCTL="$FAKE_HOME/systemctl"
 }
 
 teardown() {
@@ -823,6 +828,28 @@ EOS
   [ ! -e "$ST/run/down/state.json" ]
 }
 
+@test "an update does not move the state when the systemd probe fails, or when the pidfile is there and cannot be read; it says so and records it" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads any file"
+  inst
+  demote
+  stub_remote running
+  printf '#!/bin/sh\necho "Failed to connect to bus: Permission denied" >&2\nexit 1\n' > "$BATS_TEST_TMPDIR/sc"
+  chmod +x "$BATS_TEST_TMPDIR/sc"
+  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/sc" run inst --update
+  grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
+  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+  [ -f "$SK/run/down/state.json" ]
+  # a pidfile that is there but cannot be read
+  printf '%s\n' "$$" > "$SK/run/remote-sync.t1.pid"
+  chmod 000 "$SK/run/remote-sync.t1.pid"
+  stub_remote running
+  run inst --update
+  chmod 600 "$SK/run/remote-sync.t1.pid"
+  grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
+  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+  [ -f "$SK/run/down/state.json" ]
+}
+
 @test "an engine that ignores TERM is KILLed once it is still the same engine" {
   inst
   demote
@@ -890,6 +917,49 @@ stop_locked_with() {   # <ownership answers, one per call, "rc[:pid]" separated 
   sleep() { :; }
   STOP_RC=0
   _agmsg_install_engine_stop_locked "$BATS_TEST_TMPDIR/sk" t1 >/dev/null || STOP_RC=$?
+}
+
+# agmsg_install_engine_owned_pid against the real helpers, with the host's
+# observations staged: "positively none" (1) is for evidence of absence only.
+owned_pid_with() {   # sets OWNED_RC
+  # shellcheck disable=SC1091
+  . "$REPO_ROOT/scripts/lib/compat.sh"
+  # shellcheck disable=SC1091
+  . "$REPO_ROOT/scripts/lib/instance-id.sh"
+  eval "$(sed -n '/^agmsg_install_engine_owned_pid() {/,/^}/p' "$REPO_ROOT/install.sh")"
+  OWNED_RC=0
+  agmsg_install_engine_owned_pid "$BATS_TEST_TMPDIR/sk" t1 >/dev/null 2>&1 || OWNED_RC=$?
+}
+
+@test "owned pid: a systemd probe that is there and fails, or answers nothing readable, is unknown; no systemctl at all is no unit" {
+  mkdir -p "$BATS_TEST_TMPDIR/sk/run"
+  printf '#!/bin/sh\necho "Failed to connect to bus: Permission denied" >&2\nexit 1\n' > "$BATS_TEST_TMPDIR/sc"
+  chmod +x "$BATS_TEST_TMPDIR/sc"
+  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/sc" owned_pid_with
+  [ "$OWNED_RC" -eq 3 ]
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/sc"
+  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/sc" owned_pid_with
+  [ "$OWNED_RC" -eq 3 ]
+  printf '#!/bin/sh\necho LoadState=loaded\n' > "$BATS_TEST_TMPDIR/sc"
+  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/sc" owned_pid_with
+  [ "$OWNED_RC" -eq 2 ]
+  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/none-such" owned_pid_with
+  [ "$OWNED_RC" -eq 1 ]
+}
+
+@test "owned pid: an absent pidfile is no engine; one that is there and cannot be read is unknown" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads any file"
+  mkdir -p "$BATS_TEST_TMPDIR/sk/run"
+  owned_pid_with
+  [ "$OWNED_RC" -eq 1 ]
+  printf '%s\n' "$$" > "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid"
+  chmod 000 "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid"
+  owned_pid_with
+  chmod 600 "$BATS_TEST_TMPDIR/sk/run/remote-sync.t1.pid"
+  [ "$OWNED_RC" -eq 3 ]
+  # readable, naming a live process that is not the engine: positively none
+  owned_pid_with
+  [ "$OWNED_RC" -eq 1 ]
 }
 
 @test "locked stop: a pid that stops being the engine after TERM (reused) is never KILLed" {
