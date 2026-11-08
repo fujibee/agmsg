@@ -286,63 +286,79 @@ agmsg_install_daemon_active() {   # <skill_dir>
   return 2
 }
 
-# Stops the sync engine of <team> of the install that is on disk now. The
-# installer cannot rely on the installed remote.sh to do it: releases up to 1.7.1
-# have no `sync stop`, so it asks that script only what every release answers
-# (`status --json`, which looks at the supervisor first and then at the pidfile's
-# process with the engine command-line comparison) and does the stopping itself.
-#   0 = the engine is stopped (it was already: "stopped" or "stale", which is what
-#       an engine that stood down on its own when the update began reads as)
-#   1 = it is running and could not be stopped, or its supervisor (systemd) owns
-#       it, or its state could not be read: none of those is proof of stopped.
-agmsg_install_engine_stop() {   # <skill_dir> <team>
-  local skill="$1" team="$2" row line state pid="" load attempt signal
-  command -v python3 >/dev/null 2>&1 || return 1
-  state=""
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    row="$(printf '%s' "$line" | python3 -c '
-import json, sys
-try:
-    r = json.loads(sys.stdin.read())
-except Exception:
-    sys.exit(0)
-if isinstance(r, dict) and r.get("local_team") == sys.argv[1]:
-    print("%s %s" % (r.get("engine_state", ""), r.get("engine_pid") or ""))
-' "$team" 2>/dev/null || true)"
-    row="${row%$'\r'}"
-    [ -n "$row" ] || continue
-    state="${row%% *}"
-    pid="${row#* }"
-    [ "$pid" != "$row" ] || pid=""
-    break
-  done < <(bash "$skill/scripts/remote.sh" status --json 2>/dev/null || true)
-  case "$state" in
-    stopped|stale) return 0 ;;
-    running) ;;
-    *) return 1 ;;
-  esac
-  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
-  # The pidfile must name that process: a supervisor's engine is not ours to stop.
-  [ "$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)" = "$pid" ] || return 1
+# The pid of <team>'s engine when it is ours to stop right now, judged by what is
+# on the machine and asked afresh each time: the pidfile of this install names a
+# live process whose command line is this install's engine script ending in
+# "run --team <team>" (the comparison remote.sh's engine status makes, through
+# the same compat functions), and the team has no systemd unit (a supervisor's
+# engine is the supervisor's). Prints the pid and returns 0; returns 1 when there
+# is no such engine; returns 2 when there is a systemd unit for the team, which
+# is not ours to stop and not proof of anything.
+agmsg_install_engine_owned_pid() {   # <skill_dir> <team>
+  local skill="$1" team="$2" pid command load
   load="$("${AGMSG_SYSTEMCTL:-systemctl}" --user show "agmsg-remote-sync-$team.service" -p LoadState 2>/dev/null || true)"
-  case "$load" in ''|*not-found*) ;; *) return 1 ;; esac
-  # TERM first, up to about five seconds for it to leave; only then KILL, up to
-  # five more; the process is confirmed gone before anything is reported stopped.
+  case "$load" in ''|*not-found*) ;; *) return 2 ;; esac
+  pid="$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)"
+  pid="${pid%$'\r'}"
+  _agmsg_pid_valid "$pid" || return 1
+  _agmsg_pid_alive_local "$pid" || return 1
+  command="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  agmsg_cmdline_names_path "$command" "$skill/scripts/internal/remote-sync.mjs" || return 1
+  case "$command" in *" run --team $team") ;; *) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
+# Stops the sync engine of <team> of the install that is on disk now. The installer
+# cannot rely on the installed remote.sh to do it: releases up to 1.7.1 have no
+# `sync stop`, so it does the stopping itself, under the same team lock `sync
+# start` and `sync restart` take, so no engine is started or replaced while this
+# runs.
+#   0 = no engine of ours is running any more (there was none, or it was stopped
+#       here and nothing took its place)
+#   1 = it is running and could not be stopped, or a supervisor owns it, or it was
+#       replaced: none of those is proof of stopped.
+# Ownership is asked again before EACH signal, so a pid that was reused after the
+# engine left is never signalled: TERM, up to about five seconds for it to leave,
+# then (only if the same engine still runs) KILL, up to five more. The pidfile is
+# removed only if it still names the process that was stopped.
+agmsg_install_engine_stop() {   # <skill_dir> <team>
+  local skill="$1" team="$2"
+  (
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/scripts/lib/registry-lock.sh" || exit 1
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/scripts/lib/compat.sh" || exit 1
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/scripts/lib/instance-id.sh" || exit 1
+    agmsg_lock_acquire "$skill/teams/$team" || exit 1
+    rc=1
+    _agmsg_install_engine_stop_locked "$skill" "$team" && rc=0
+    agmsg_lock_release
+    exit "$rc"
+  )
+}
+
+_agmsg_install_engine_stop_locked() {   # <skill_dir> <team>
+  local skill="$1" team="$2" pid current signal attempt rc=0
+  pid="$(agmsg_install_engine_owned_pid "$skill" "$team")" || rc=$?
+  case "$rc" in 0) ;; 1) return 0 ;; *) return 1 ;; esac
   for signal in TERM KILL; do
+    current="$(agmsg_install_engine_owned_pid "$skill" "$team")" || break
+    [ "$current" = "$pid" ] || return 1
     kill "-$signal" "$pid" 2>/dev/null || true
     attempt=0
     while [ "$attempt" -lt 100 ]; do
-      if agmsg_install_pid_gone "$pid"; then
-        rm -f "$skill/run/remote-sync.$team.pid"
-        echo "  ~ stopped the sync engine for '$team' (pid $pid); the update starts it again"
-        return 0
-      fi
+      agmsg_install_pid_gone "$pid" && break 2
       attempt=$((attempt + 1))
       sleep 0.05
     done
   done
-  return 1
+  agmsg_install_pid_gone "$pid" || return 1
+  # Gone is not enough: an engine that took its place has to be left alone.
+  current="$(agmsg_install_engine_owned_pid "$skill" "$team")" && return 1
+  [ "$(cat "$skill/run/remote-sync.$team.pid" 2>/dev/null || true)" != "$pid" ] || rm -f "$skill/run/remote-sync.$team.pid"
+  echo "  ~ stopped the sync engine for '$team' (pid $pid); the update starts it again"
+  return 0
 }
 
 # A state that stays where Codex watches is shown where a person already looks

@@ -738,11 +738,22 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -z "$(ls -A "$ST" 2>/dev/null)" ]
 }
 
-# A process whose command line is what remote.sh's engine check looks for.
-fake_engine() {   # <team> -> sets ENGINE_PID, writes the pidfile
-  printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$BATS_TEST_TMPDIR/node"
+# A process whose command line is what the engine check looks for. <mode> says
+# what it does on TERM: leave (default), ignore it, put another engine in its
+# place (replace), or leave a foreign process under the pidfile (foreign).
+fake_engine() {   # <team> [mode] -> sets ENGINE_PID, writes the pidfile
+  cat > "$BATS_TEST_TMPDIR/node" <<'EOS'
+#!/bin/sh
+case "$FAKE_ENGINE_MODE" in
+  ignore) trap '' TERM ;;
+  replace) trap 'FAKE_ENGINE_MODE= "$0" "$@" & echo $! > "$FAKE_ENGINE_PIDFILE"; exit 0' TERM ;;
+  foreign) trap 'sleep 300 & echo $! > "$FAKE_ENGINE_PIDFILE"; echo $! > "$FAKE_ENGINE_PIDFILE.foreign"; exit 0' TERM ;;
+esac
+while :; do sleep 1; done
+EOS
   chmod +x "$BATS_TEST_TMPDIR/node"
-  "$BATS_TEST_TMPDIR/node" "$SK/scripts/internal/remote-sync.mjs" run --team "$1" &
+  FAKE_ENGINE_MODE="${2:-}" FAKE_ENGINE_PIDFILE="$SK/run/remote-sync.$1.pid" \
+    "$BATS_TEST_TMPDIR/node" "$SK/scripts/internal/remote-sync.mjs" run --team "$1" &
   ENGINE_PID=$!
   track_bg "$ENGINE_PID"
   printf '%s\n' "$ENGINE_PID" > "$SK/run/remote-sync.$1.pid"
@@ -755,6 +766,7 @@ fake_engine() {   # <team> -> sets ENGINE_PID, writes the pidfile
 # <state after>, with <pid> when it runs.
 stub_remote() {   # <engine_state after the first answer> [pid]
   rm -f "$BATS_TEST_TMPDIR/status-asked"
+  mkdir -p "$SK/teams/t1"
   cat > "$SK/scripts/remote.sh" <<EOS
 #!/usr/bin/env bash
 case "\$1 \$2" in
@@ -781,13 +793,14 @@ EOS
   [ ! -e "$SK/run/down/state.json" ]
 }
 
-@test "an engine the pidfile does not name, or that a supervisor owns, keeps the state where it is, visibly, and the next update tries the move again" {
+@test "an engine a supervisor owns keeps the state where it is, visibly, and the next update tries the move again" {
   inst
   demote
   fake_engine t1
-  # running, but the pidfile names another process: not ours to stop
-  stub_remote running 99999999
-  run inst --update
+  stub_remote running "$ENGINE_PID"
+  printf '#!/bin/sh\necho LoadState=loaded\n' > "$BATS_TEST_TMPDIR/systemctl"
+  chmod +x "$BATS_TEST_TMPDIR/systemctl"
+  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" run inst --update
   grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
   [ -z "$(ls -A "$ST" 2>/dev/null)" ]
@@ -800,13 +813,55 @@ EOS
   grep -qF "npx agmsg@latest install --update" "$SK/run/down/state.json"
   run bash "$SK/scripts/doctor.sh"
   grep -qF "state is degraded since" <<<"$output"
-  # the next update finds nothing in the way: it moves, and the record is cleared
-  kill "$ENGINE_PID"; wait "$ENGINE_PID" 2>/dev/null || true
+  # no unit any more: the next update stops the engine, moves, and clears the record
+  stub_remote running "$ENGINE_PID"
   run inst --update
   [ "$status" -eq 0 ]
   [ "$(readlink "$SK/db")" = "$ST/db" ]
   [ ! -e "$SK/run/down/state.json" ]
   [ ! -e "$ST/run/down/state.json" ]
+}
+
+@test "an engine that ignores TERM is KILLed once it is still the same engine" {
+  inst
+  demote
+  fake_engine t1 ignore
+  stub_remote running "$ENGINE_PID"
+  run inst --update
+  [ "$status" -eq 0 ]
+  grep -qF "stopped the sync engine for 't1' (pid $ENGINE_PID)" <<<"$output"
+  [ "$(readlink "$SK/db")" = "$ST/db" ]
+  run kill -0 "$ENGINE_PID"
+  [ "$status" -ne 0 ]
+}
+
+@test "an engine that takes the place of the stopped one is left alone and the state stays where it is" {
+  inst
+  demote
+  fake_engine t1 replace
+  stub_remote running "$ENGINE_PID"
+  run inst --update
+  grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
+  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
+  # the update goes on and its own restart deals with whatever engine runs then;
+  # nothing of the replacement is left behind
+  local replacement
+  replacement="$(cat "$SK/run/remote-sync.t1.pid" 2>/dev/null || true)"
+  [ -z "$replacement" ] || kill "$replacement" 2>/dev/null || true
+}
+
+@test "a process that took over the pid of the stopped engine is never signalled" {
+  inst
+  demote
+  fake_engine t1 foreign
+  stub_remote running "$ENGINE_PID"
+  run inst --update
+  [ "$status" -eq 0 ]
+  local foreign
+  foreign="$(cat "$SK/run/remote-sync.t1.pid.foreign")"
+  kill -0 "$foreign"
+  kill "$foreign"
+  [ "$(readlink "$SK/db")" = "$ST/db" ]
 }
 
 @test "an engine that already stood down on its own is a stopped engine: the state moves" {
@@ -817,34 +872,6 @@ EOS
   [ "$status" -eq 0 ]
   refute grep -qF "could not be stopped" <<<"$output"
   [ "$(readlink "$SK/db")" = "$ST/db" ]
-}
-
-@test "an engine that systemd owns, or whose state cannot be told, is not a stopped engine: the state stays in place and says why" {
-  local engine_state
-  for engine_state in starting inactive unknown garbled; do
-    command rm -rf "$FAKE_HOME" "$BATS_TEST_TMPDIR/status-asked"
-    mkdir -p "$FAKE_HOME"
-    inst
-    demote
-    stub_remote "$engine_state"
-    run inst --update
-    grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
-    [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
-    [ -f "$SK/run/down/state.json" ]
-  done
-  # a systemd unit that exists for the team: its engine is the unit's, whatever the pidfile says
-  command rm -rf "$FAKE_HOME" "$BATS_TEST_TMPDIR/status-asked"
-  mkdir -p "$FAKE_HOME"
-  inst
-  demote
-  fake_engine t1
-  stub_remote running "$ENGINE_PID"
-  printf '#!/bin/sh\necho LoadState=loaded\n' > "$BATS_TEST_TMPDIR/systemctl"
-  chmod +x "$BATS_TEST_TMPDIR/systemctl"
-  AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" run inst --update
-  grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
-  [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
-  kill -0 "$ENGINE_PID"
 }
 
 # tests/fixtures/remote-1.7.1.sh is scripts/remote.sh of the v1.7.1 tag, byte for
@@ -883,14 +910,18 @@ EOS
   local src="$BATS_TEST_TMPDIR/src"
   mkdir -p "$src"
   tar -C "$REPO_ROOT" --exclude=.git --exclude=node_modules --exclude=worktrees -cf - . | tar -C "$src" -xf -
-  # the installed (old) scripts: starting anything now would run them against a record that is aside
-  stub_remote starting
+  # a supervisor owns the engine: the move is given up. The installed (old)
+  # scripts must not start anything now, against a record that is aside.
+  fake_engine t1
+  stub_remote running "$ENGINE_PID"
+  printf '#!/bin/sh\necho LoadState=loaded\n' > "$BATS_TEST_TMPDIR/systemctl"
+  chmod +x "$BATS_TEST_TMPDIR/systemctl"
   printf '#!/usr/bin/env bash\necho "early daemon $*" >> "%s/starts.txt"\n' "$BATS_TEST_TMPDIR" > "$SK/scripts/daemon.sh"
   chmod +x "$SK/scripts/daemon.sh"
   # the updated scripts
   printf '#!/usr/bin/env bash\nm=no; [ -f "%s/run/install-manifest.json" ] && m=yes\necho "daemon $* manifest=$m" >> "%s/starts.txt"\n' "$SK" "$BATS_TEST_TMPDIR" > "$src/scripts/daemon.sh"
   printf '#!/usr/bin/env bash\ncase "$1 $2" in "status --json") echo %s ;; "sync restart") echo "restart $3" >> "%s/starts.txt" ;; esac\n' "'{\"local_team\":\"t1\",\"engine_state\":\"running\"}'" "$BATS_TEST_TMPDIR" > "$src/scripts/remote.sh"
-  run env HOME="$FAKE_HOME" bash "$src/install.sh" --cmd agmsg --update
+  run env HOME="$FAKE_HOME" AGMSG_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" bash "$src/install.sh" --cmd agmsg --update
   grep -qF -- "the sync engine for 't1' could not be stopped" <<<"$output"
   [ -d "$SK/db" ] && [ ! -L "$SK/db" ]
   [ "$(wc -l < "$BATS_TEST_TMPDIR/starts.txt" | tr -d ' ')" -eq 2 ]
