@@ -106,6 +106,19 @@ prepare_push() {
       and (.envelope.cipher=="none") and (.envelope.key_id==null)' >/dev/null
 }
 
+@test "sync contract: a body cut in the middle of a multibyte character still prepares and is offered for push" {
+  # In a UTF-8 locale the byte-stream tools on this path (the sed in
+  # agmsg_sqlite, the tr and paste around the row reads) rejected such a body
+  # ("illegal byte sequence"), prepare failed, and the sync engine stopped.
+  export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+  storage_send demo alice bob "first ok" >/dev/null
+  storage_send demo alice bob "result=$(printf '\xe3\x81')" >/dev/null
+  storage_send demo alice bob "last ok" >/dev/null
+  run prepare_push
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | jq -s '[.[] | select(.type=="sync_push_candidate")] | length')" -eq 3 ]
+}
+
 @test "sync contract: a crash after sealing publishes neither wire nor envelope" {
   storage_send demo alice bob "seal once after recovery" >/dev/null
   export AGMSG_SYNC_TEST_WIRE_LOG="$BATS_TEST_TMPDIR/private-wires.log"
