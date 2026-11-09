@@ -664,7 +664,7 @@ agmsg_install_write_recovery_helper() {
   local helper="$SKILL_DIR/run/install-op-recovery.sh" temp
   agmsg_install_op_require || return 1
   temp="$(mktemp "$SKILL_DIR/run/.install-op-recovery.XXXXXX")" || return 1
-  if ! cat "$SCRIPT_DIR/scripts/lib/codex-config.sh" "$SCRIPT_DIR/scripts/lib/sqlpath.sh" \
+  if ! cat "$SCRIPT_DIR/scripts/lib/codex-config.sh" "$SCRIPT_DIR/scripts/lib/sqlite-crlf.sh" "$SCRIPT_DIR/scripts/lib/sqlpath.sh" \
       "$SCRIPT_DIR/scripts/lib/sqlite-output.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" "$SCRIPT_DIR/scripts/lib/state-root.sh" > "$temp"; then
     rm -f "$temp"
     return 1

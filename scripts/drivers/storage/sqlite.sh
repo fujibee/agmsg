@@ -702,9 +702,9 @@ storage_import() {
       fi
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
-      agmsg_sqlite_warm
       local ins_sql
       if ins_sql="$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at" "$body_file")"; then
+        agmsg_sqlite_warm
         printf '%s\n' "$ins_sql" | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || ins_rc=$?
       else
         # The statement could not be built (its body file is not readable): a
