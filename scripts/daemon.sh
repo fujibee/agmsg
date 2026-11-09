@@ -760,6 +760,7 @@ cmd_start() {
   running_node="$(_resolve_node 2>/dev/null || true)"
   if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
+    _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status
     return 0
@@ -775,6 +776,10 @@ cmd_start() {
     found_node="$(_resolve_node)" || {
       echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed. Install Node from https://nodejs.org/en/download, then run agmsg daemon start." >&2
       _path_hint start >&2
+      # A real daemon_start_attempts row, same as every other refusal here
+      # -- this one was simply missing before. "no usable Node" keys
+      # daemon-state.sh's existing *Node*/*node* recovery text.
+      agmsg_sqlite "$INSTALL_DB" "INSERT INTO daemon_start_attempts VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'no usable Node found', $$);" 2>/dev/null || true
       return 1
     }
     found_version="$("$found_node" -e 'console.log(process.versions.node)')"
@@ -823,6 +828,7 @@ cmd_start() {
   done
   if [ "$ready_rc" = 0 ]; then
     echo "agmsg daemon start: running"
+    _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status
   else

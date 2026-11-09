@@ -774,6 +774,316 @@ _pid_gone_harness() {   # <kill message>
   [ "$owner_state" = "ready" ]
 }
 
+@test "install: --update clears a down_notice left by an earlier failed restart once the daemon comes back (decision 11-04, S01/S14)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
+  # Simulate a down_notice left behind by an earlier failed restart attempt.
+  ( . "$SK/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$SK/run/down/agmsgd.json" ]
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  # Stop before any assertion below can fail, same ordering the existing
+  # "starts an agmsgd that was turned on again" test above uses -- a
+  # failed assertion must not leave a real background daemon running
+  # past this test.
+  bash "$SK/scripts/daemon.sh" stop || true
+  [ ! -f "$SK/run/down/agmsgd.json" ]
+}
+
+@test "install: --update records a down_notice when its one restart attempt fails, instead of only a terminal line (decision 11-04, S01/S14)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
+  # _resolve_node tries the recorded node_path, then AGMSG_NODE, then
+  # whatever agmsg_resolve_node() returns as a last resort -- but that last
+  # resort itself treats AGMSG_NODE as authoritative and returns it
+  # verbatim ahead of a real PATH lookup (lib/node.sh), so setting
+  # AGMSG_NODE poisons BOTH of those slots, and setting node_path poisons
+  # the first -- all three candidates collapse to the same bad value, so
+  # the installer's single restart attempt fails too -- exactly the
+  # S01/S14 gap: the daemon stays down and, before this fix, that was
+  # reported ONLY as a line in this run's own stderr.
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '/no/such/node';"
+  HOME="$FAKE_HOME" AGMSG_NODE=/no/such/node run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+  [ "${output#*did not start after the update}" != "$output" ]
+  [ -f "$SK/run/down/agmsgd.json" ]
+  grep -q '"component":"agmsgd"' "$SK/run/down/agmsgd.json"
+  grep -q '"state":"down"' "$SK/run/down/agmsgd.json"
+  # The recovery command is single-quoted (so it survives a space in the
+  # install path, review round 3), so the literal substring "agmsg daemon
+  # start" never appears -- the quote closes right after "agmsg". Check
+  # the pieces that DO always appear instead.
+  grep -qF "$SK/scripts/agmsg' daemon start" "$SK/run/down/agmsgd.json"
+}
+
+_install_fns() {
+  local fns="$BATS_TEST_TMPDIR/install-fns.sh"
+  awk '/^# --- Defaults ---/ {exit} {print}' "$REPO_ROOT/install.sh" > "$fns"
+  printf '%s' "$fns"
+}
+
+@test "agmsg_install_restart_daemon: a restart that hits lock contention is retried once; op_gen is reused unchanged (decision 11-04, S01/S14 scope ruling)" {
+  local fns fake="$FAKE_HOME/fake-skill"
+  mkdir -p "$fake/run" "$fake/scripts"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',7); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+tries_file="$fake/tries"
+n=0
+[ -f "\$tries_file" ] && n="\$(cat "\$tries_file")"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$tries_file"
+printf '%s\n' "\$*" >> "$fake/argv-log"
+if [ "\$n" = 1 ]; then
+  echo "agmsg daemon: could not acquire the install operation lock (another agmsg install or daemon command holds it). Nothing was changed; try again in a moment." >&2
+  exit 1
+fi
+echo "agmsg daemon start: running"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$fake/tries")" = 2 ]
+  grep -qx 'start --only-if-op-gen 7' "$fake/argv-log"
+  [ "$(sort -u "$fake/argv-log" | wc -l | tr -d ' ')" = 1 ]
+  [ "${output#*trying once more}" != "$output" ]
+  [ ! -f "$fake/run/down/agmsgd.json" ]
+}
+
+@test "agmsg_install_restart_daemon: a permanent failure (no usable Node) is NOT retried" {
+  local fns fake="$FAKE_HOME/fake-skill2"
+  mkdir -p "$fake/run" "$fake/scripts"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',3); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+tries_file="$fake/tries"
+n=0
+[ -f "\$tries_file" ] && n="\$(cat "\$tries_file")"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$tries_file"
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$(cat "$fake/tries")" = 1 ]
+}
+
+@test "agmsg_install_restart_daemon: a guarded skip (desired/op_gen changed while waiting) exits 0 but is NOT treated as confirmed running, so an existing down_notice is left in place" {
+  local fns fake="$FAKE_HOME/fake-skill3"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',9); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  ( . "$fake/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$fake/run/down/agmsgd.json" ]
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+# cmd_start's own guarded-skip path (scripts/daemon.sh): desired/op_gen
+# moved on between this read and the guarded UPDATE, so it exits 0
+# having started nothing.
+echo "agmsg daemon start: agmsgd was turned off or changed while waiting; left as it is now"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+}
+
+@test "agmsg_install_restart_daemon: a recovery command for an install path containing a space tokenizes and resolves correctly (review round 3)" {
+  local fns fake="$FAKE_HOME/side install"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',5); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  # An owned mock standing in for the real scripts/agmsg wrapper -- never a
+  # real install -- so the persisted recovery command can actually be run
+  # and its tokenization checked, not just inspected as text.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$fake" > "$fake/scripts/agmsg"
+  chmod +x "$fake/scripts/agmsg"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(( . "$fake/scripts/lib/down-notice.sh" && down_notice_list ) | awk -F'\t' '{print $5}')"
+  # Quoted (single quotes), not the bare path -- a bare path with a space
+  # is not a valid command to eval at all (the point of this test).
+  [ "$recovery" = "'$fake/scripts/agmsg' daemon start" ]
+  eval "$recovery"
+  [ "$(cat "$fake/agmsg-argv-log")" = "2:daemon start" ]
+}
+
+@test "agmsg_install_restart_daemon: a recovery command for an install path containing an apostrophe tokenizes and resolves correctly" {
+  # Same setup as the space-path case above, but for the install-path
+  # character down_notice_set's own sanitizer used to corrupt by destroying
+  # the backslash a single-quote escape needs (#1929's regression test
+  # through this caller).
+  local fns fake="$FAKE_HOME/side's install"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',5); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$fake" > "$fake/scripts/agmsg"
+  chmod +x "$fake/scripts/agmsg"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ -f "$fake/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(( . "$fake/scripts/lib/down-notice.sh" && down_notice_list ) | awk -F'\t' '{print $5}')"
+  eval "$recovery"
+  [ "$(cat "$fake/agmsg-argv-log")" = "2:daemon start" ]
+}
+
+# #1941/#1928 regression: install.sh's own top-level `. "$SCRIPT_DIR/scripts/
+# lib/down-notice.sh"` (added by #1928, line ~36, ABOVE the "# --- Defaults
+# ---" marker `_install_fns` cuts at) sets down-notice.sh's include guard and
+# resolves its root to wherever THIS sourcing happens to run from. The two
+# tests above only ever exercise agmsg_install_restart_daemon's FAILURE
+# branch (down_notice_set) -- this one targets its SUCCESS branch
+# (down_notice_clear) instead, the one the apostrophe/space tests above
+# cannot reach because their fake daemon.sh always fails. Caught directly
+# (not via real daemon.sh, so a real Node/nvm resolution on the test machine
+# can never mask it the way it masked the end-to-end install/update tests
+# in a review): a `( . "$fake/..." )` re-source inherits that guard
+# like any other variable, so without AGMSG_DOWN_NOTICE_ROOT the clear would
+# silently act on the WRONG root (wherever $fns was sourced from, never
+# `$fake`) instead of returning an error -- this must be caught by checking
+# the RIGHT root was touched, not just that the call did not fail.
+@test "agmsg_install_restart_daemon: a successful restart clears THIS install's own down_notice, not the sourcing root's" {
+  local fns fake="$FAKE_HOME/fake-skill-clear" wrong_root="$FAKE_HOME/wrong-root"
+  mkdir -p "$fake/run" "$fake/scripts/lib"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',5); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  cp "$REPO_ROOT/scripts/lib/down-notice.sh" "$fake/scripts/lib/down-notice.sh"
+  # A pre-existing down_notice, as if an earlier restart attempt had failed.
+  ( . "$fake/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$fake/run/down/agmsgd.json" ]
+  fns="$(_install_fns)"
+  # The wrong root THIS SPECIFIC invocation shape resolves to (measured):
+  # `bash -c '...' _ "$fns" "$fake"` makes $0 literally "_", so
+  # install.sh's own top-level `$SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"`
+  # (dirname of "_" is ".") resolves to the CALLER's CWD -- not $fake, not
+  # $REPO_ROOT by necessity, just whatever directory the call happens to run
+  # from. Pinned here to a disposable fixture under $FAKE_HOME (own,
+  # per-test, torn down by this file's own setup/teardown (FAKE_HOME is a
+  # fresh mktemp per test, removed in teardown) whether this
+  # test passes or fails) rather than the real checkout (review: an earlier
+  # version used $REPO_ROOT itself, outside any fixture, cleaned up only
+  # after every assertion -- a real leak on an early failure, and not
+  # atomic against a concurrent run). A full copy of scripts/lib, not just
+  # down-notice.sh: the extracted function text ALSO top-level-sources every
+  # other scripts/lib/*.sh install.sh normally sources first, all resolved
+  # against this same wrong root, and a missing one would abort the whole
+  # call before ever reaching agmsg_install_restart_daemon.
+  mkdir -p "$wrong_root/scripts"
+  cp -R "$REPO_ROOT/scripts/lib" "$wrong_root/scripts/lib"
+  # A sentinel down_notice, sourced first (review): down_notice_clear cannot
+  # CREATE a file, so an absent-elsewhere check alone (the only assertion
+  # the first version of this test had) proves nothing about whether the
+  # wrong root was written to -- a present sentinel that survives proves it
+  # was not.
+  ( . "$wrong_root/scripts/lib/down-notice.sh" && down_notice_set agmsgd down unrelated unrelated )
+  [ -f "$wrong_root/run/down/agmsgd.json" ]
+  # A stub daemon.sh that always reports a successful start, unconditionally
+  # -- real Node resolution (nvm, AGMSG_CODEX_NODE, ...) plays no part here,
+  # so this result cannot be an accident of what happens to be on this
+  # machine's PATH.
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+echo "agmsg daemon start: running"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'cd "$1" && set -u && source "$2" && agmsg_install_restart_daemon "$3"' _ "$wrong_root" "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ ! -f "$fake/run/down/agmsgd.json" ]
+  # The wrong-root sentinel must survive, untouched -- the positive half of
+  # the claim an absence-only check could never make.
+  [ -f "$wrong_root/run/down/agmsgd.json" ]
+  grep -q unrelated "$wrong_root/run/down/agmsgd.json"
+}
+
+# A CI-only (never reproduced locally) failure measured on #1904: a schema
+# apply right after a prior test's real agmsgd stop occasionally failed with
+# "could not apply the daemon schema to install.db" -- `cmd_stop` confirms
+# install.db's own row says the daemon is gone before returning, not that
+# the OS process has actually released its own sqlite3 connection, so a
+# caller right behind it can still race that close. Every other sqlite3 call
+# against install.db in this codebase already carries a `.timeout`
+# (daemon-state.sh, daemon-seats.sh, install.sh's own reads, ...); this
+# function was the one write path that did not. Proven directly here, not by
+# trying to reproduce the exact agmsgd-shutdown race: a background writer
+# holds an EXCLUSIVE transaction on the schema's own db file for longer than
+# sqlite3's default busy_timeout (0, i.e. fail immediately) but well inside
+# the 5000ms this function now asks for, and the call still succeeds once
+# that writer lets go.
+@test "agmsg_install_db_apply_schema: tolerates a brief exclusive hold instead of failing immediately" {
+  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install.db" schema="$REPO_ROOT/scripts/daemon/schema.sql" fifodir in_fifo out_fifo holder_pid
+  # The real bootstrap, not a hand-rolled meta table: schema.sql expects
+  # columns (schema_version among them) a minimal stand-in would not have,
+  # which fails for an unrelated reason (a genuine schema mismatch) that
+  # looks identical to this test's own subject from the outside -- confirmed
+  # by reproducing it directly while developing this case.
+  bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$lib" "$db" >/dev/null
+  # A real held EXCLUSIVE lock, not a fake one -- a plain heredoc/pipe into
+  # sqlite3 hits EOF and ends the transaction as soon as it is written, so
+  # this needs the same fifo-backed, held-open connection pattern
+  # install-op-lock.sh uses for the same reason (sqlite3 only holds the lock
+  # for as long as its stdin stays open). Under $FAKE_HOME, not a separate
+  # mktemp dir outside it (review): this file's own teardown only removes
+  # $FAKE_HOME, so anything meant to be cleaned up automatically has to live
+  # there.
+  fifodir="$FAKE_HOME/lock-fifos"
+  in_fifo="$fifodir/in"; out_fifo="$fifodir/out"
+  mkdir -p "$fifodir"
+  mkfifo "$in_fifo" "$out_fifo"
+  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
+  holder_pid=$!
+  # Registered with teardown's own owned-pid mechanism IMMEDIATELY (before
+  # any assertion that could end the test, per that function's own
+  # docstring) -- rather than this test's own unconfirmed `kill` at the end,
+  # which both skips the ownership check every other teardown-reaped process
+  # in this file gets, and never runs at all if an assertion below fails
+  # first (review: this test's own assertions sit between the fork and that
+  # kill, exactly the gap #963 was raised about elsewhere in this file).
+  _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
+  exec 9> "$in_fifo"
+  exec 8< "$out_fifo"
+  printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
+  local line
+  IFS= read -r -t 5 -u 8 line
+  [ "$line" = held ]
+  # Released well inside this function's own 5000ms timeout, from a second
+  # process so the release genuinely overlaps the foreground call below
+  # rather than happening before it starts. Bounded and self-terminating
+  # either way (one sleep, one write, exit) even if an assertion below ends
+  # the test before the `wait` for it is reached -- nothing here needs
+  # teardown's help to not linger.
+  ( sleep 0.5; printf 'COMMIT;\n' >&9 2>/dev/null || true ) &
+  local releaser_pid=$!
+  run bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_apply_schema "$2" "$3"' _ "$lib" "$db" "$schema"
+  wait "$releaser_pid" 2>/dev/null || true
+  exec 9>&- 8<&-
+  [ "$status" -eq 0 ]
+  # The schema genuinely applied, not just "did not error": daemon_intent's
+  # own always-exactly-one-row seed (schema.sql) is present.
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM daemon_intent;")" = 1 ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.

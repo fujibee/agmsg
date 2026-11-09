@@ -90,21 +90,69 @@ setup() {
   [ "${files#*codex-bridge-request}" = "$files" ]
 }
 
-@test "ordinary operations warn once per install without Node and keep stdout clean" {
+@test "ordinary operations warn once per install without Node, self-heal tries exactly once per window, and stdout stays clean" {
+  # Decision 11-04 class C / review on #1904: self-heal excludes no
+  # reason -- "no usable Node" is retried through the real resolver the
+  # same as any other stopped reason, bounded only by the existing 600s
+  # claim, never by a cheap pre-check that could exclude a real fix
+  # (a resolver fallback path a narrower check does not see, or a
+  # replacement binary at an unchanged mtime) from ever being tried
+  # again. This test controls and observes that one bounded async
+  # attempt rather than asserting it never happens.
+  #
+  # The attempt is counted by wrapping the real daemon.sh itself (review
+  # round 2): cmd_start's own _resolve_node calls the Node stub more than
+  # once per attempt, so counting Node-stub invocations cannot tell "the
+  # first attempt is still running" from "a second attempt started" --
+  # reproduced directly (a slow stub plus a fixed sleep before snapshotting
+  # its log landed on the wrong count). Counting completed daemon.sh start
+  # attempts instead is correct regardless of how many times the resolver
+  # probes Node inside one of them. identities.sh itself never calls
+  # daemon.sh, so every line this wrapper writes is self-heal's own doing.
+  local attempts="$TEST_SKILL_DIR/attempts"
+  mv "$SCRIPTS/daemon.sh" "$SCRIPTS/daemon.sh.real"
+  cat > "$SCRIPTS/daemon.sh" <<WRAP
+#!/usr/bin/env bash
+echo "entered \$\$" >> "$attempts"
+bash "$SCRIPTS/daemon.sh.real" "\$@"
+rc=\$?
+echo "completed \$\$ rc=\$rc" >> "$attempts"
+exit "\$rc"
+WRAP
+  chmod +x "$SCRIPTS/daemon.sh"
   mkdir -p "$TEST_SKILL_DIR/no-node"
   printf '#!/usr/bin/env bash\necho unexpected-node >> "$CALL_LOG"\nexit 1\n' > "$TEST_SKILL_DIR/no-node/node"
   chmod +x "$TEST_SKILL_DIR/no-node/node"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   [ "$status" -eq 0 ]
+  # Call #1's OWN direct output stays clean -- the stub's side effect
+  # goes to CALL_LOG, never into this command's stdout/stderr (self-heal
+  # is a detached child with no FDs back to this process).
   assert_contains 'Node >= 22.13.0'
   assert_contains 'agmsg daemon enable'
   assert_contains alice
+  assert_lacks unexpected-node
+  # Bounded wait for the one attempt to actually FINISH (not just start)
+  # -- never a fixed sleep guessing how long that takes.
+  local waited=0
+  while { [ ! -f "$attempts" ] || [ "$(grep -c '^completed' "$attempts")" -lt 1 ]; } && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -f "$attempts" ]
+  [ "$(grep -c '^completed' "$attempts")" -eq 1 ]
+  [ "$(grep -c '^entered' "$attempts")" -eq 1 ]
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   [ "$status" -eq 0 ]
   assert_lacks 'stopped while enabled'
+  assert_lacks unexpected-node
   [ -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
-  [ ! -f "$CALL_LOG" ]
+  sleep 1
+  # Still the SAME window (claimed by call #1): a second ordinary call
+  # must not start a second attempt.
+  [ "$(grep -c '^entered' "$attempts")" -eq 1 ]
+  [ "$(grep -c '^completed' "$attempts")" -eq 1 ]
 }
 
 @test "warning interval is rolling across clock windows and expires after ten minutes" {
@@ -337,6 +385,169 @@ WRAPPER
     assert_contains 'Unread messages are preserved'
     [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
   done
+}
+
+@test "warn_if_stopped records a down_notice for a genuinely stopped daemon and clears it once ready (decision 11-04, S01/S14)" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  grep -q '"component":"agmsgd"' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  grep -q '"state":"down"' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  grep -q 'no usable Node recorded' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  # Health observed ready again (or desired flips off) clears it, even
+  # though neither of those paths is the one that set it.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
+@test "warn_if_stopped never records a down_notice for 'unchecked' (cannot tell is not down)" {
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  mkdir -p "$BATS_TEST_TMPDIR/denied"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/ps"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/denied/ps" "$BATS_TEST_TMPDIR/denied/getconf"
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = unchecked ]
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
+@test "warn_if_stopped never erases an existing down_notice on an UNOBSERVED (install.db missing) check (review round 1 NEEDS FIX)" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  mv "$TEST_SKILL_DIR/run/install.db" "$TEST_SKILL_DIR/run/install.db.saved"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_DESIRED" "$AGMSGD_HEALTH"'
+  [ "$output" = "unknown|unknown" ]
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  mv "$TEST_SKILL_DIR/run/install.db.saved" "$TEST_SKILL_DIR/run/install.db"
+}
+
+@test "warn_if_stopped clears a down_notice once desired is confirmed off, same as once health is confirmed ready" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
+@test "warn_if_stopped persists a recovery command that tokenizes and resolves for an install path containing a space (review round 3)" {
+  # down-notice.sh resolves ITS OWN root from where it is sourced from, not
+  # from _AGMSG_DAEMON_ROOT -- in real use daemon-state.sh and down-notice.sh
+  # always live in the same install's scripts/lib, so a full, separately
+  # rooted install (its own scripts/lib copy, sourced from there) is what
+  # actually exercises this, not an _AGMSG_DAEMON_ROOT override alone.
+  local side="$TEST_SKILL_DIR/side install"
+  mkdir -p "$side/run" "$side/scripts/lib"
+  cp "$SCRIPTS/lib/daemon-state.sh" "$SCRIPTS/lib/down-notice.sh" "$SCRIPTS/lib/shquote.sh" "$SCRIPTS/lib/instance-id.sh" "$side/scripts/lib/"
+  sqlite3 "$side/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$side/run/install.db" "UPDATE daemon_intent SET desired='on'; DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  # An owned mock standing in for the real scripts/agmsg wrapper -- never a
+  # real install -- so the persisted recovery command can actually be run
+  # and its tokenization checked, not just inspected as text.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$side" > "$side/scripts/agmsg"
+  chmod +x "$side/scripts/agmsg"
+  run bash -c 'source "$1/scripts/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always' _ "$side"
+  [ "$status" -eq 0 ]
+  [ -f "$side/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(bash -c 'source "$1/scripts/lib/down-notice.sh"; down_notice_list' _ "$side" | awk -F'\t' '{print $5}')"
+  # Quoted (single quotes), not the bare path -- a bare path with a space
+  # is not a valid command to eval at all (the point of this test).
+  [ "$recovery" = "'$side/scripts/agmsg' daemon start" ]
+  eval "$recovery"
+  [ "$(cat "$side/agmsg-argv-log")" = "2:daemon start" ]
+}
+
+@test "warn_if_stopped persists a recovery command that tokenizes and resolves for an install path containing an apostrophe" {
+  # Same setup as the space-path case above, but for the install-path
+  # character that down_notice_set's own sanitizer used to corrupt by
+  # destroying the backslash a single-quote escape needs (#1929) -- this
+  # is the regression test for that fix, exercised through this caller.
+  local side="$TEST_SKILL_DIR/side's install"
+  mkdir -p "$side/run" "$side/scripts/lib"
+  cp "$SCRIPTS/lib/daemon-state.sh" "$SCRIPTS/lib/down-notice.sh" "$SCRIPTS/lib/shquote.sh" "$SCRIPTS/lib/instance-id.sh" "$side/scripts/lib/"
+  sqlite3 "$side/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$side/run/install.db" "UPDATE daemon_intent SET desired='on'; DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$*" >> "%s/agmsg-argv-log"\n' "$side" > "$side/scripts/agmsg"
+  chmod +x "$side/scripts/agmsg"
+  run bash -c 'source "$1/scripts/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always' _ "$side"
+  [ "$status" -eq 0 ]
+  [ -f "$side/run/down/agmsgd.json" ]
+  local recovery
+  recovery="$(bash -c 'source "$1/scripts/lib/down-notice.sh"; down_notice_list' _ "$side" | awk -F'\t' '{print $5}')"
+  eval "$recovery"
+  [ "$(cat "$side/agmsg-argv-log")" = "2:daemon start" ]
+}
+
+@test "self-heal never re-triggers itself (AGMSG_DAEMON_SELF_HEAL guard, no recursion)" {
+  # Point daemon.sh at a shim that would record a call if one ever happened,
+  # so the guard's effect is checked by its absence, not just the function's
+  # own early return. A VALID op_gen is seeded (review round 2 NEEDS FIX:
+  # without one, _agmsg_daemon_self_heal returns before the guard even
+  # matters, via its own op_gen read failing, so this would pass whether or
+  # not the guard worked at all) -- the positive control right after this
+  # proves that, with the guard out of the way, this same root's state DOES
+  # make the function call through.
+  mkdir -p "$TEST_SKILL_DIR/selfheal-root/scripts" "$TEST_SKILL_DIR/selfheal-root/run"
+  printf '#!/usr/bin/env bash\necho called >> "%s/selfheal-called"\n' "$TEST_SKILL_DIR" > "$TEST_SKILL_DIR/selfheal-root/scripts/daemon.sh"
+  chmod +x "$TEST_SKILL_DIR/selfheal-root/scripts/daemon.sh"
+  sqlite3 "$TEST_SKILL_DIR/selfheal-root/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',4);"
+  run env AGMSG_DAEMON_SELF_HEAL=1 bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_DAEMON_ROOT="$1"; _agmsg_daemon_self_heal; echo done' _ "$TEST_SKILL_DIR/selfheal-root"
+  [ "$status" -eq 0 ]
+  [ "$output" = done ]
+  # The spawn (when the guard does not stop it) is a detached background
+  # process, so a call that should NOT happen can still land a moment
+  # after this line returns -- give it the same window the positive
+  # control below waits up to, instead of a single immediate check that a
+  # slow-to-land call would silently pass.
+  sleep 1
+  [ ! -f "$TEST_SKILL_DIR/selfheal-called" ]
+}
+
+@test "self-heal positive control: the same seeded root calls through when the guard does not apply" {
+  mkdir -p "$TEST_SKILL_DIR/selfheal-root2/scripts" "$TEST_SKILL_DIR/selfheal-root2/run"
+  printf '#!/usr/bin/env bash\necho called >> "%s/selfheal-called2"\n' "$TEST_SKILL_DIR" > "$TEST_SKILL_DIR/selfheal-root2/scripts/daemon.sh"
+  chmod +x "$TEST_SKILL_DIR/selfheal-root2/scripts/daemon.sh"
+  sqlite3 "$TEST_SKILL_DIR/selfheal-root2/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',4);"
+  run env -u AGMSG_DAEMON_SELF_HEAL bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_DAEMON_ROOT="$1"; _agmsg_daemon_self_heal; for i in $(seq 1 50); do [ -f "$2/selfheal-called2" ] && break; sleep 0.1; done; echo done' _ "$TEST_SKILL_DIR/selfheal-root2" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = done ]
+  [ -f "$TEST_SKILL_DIR/selfheal-called2" ]
+}
+
+@test "review: repaired Node PATH must not be blocked by the historical no-Node reason" {
+  # Regression for the review that led to dropping an earlier, cheaper
+  # signature pre-check entirely (#1904): a stale "no usable Node" reason
+  # must not block self-heal once Node is actually fixed. Self-heal now
+  # excludes no reason -- every stopped reason gets the same one bounded
+  # try per window, through the real resolver.
+  mkdir -p "$TEST_SKILL_DIR/good-node"
+  printf '#!/bin/bash\nprintf "v22.13.0\\n"\n' > "$TEST_SKILL_DIR/good-node/node"
+  chmod +x "$TEST_SKILL_DIR/good-node/node"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run env PATH="$TEST_SKILL_DIR/good-node:$PATH" bash -c '
+    [ "$(node --version)" = v22.13.0 ] || exit 80
+    source "$SCRIPTS/lib/daemon-state.sh"
+    _agmsg_daemon_self_heal() { : > "$TEST_SKILL_DIR/recovery-permitted"; }
+    agmsg_daemon_warn_if_stopped
+    [ -f "$TEST_SKILL_DIR/recovery-permitted" ]
+  '
+  [ "$status" -eq 0 ]
 }
 
 @test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {

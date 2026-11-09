@@ -246,8 +246,82 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     sleep 1
   done
   echo "  ~ agmsgd is turned on; starting the updated version"
-  if ! bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen"; then
+  # A transient lock contention (another agmsg command or install holds
+  # the install operation lock right now) is worth one more try after a
+  # short wait -- the op_gen is unchanged (the guarded UPDATE never
+  # applied when the lock itself could not be acquired, so nothing about
+  # the install moved between attempts) -- but a permanent failure (no
+  # usable Node, a bind failure, ...) is not: retrying it immediately
+  # would only repeat the same error.
+  local start_output start_rc=0
+  start_output="$(bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen" 2>&1)" || start_rc=$?
+  if [ "$start_rc" -ne 0 ]; then
+    case "$start_output" in
+      *"could not acquire the install operation lock"*)
+        printf '%s\n' "$start_output" >&2
+        echo "  ~ the install operation lock was busy; trying once more" >&2
+        sleep 2
+        start_rc=0
+        start_output="$(bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen" 2>&1)" || start_rc=$?
+        ;;
+    esac
+  fi
+  printf '%s\n' "$start_output"
+  # `start --only-if-op-gen` exits 0 both when it actually starts agmsgd
+  # AND when it skips because the intent changed while it waited (the
+  # exact guard that keeps a concurrent stop/disable from being undone,
+  # scripts/daemon.sh's cmd_start) -- rc alone is not a positive
+  # observation that agmsgd is actually up. Only its own "running" /
+  # "already running" lines confirm that; anything else (including the
+  # guarded-skip line) must leave an existing down record as it is.
+  case "$start_output" in
+    *'agmsg daemon start: running'*|*'agmsg daemon start: already running'*)
+      start_rc=0
+      ;;
+    *)
+      [ "$start_rc" -ne 0 ] || start_rc=3
+      ;;
+  esac
+  if [ "$start_rc" -eq 0 ]; then
+    # A later run (another --update, or a manual `agmsg daemon start`)
+    # may be recovering from an EARLIER failed attempt; this success
+    # clears that stale record. The root that matters here is the one
+    # inside the install being updated ($skill), never this installer
+    # script's own location (can be a world away: an npx tarball, this
+    # dev repo, ...). AGMSG_DOWN_NOTICE_ROOT, not a re-source of a
+    # different copy of the file: #1928 added this script's own top-level
+    # `. "$SCRIPT_DIR/scripts/lib/down-notice.sh"`, which sets the file's
+    # include guard before this ever runs, so a later `. "$skill/..."`
+    # would be a silent no-op (the file's own top-level sourcing wins,
+    # and `_AGMSG_DOWN_NOTICE_ROOT` stays whatever IT resolved to) even
+    # from inside this subshell, which inherits that guard like any other
+    # variable. The override is the same convention this file already
+    # uses a few lines below for `state`.
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear agmsgd || true
+  elif [ "$start_rc" -eq 3 ]; then
+    : # guarded skip: desired/op_gen changed while waiting; nothing to report or record here
+  else
     echo "  ! agmsgd did not start after the update; run: bash $(printf '%q' "$skill/scripts/agmsg") daemon start" >&2
+    # This was the installer's one restart attempt (decision 11-04,
+    # S01/S14): record it so it is not only a line in this terminal --
+    # `agmsg doctor`, `agmsg daemon status`, and the next session-start
+    # all surface it, so the enabled intent stays visibly recoverable
+    # even once this terminal is gone. The recorded command names THIS
+    # install's own agmsg wrapper ($skill), not the bare word "agmsg" --
+    # a --cmd side install must recover itself, not whichever install
+    # happens to own that name on PATH (same reasoning as #1927). Quoted
+    # with single quotes (same scheme as lib/shquote.sh, inlined rather
+    # than sourced since this function runs before this script is known
+    # to be the up-to-date tree) -- down_notice_set now JSON-escapes free
+    # text rather than rewriting it (#1929), so this would also survive
+    # %q, but single quotes need no bash-version-dependent escaping of
+    # their own and this recorded command is meant to actually be run,
+    # not just read.
+    local shq_agmsg
+    shq_agmsg="'$(printf '%s' "$skill/scripts/agmsg" | sed "s/'/'\\\\''/g")'"
+    AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_set agmsgd down \
+      "agmsgd did not start after the update" \
+      "$shq_agmsg daemon start" || true
   fi
   rm -f "$skill/run/agmsgd-updating"
 }
