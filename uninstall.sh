@@ -14,7 +14,11 @@ set -euo pipefail
 #   ./uninstall.sh --all              # Every agmsg install on the machine
 #                                     # (one combined confirmation, unless --yes)
 
-AGENTS_DIR="$HOME/.agents"
+# Mirrors install.sh's own AGMSG_INSTALL_HOME: unset, this is $HOME, byte-for-
+# byte the prior behavior. CLAUDE_CONFIG_DIR is deliberately not consulted
+# here either -- same reasoning as install.sh.
+INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
+AGENTS_DIR="$INSTALL_HOME/.agents"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGMSG_INSTALL_OP_RECOVERY_SOURCE=""
 if [ -e "$SCRIPT_DIR/run/install-op-incomplete.json" ] || [ -L "$SCRIPT_DIR/run/install-op-incomplete.json" ]; then
@@ -422,7 +426,7 @@ _uninstall_one() {
   fi
 
   # --- Remove Claude Code global command ---
-  local CC_CMD="$HOME/.claude/commands/$SKILL_NAME.md"
+  local CC_CMD="$INSTALL_HOME/.claude/commands/$SKILL_NAME.md"
   if [ -f "$CC_CMD" ]; then
     _uninstall_checked_rm "$CC_CMD" || return 1
     echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
@@ -430,7 +434,7 @@ _uninstall_one() {
   fi
 
   # --- Remove Copilot CLI skill ---
-  local COPILOT_SKILL="$HOME/.copilot/skills/$SKILL_NAME"
+  local COPILOT_SKILL="$INSTALL_HOME/.copilot/skills/$SKILL_NAME"
   if [ -d "$COPILOT_SKILL" ]; then
     _uninstall_checked_rm -rf "$COPILOT_SKILL" || return 1
     echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
@@ -438,7 +442,7 @@ _uninstall_one() {
   fi
 
   # --- Remove Antigravity skill ---
-  local ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
+  local ANTIGRAVITY_SKILL="$INSTALL_HOME/.gemini/config/skills/$SKILL_NAME"
   if [ -d "$ANTIGRAVITY_SKILL" ]; then
     _uninstall_checked_rm -rf "$ANTIGRAVITY_SKILL" || return 1
     echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
@@ -579,9 +583,9 @@ _uninstall_one() {
   # difference (review).
   local _dedicated_dir_label _dedicated_dir _dedicated_label
   for _dedicated_dir_label in \
-    "$HOME/.config/opencode/skills/$SKILL_NAME|OpenCode" \
-    "$HOME/.hermes/skills/$SKILL_NAME|Hermes" \
-    "$HOME/.grok/skills/$SKILL_NAME|Grok Build"
+    "$INSTALL_HOME/.config/opencode/skills/$SKILL_NAME|OpenCode" \
+    "$INSTALL_HOME/.hermes/skills/$SKILL_NAME|Hermes" \
+    "$INSTALL_HOME/.grok/skills/$SKILL_NAME|Grok Build"
   do
     _dedicated_dir="${_dedicated_dir_label%%|*}"
     _dedicated_label="${_dedicated_dir_label#*|}"
