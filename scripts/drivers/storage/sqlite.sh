@@ -348,6 +348,10 @@ _sqlite_message_sent_sql() {
   # A body with a NUL byte cannot be written as a quoted literal (nor held in a
   # shell variable): the store reads it from the file the sender kept it in.
   if [ -n "$body_file" ]; then
+    # readfile() answers NULL for a file it cannot open, and the events table
+    # takes a NULL body: refuse an unreadable file here, so it is a failed send
+    # and never an empty message.
+    [ -r "$body_file" ] || return 1
     bl="CAST(readfile('$(agmsg_sql_readfile_path "$body_file")') AS TEXT)"
   fi
   printf '%s\n' "
@@ -649,42 +653,57 @@ storage_import() {
   local selector="$1" file="$2" db; db="$(_sqlite_db "$selector")"
   [ -f "$file" ] || return 1
   storage_init "$selector" >/dev/null
-  local line t id team frm to body msg_id agent at
+  local line t id team frm to body msg_id agent at import_rc=0
   j() { sqlite3 :memory: "SELECT COALESCE(json_extract('$(_sqlite_lit "$line")','\$.$1'),'')" 2>/dev/null | LC_ALL=C tr -d '\r'; }
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     t=$(j type); id=$(j id); team=$(j team); at=$(j at)
+    if [ -z "$t" ] && [ "$(agmsg_sqlite_mem "SELECT json_valid('$(_sqlite_lit "$line")');" 2>/dev/null)" != 1 ]; then
+      echo "agmsg: import: a line of $file is not valid JSON; the import stopped there" >&2
+      return 1
+    fi
     if [ "$t" = message_sent ]; then
       frm=$(j from); to=$(j to); body=$(j body)
       # A body that a shell variable cannot carry goes through a file the store
       # reads (as a live send of such a body does): one the source could not keep
       # as text (its exact bytes are in body_b64), and one that holds a NUL
       # (written as \u0000 in the JSON). Anything else keeps the plain path.
-      local body_b64 body_file="" ins_rc
+      # body_b64 is only ever the encoded bytes of the source; whether the body
+      # holds a NUL is decided apart from it.
+      local body_b64 body_file="" body_has_nul=0 ins_rc=0 wrote
       body_b64=$(j body_b64)
-      case "$line" in *'\u0000'*) [ -n "$body_b64" ] || body_b64="-" ;; esac
-      if [ -n "$body_b64" ]; then
+      case "$line" in *'\u0000'*) body_has_nul=1 ;; esac
+      if [ -n "$body_b64" ] || [ "$body_has_nul" = 1 ]; then
         body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-import-body.XXXXXX")" || return 1
-        if [ "$body_b64" = "-" ]; then
+        if [ -n "$body_b64" ]; then
+          # base64 -d is lenient (macOS decodes "-" to nothing and says ok), so the
+          # shape is checked first: canonical base64, a whole number of groups.
+          if case "$body_b64" in *[!A-Za-z0-9+/=]*) true ;; *) [ $(( ${#body_b64} % 4 )) -ne 0 ] ;; esac ||
+             ! printf '%s' "$body_b64" | base64 -d > "$body_file" 2>/dev/null; then
+            rm -f "$body_file"
+            echo "agmsg: import: body_b64 of message $id is not valid base64; nothing was imported for it" >&2
+            return 1
+          fi
+        else
           # The exact bytes of the JSON string "body", a NUL included: sqlite
-          # writes them straight to the file.
-          agmsg_sqlite_mem "SELECT writefile('$(agmsg_sql_readfile_path "$body_file")',
-            CAST(COALESCE(json_extract('$(_sqlite_lit "$line")','\$.body'),'') AS BLOB));" >/dev/null \
-            || { rm -f "$body_file"; echo "agmsg: import: could not read the body of message $id" >&2; return 1; }
-        elif ! printf '%s' "$body_b64" | base64 -d > "$body_file" 2>/dev/null; then
-          rm -f "$body_file"
-          echo "agmsg: import: body_b64 of message $id is not valid base64; nothing was imported for it" >&2
-          return 1
+          # writes them straight to the file and says how many it wrote (NULL if
+          # it could not); anything but all of them is a failure.
+          wrote="$(agmsg_sqlite_mem "WITH t(b) AS (SELECT CAST(COALESCE(json_extract('$(_sqlite_lit "$line")','\$.body'),'') AS BLOB))
+            SELECT writefile('$(agmsg_sql_readfile_path "$body_file")', b) = length(b) FROM t;" 2>/dev/null)"
+          if [ "$wrote" != 1 ]; then
+            rm -f "$body_file"
+            echo "agmsg: import: could not write the body of message $id; nothing was imported for it" >&2
+            return 1
+          fi
         fi
       fi
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
       agmsg_sqlite_warm
-      ins_rc=0
       printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at" "$body_file")" \
         | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || ins_rc=$?
       [ -z "$body_file" ] || rm -f "$body_file"
-      (exit "$ins_rc")
+      [ "$ins_rc" -eq 0 ] || [ "$import_rc" -ne 0 ] || import_rc=$ins_rc
     elif [ "$t" = message_read ]; then
       agent=$(j agent); msg_id=$(j msg_id)
       agmsg_sqlite "$db" "INSERT INTO events (type,id,team,agent,msg_id,at)
@@ -695,9 +714,10 @@ storage_import() {
            AND id = (SELECT e.legacy_id FROM events e
                       WHERE e.type='message_sent' AND e.team='$(_sqlite_lit "$team")'
                         AND e.id='$(_sqlite_lit "$msg_id")' AND e.legacy_id IS NOT NULL);" \
-        >/dev/null 2>&1
+        >/dev/null 2>&1 || { [ "$import_rc" -ne 0 ] || import_rc=$?; }
     fi
   done < "$file"
+  return "$import_rc"
 }
 
 # Internal (§2.7): coalesce duplicate message_read markers, keeping the earliest. (control op)

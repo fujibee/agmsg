@@ -684,3 +684,52 @@ _imported_hexes() {
     storage_import demo "$2"' _ "$SCRIPTS" "$BATS_TEST_TMPDIR/one.jsonl"
   [ "$status" -eq 13 ]
 }
+
+_two_plain_lines() {
+  printf '%s\n' \
+    '{"type":"message_sent","id":"01a1bda1-6750-7046-807d-dc8104d1bfd1","team":"demo","from":"alice","to":"bob","body":"one","at":"2026-11-09T00:07:14Z"}' \
+    '{"type":"message_sent","id":"01a1bda1-6750-7046-807d-dc8104d1bfd2","team":"demo","from":"alice","to":"bob","body":"two","at":"2026-11-09T00:07:15Z"}' \
+    > "$1"
+}
+
+@test "sqlite import: one failed insert fails the import even when a later one succeeds" {
+  _two_plain_lines "$BATS_TEST_TMPDIR/two.jsonl"
+  run env AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store-imp" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; storage_init demo >/dev/null
+    eval "_real_$(declare -f agmsg_sqlite)"
+    _n=0
+    agmsg_sqlite() {
+      if [ "${1:-}" = -bail ]; then _n=$((_n + 1)); [ "$_n" -ne 1 ] || { cat >/dev/null; return 13; }; fi
+      _real_agmsg_sqlite "$@"
+    }
+    storage_import demo "$2"' _ "$SCRIPTS" "$BATS_TEST_TMPDIR/two.jsonl"
+  [ "$status" -eq 13 ]
+}
+
+@test "sqlite import: a body file sqlite cannot write is a failure, never an empty message" {
+  printf 'a\0b' > "$BATS_TEST_TMPDIR/nulbody"
+  storage_send demo alice bob "" "$BATS_TEST_TMPDIR/nulbody" >/dev/null
+  storage_history demo > "$BATS_TEST_TMPDIR/e.jsonl"
+  local shim="$BATS_TEST_TMPDIR/ro-mktemp" real
+  real="$(command -v mktemp)"
+  mkdir -p "$shim"
+  printf '#!/usr/bin/env bash\nf="$("%s" "$@")" || exit $?\nchmod 400 "$f"\nprintf "%%s\\n" "$f"\n' "$real" > "$shim/mktemp"
+  chmod +x "$shim/mktemp"
+  PATH="$shim:$PATH" run _import_into_sqlite "$BATS_TEST_TMPDIR/e.jsonl"
+  [ "$status" -ne 0 ]
+  [ -z "$(_imported_hexes)" ]
+}
+
+@test "sqlite import: a body_b64 of '-' is checked like any other, not taken for a marker" {
+  printf '%s\n' '{"type":"message_sent","id":"01a1bda1-6750-7046-807d-dc8104d1bfd1","team":"demo","from":"alice","to":"bob","body":"fallback","at":"2026-11-09T00:07:14Z","body_b64":"-"}' > "$BATS_TEST_TMPDIR/dash.jsonl"
+  run _import_into_sqlite "$BATS_TEST_TMPDIR/dash.jsonl"
+  [ "$status" -ne 0 ]
+  [ -z "$(_imported_hexes)" ]
+}
+
+@test "sqlite import: a line that is not JSON stops the import with a message" {
+  printf '%s\n' 'this is not json' > "$BATS_TEST_TMPDIR/junk.jsonl"
+  run _import_into_sqlite "$BATS_TEST_TMPDIR/junk.jsonl"
+  [ "$status" -ne 0 ]
+  LC_ALL=C grep -qF "not valid JSON" <<<"$output"
+}
