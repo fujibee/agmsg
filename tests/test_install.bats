@@ -3580,19 +3580,18 @@ CYG
   grep -Fq 'preserved team data' "$SK/teams/fixture-team/kept"
 }
 
-@test "install.sh: AGMSG_INSTALL_HOME redirects every per-agent write, leaves HOME untouched (#1950)" {
+@test "install.sh: AGMSG_INSTALL_HOME redirects every per-agent command/skill write" {
   local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home"
   # The existence check that gates each per-agent write (install.sh's own
   # "only write the Copilot/OpenCode/... skill if that ecosystem's dir is
   # already there") moves with the destination too -- these markers go under
-  # $dest, not $real, exactly as tl2's brief asked for.
+  # $dest, not $real.
   mkdir -p "$dest/.claude" "$dest/.copilot" "$dest/.config/opencode" "$dest/.hermes" "$dest/.grok" "$dest/.gemini/config"
 
   HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
-  # Nothing landed under the real HOME at all -- not .agents, not any of the
-  # per-agent command/skill dirs whose presence this install should have used
-  # only to decide whether to write (to $dest), never where.
+  # None of the command/skill destinations this change moves landed under the
+  # real HOME.
   [ ! -e "$real/.agents" ]
   [ ! -e "$real/.claude/commands/agmsg.md" ]
   [ ! -e "$real/.copilot/skills/agmsg" ]
@@ -3609,9 +3608,16 @@ CYG
   [ -f "$dest/.hermes/skills/agmsg/SKILL.md" ]
   [ -f "$dest/.grok/skills/agmsg/SKILL.md" ]
   [ -f "$dest/.gemini/config/skills/agmsg/SKILL.md" ]
+
+  # AGMSG_INSTALL_HOME does NOT move the install's runtime state root
+  # (state-root.sh's agmsg_state_base, $AGMSG_HOME or ~/.agmsg by default) --
+  # that stays under the real HOME here, same as before this change. Not a
+  # regression to fix in this PR; documented so the test above cannot be
+  # misread as proving full HOME isolation.
+  [ -d "$real/.agmsg/agmsg" ]
 }
 
-@test "uninstall.sh: AGMSG_INSTALL_HOME removes from the override location, not from HOME (#1950)" {
+@test "uninstall.sh: AGMSG_INSTALL_HOME removes the command/skill destinations from the override location (#1950)" {
   local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home"
   mkdir -p "$dest/.claude" "$dest/.copilot" "$dest/.config/opencode" "$dest/.hermes" "$dest/.grok" "$dest/.gemini/config"
 
@@ -3626,7 +3632,8 @@ CYG
   [ ! -e "$dest/.hermes/skills/agmsg" ]
   [ ! -e "$dest/.grok/skills/agmsg" ]
   [ ! -e "$dest/.gemini/config/skills/agmsg" ]
-  # The real HOME was never touched by either the install or the uninstall.
+  # Neither the install nor the uninstall wrote any of these command/skill
+  # destinations under the real HOME.
   [ ! -e "$real/.agents" ]
   [ ! -e "$real/.claude/commands/agmsg.md" ]
 }

@@ -19,14 +19,21 @@ set -euo pipefail
 #   - Running: ~/.agents/skills/<cmd>/scripts/join.sh <team> <name> <type> <project>
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Every place this installer writes outside $SCRIPT_DIR is rooted here. Unset,
-# this is $HOME -- byte-for-byte the prior behavior. scripts/ itself locates
-# SKILL_DIR from its own path (see each script's own SCRIPT_DIR), never from
-# this; only the *destinations* install.sh writes to move. CLAUDE_CONFIG_DIR
-# is deliberately not consulted here: a live Claude Code seat can run with
-# CLAUDE_CONFIG_DIR pointed at a different profile than the one install.sh
-# should write its command file for, and this override is about relocating
-# where install.sh writes, not about matching a running seat's own profile.
+# Relocates the command/skill destinations this installer writes outside
+# $SCRIPT_DIR: .agents/skills/<cmd> and its Windows/sqlite3/agy-tui helpers,
+# .claude/commands, and the Copilot/OpenCode/Hermes/Grok Build/Antigravity
+# skill directories (plus each one's own existence gate -- see each use
+# below). Unset, this is $HOME -- byte-for-byte the prior behavior for THOSE
+# destinations. scripts/ itself locates SKILL_DIR from its own path (see each
+# script's own SCRIPT_DIR), never from this. CLAUDE_CONFIG_DIR is deliberately
+# not consulted here: a live Claude Code seat can run with CLAUDE_CONFIG_DIR
+# pointed at a different profile than the one install.sh should write its
+# command file for, and this override is about relocating where install.sh
+# writes, not about matching a running seat's own profile. CODEX_HOME already
+# has its own override, untouched here. This does NOT move the install's
+# runtime state root (state-root.sh's agmsg_state_base, $AGMSG_HOME or
+# ~/.agmsg by default) -- that is a separate override with its own existing
+# env var, outside what this change touches.
 INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
 AGENTS_DIR="$INSTALL_HOME/.agents"
 # agmsg-launcher.sh's own default (~/.local/bin, or ~/bin on native Windows)

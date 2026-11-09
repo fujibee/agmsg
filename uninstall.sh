@@ -14,9 +14,12 @@ set -euo pipefail
 #   ./uninstall.sh --all              # Every agmsg install on the machine
 #                                     # (one combined confirmation, unless --yes)
 
-# Mirrors install.sh's own AGMSG_INSTALL_HOME: unset, this is $HOME, byte-for-
-# byte the prior behavior. CLAUDE_CONFIG_DIR is deliberately not consulted
-# here either -- same reasoning as install.sh.
+# Mirrors install.sh's own AGMSG_INSTALL_HOME: relocates the command/skill
+# destinations this script removes from (see install.sh's own top-of-file
+# comment for the full list and what is deliberately excluded -- CLAUDE_CONFIG_DIR,
+# CODEX_HOME, and the install's runtime state root under AGMSG_HOME/~/.agmsg,
+# which this does not move). Unset, this is $HOME, byte-for-byte the prior
+# behavior for those destinations.
 INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
 AGENTS_DIR="$INSTALL_HOME/.agents"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
