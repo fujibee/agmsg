@@ -1043,12 +1043,24 @@ EOF
   # sqlite3 hits EOF and ends the transaction as soon as it is written, so
   # this needs the same fifo-backed, held-open connection pattern
   # install-op-lock.sh uses for the same reason (sqlite3 only holds the lock
-  # for as long as its stdin stays open).
-  fifodir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-test-lock.XXXXXX")"
+  # for as long as its stdin stays open). Under $FAKE_HOME, not a separate
+  # mktemp dir outside it (review): this file's own teardown only removes
+  # $FAKE_HOME, so anything meant to be cleaned up automatically has to live
+  # there.
+  fifodir="$FAKE_HOME/lock-fifos"
   in_fifo="$fifodir/in"; out_fifo="$fifodir/out"
+  mkdir -p "$fifodir"
   mkfifo "$in_fifo" "$out_fifo"
   sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
   holder_pid=$!
+  # Registered with teardown's own owned-pid mechanism IMMEDIATELY (before
+  # any assertion that could end the test, per that function's own
+  # docstring) -- rather than this test's own unconfirmed `kill` at the end,
+  # which both skips the ownership check every other teardown-reaped process
+  # in this file gets, and never runs at all if an assertion below fails
+  # first (review: this test's own assertions sit between the fork and that
+  # kill, exactly the gap #963 was raised about elsewhere in this file).
+  _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
   exec 9> "$in_fifo"
   exec 8< "$out_fifo"
   printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
@@ -1057,16 +1069,16 @@ EOF
   [ "$line" = held ]
   # Released well inside this function's own 5000ms timeout, from a second
   # process so the release genuinely overlaps the foreground call below
-  # rather than happening before it starts.
-  ( sleep 0.5; printf 'COMMIT;\n' >&9 ) &
+  # rather than happening before it starts. Bounded and self-terminating
+  # either way (one sleep, one write, exit) even if an assertion below ends
+  # the test before the `wait` for it is reached -- nothing here needs
+  # teardown's help to not linger.
+  ( sleep 0.5; printf 'COMMIT;\n' >&9 2>/dev/null || true ) &
   local releaser_pid=$!
   run bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_apply_schema "$2" "$3"' _ "$lib" "$db" "$schema"
-  [ "$status" -eq 0 ]
   wait "$releaser_pid" 2>/dev/null || true
   exec 9>&- 8<&-
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
-  rm -rf "$fifodir"
+  [ "$status" -eq 0 ]
   # The schema genuinely applied, not just "did not error": daemon_intent's
   # own always-exactly-one-row seed (schema.sql) is present.
   [ "$(sqlite3 "$db" "SELECT count(*) FROM daemon_intent;")" = 1 ]
