@@ -578,3 +578,71 @@ SH
     "$(printf '%s\n' "$rebound" | jq -c '{local_id,id,envelope}')" ]
   [ "$(storage_history renamed | jq -s '[.[]|select(.body=="rename-safe")]|length')" -eq 1 ]
 }
+
+# A body that is not valid UTF-8 is kept in the log as `body_b64` (its exact
+# bytes) beside a lossy `body`. The sync must seal, and write back, the bytes.
+
+# Seal A's messages, open the envelopes the way the other machine does, apply
+# them to a second jsonl store, and print that store's message bodies as hex.
+_jsonl_bodies_through_sync() {
+  local b_store="$BATS_TEST_TMPDIR/store-b" candidates records
+  candidates=$(prepare_push | grep '"type":"sync_push_candidate"')
+  [ "$(printf '%s\n' "$candidates" | wc -l | tr -d ' ')" = "$1" ]
+  records=$(printf '%s\n' "$candidates" | node -e '
+    const { openEnvelope } = await import(process.argv[1]);
+    const lines = (await new Promise((resolve) => { let s = ""; process.stdin.on("data", (c) => s += c);
+      process.stdin.on("end", () => resolve(s.split("\n").filter(Boolean))); }));
+    let seq = 0;
+    for (const line of lines) {
+      const c = JSON.parse(line);
+      const projection = await openEnvelope({ envelope: c.envelope, max_blob_bytes: 1048576 });
+      seq += 1;
+      console.log(JSON.stringify({ type: "sync_pull_message", server_seq: String(seq), id: c.id,
+        server_received_at: "2026-07-20T13:00:01.000000Z", envelope: c.envelope,
+        status: "importable", policy_revision: "0", local_security_revision: "0", projection }));
+    }
+    console.log(JSON.stringify({ type: "sync_pull_cursor", next_after: String(seq) }));
+  ' --input-type=module "$SCRIPTS/internal/sync-cipher.mjs")
+  AGMSG_STORAGE_PATH="$b_store" storage_init demo >/dev/null
+  AGMSG_STORAGE_PATH="$b_store" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    printf "%s\n" "$2" | storage_sync_apply_pull demo "$3" "$4" 1' _ "$SCRIPTS" "$records" "$SERVER_ID" "$TEAM_ID" >/dev/null
+  # The bytes B's log holds for each message: body_b64 decoded when it has one.
+  AGMSG_STORAGE_PATH="$b_store" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    storage_history demo' _ "$SCRIPTS" |
+    while IFS= read -r l; do
+      b64=$(printf '%s' "$l" | jq -r '.body_b64 // empty')
+      if [ -n "$b64" ]; then printf '%s' "$b64" | base64 -d | od -An -v -tx1 | tr -d ' \n'
+      else printf '%s' "$l" | jq -j '.body' | od -An -v -tx1 | tr -d ' \n'; fi
+      printf '\n'
+    done
+}
+
+@test "jsonl sync: a body that is not valid UTF-8 reaches the other machine as the same bytes" {
+  storage_send demo alice bob "first, plain" >/dev/null
+  printf 'a\0\xff\0b' > "$BATS_TEST_TMPDIR/mixed"
+  storage_send demo alice bob "" "$BATS_TEST_TMPDIR/mixed" >/dev/null
+  storage_send demo alice bob "x=$(printf '\xe3\x81')" >/dev/null
+  [ "$(_jsonl_bodies_through_sync 3)" = "$(printf '%s\n%s\n%s' "$(printf 'first, plain' | od -An -v -tx1 | tr -d ' \n')" "6100ff0062" "783de381")" ]
+}
+
+@test "jsonl sync: the payload digest names the exact bytes, so two bodies that differ only in a bad byte are not the same message" {
+  storage_send demo alice bob "x=$(printf '\xff')" >/dev/null
+  storage_send demo alice bob "x=$(printf '\xfe')" >/dev/null
+  local out
+  out=$(prepare_push | grep '"type":"sync_push_candidate"')
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = "2" ]
+  [ "$(printf '%s\n' "$out" | jq -s '[.[].envelope.blob] | unique | length')" = "2" ]
+}
+
+@test "sqlite import: a jsonl export with body_b64 lands as the same bytes" {
+  local out="$BATS_TEST_TMPDIR/export.jsonl" sqlite_store="$BATS_TEST_TMPDIR/store-s"
+  storage_send demo alice bob "x=$(printf '\xff\xfe')y" >/dev/null
+  storage_history demo > "$out"
+  AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$sqlite_store" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    storage_init demo >/dev/null; storage_import demo "$2"' _ "$SCRIPTS" "$out"
+  [ "$(sqlite3 "$(AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$sqlite_store" bash -c 'source "$1/lib/storage.sh"; agmsg_storage_load; agmsg_db_path demo' _ "$SCRIPTS")" \
+    "SELECT lower(hex(CAST(body AS BLOB))) FROM events WHERE type='message_sent'")" = "783dfffe79" ]
+}

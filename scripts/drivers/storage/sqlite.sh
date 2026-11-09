@@ -656,11 +656,21 @@ storage_import() {
     t=$(j type); id=$(j id); team=$(j team); at=$(j at)
     if [ "$t" = message_sent ]; then
       frm=$(j from); to=$(j to); body=$(j body)
+      # A body the source could not keep as text carries its exact bytes in
+      # body_b64 (a jsonl log): write them to a file and let the store read them
+      # from there, as a live send of such a body does.
+      local body_b64 body_file=""
+      body_b64=$(j body_b64)
+      if [ -n "$body_b64" ]; then
+        body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-import-body.XXXXXX")" || return 1
+        printf '%s' "$body_b64" | base64 -d > "$body_file" 2>/dev/null || body_file=""
+      fi
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
       agmsg_sqlite_warm
-      printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at")" \
+      printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at" "$body_file")" \
         | agmsg_sqlite -bail "$db" >/dev/null 2>&1
+      [ -z "$body_file" ] || rm -f "$body_file"
     elif [ "$t" = message_read ]; then
       agent=$(j agent); msg_id=$(j msg_id)
       agmsg_sqlite "$db" "INSERT INTO events (type,id,team,agent,msg_id,at)
