@@ -656,21 +656,35 @@ storage_import() {
     t=$(j type); id=$(j id); team=$(j team); at=$(j at)
     if [ "$t" = message_sent ]; then
       frm=$(j from); to=$(j to); body=$(j body)
-      # A body the source could not keep as text carries its exact bytes in
-      # body_b64 (a jsonl log): write them to a file and let the store read them
-      # from there, as a live send of such a body does.
-      local body_b64 body_file=""
+      # A body that a shell variable cannot carry goes through a file the store
+      # reads (as a live send of such a body does): one the source could not keep
+      # as text (its exact bytes are in body_b64), and one that holds a NUL
+      # (written as \u0000 in the JSON). Anything else keeps the plain path.
+      local body_b64 body_file="" ins_rc
       body_b64=$(j body_b64)
+      case "$line" in *'\u0000'*) [ -n "$body_b64" ] || body_b64="-" ;; esac
       if [ -n "$body_b64" ]; then
         body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-import-body.XXXXXX")" || return 1
-        printf '%s' "$body_b64" | base64 -d > "$body_file" 2>/dev/null || body_file=""
+        if [ "$body_b64" = "-" ]; then
+          # The exact bytes of the JSON string "body", a NUL included: sqlite
+          # writes them straight to the file.
+          agmsg_sqlite_mem "SELECT writefile('$(agmsg_sql_readfile_path "$body_file")',
+            CAST(COALESCE(json_extract('$(_sqlite_lit "$line")','\$.body'),'') AS BLOB));" >/dev/null \
+            || { rm -f "$body_file"; echo "agmsg: import: could not read the body of message $id" >&2; return 1; }
+        elif ! printf '%s' "$body_b64" | base64 -d > "$body_file" 2>/dev/null; then
+          rm -f "$body_file"
+          echo "agmsg: import: body_b64 of message $id is not valid base64; nothing was imported for it" >&2
+          return 1
+        fi
       fi
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
       agmsg_sqlite_warm
+      ins_rc=0
       printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at" "$body_file")" \
-        | agmsg_sqlite -bail "$db" >/dev/null 2>&1
+        | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || ins_rc=$?
       [ -z "$body_file" ] || rm -f "$body_file"
+      (exit "$ins_rc")
     elif [ "$t" = message_read ]; then
       agent=$(j agent); msg_id=$(j msg_id)
       agmsg_sqlite "$db" "INSERT INTO events (type,id,team,agent,msg_id,at)

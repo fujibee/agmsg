@@ -646,3 +646,41 @@ _jsonl_bodies_through_sync() {
   [ "$(sqlite3 "$(AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$sqlite_store" bash -c 'source "$1/lib/storage.sh"; agmsg_storage_load; agmsg_db_path demo' _ "$SCRIPTS")" \
     "SELECT lower(hex(CAST(body AS BLOB))) FROM events WHERE type='message_sent'")" = "783dfffe79" ]
 }
+
+# Import into the sqlite store from a jsonl export (storage_import).
+_import_into_sqlite() {  # <file>; prints the store's body hexes
+  local store="$BATS_TEST_TMPDIR/store-imp"
+  AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$store" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    storage_init demo >/dev/null; storage_import demo "$2"' _ "$SCRIPTS" "$1"
+}
+_imported_hexes() {
+  AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store-imp" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    sqlite3 "$(agmsg_db_path demo)" "SELECT lower(hex(CAST(body AS BLOB))) FROM events WHERE type='"'"'message_sent'"'"' ORDER BY seq"' _ "$SCRIPTS"
+}
+
+@test "sqlite import: a body that is valid UTF-8 and holds a NUL lands with the NUL" {
+  printf 'a\0b' > "$BATS_TEST_TMPDIR/nulbody"
+  storage_send demo alice bob "" "$BATS_TEST_TMPDIR/nulbody" >/dev/null
+  storage_history demo > "$BATS_TEST_TMPDIR/e.jsonl"
+  _import_into_sqlite "$BATS_TEST_TMPDIR/e.jsonl"
+  [ "$(_imported_hexes)" = "610062" ]
+}
+
+@test "sqlite import: a body_b64 that is not base64 is an error for that message, not a quiet fallback to the lossy text" {
+  printf '%s\n' '{"type":"message_sent","id":"01a1bda1-6750-7046-807d-dc8104d1bfd1","team":"demo","from":"alice","to":"bob","body":"fallback","at":"2026-11-09T00:07:14Z","body_b64":"%%%"}' > "$BATS_TEST_TMPDIR/bad.jsonl"
+  run _import_into_sqlite "$BATS_TEST_TMPDIR/bad.jsonl"
+  [ "$status" -ne 0 ]
+  LC_ALL=C grep -qF "not valid base64" <<<"$output"
+  [ -z "$(_imported_hexes)" ]
+}
+
+@test "sqlite import: a failing insert is still the import's status, with or without a body file" {
+  printf '%s\n' '{"type":"message_sent","id":"01a1bda1-6750-7046-807d-dc8104d1bfd1","team":"demo","from":"alice","to":"bob","body":"plain","at":"2026-11-09T00:07:14Z"}' > "$BATS_TEST_TMPDIR/one.jsonl"
+  run env AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store-imp" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; storage_init demo >/dev/null
+    agmsg_sqlite() { return 13; }
+    storage_import demo "$2"' _ "$SCRIPTS" "$BATS_TEST_TMPDIR/one.jsonl"
+  [ "$status" -eq 13 ]
+}
