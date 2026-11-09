@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,6 +9,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createWriteBatcher } from "./writeBatcher";
 import { attachWebglAddon } from "./webglAttach";
 import { measureCell } from "./cellMeasure";
+import { webglBudget } from "./webglBudget";
 
 type Props = {
   /** Stable session id; also the key the backend stores the PTY under. */
@@ -276,14 +277,47 @@ export function TerminalPane({
   // usage, not an edge case. Backgrounding a pane releases its context
   // immediately rather than waiting for the browser to force-evict the
   // oldest one.
-  useEffect(() => {
+  // A pane holds a context only while it has a slot in the window's budget (webglBudget.ts): the least recently used
+  // pane gives its slot up before the page runs out of contexts, and takes one again when it is focused or shown.
+  const detachWebglRef = useRef<(() => void) | undefined>(undefined);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const ensureWebgl = useCallback(() => {
     const term = termRef.current;
-    if (!term || !active) return;
-    // Throw/dispose/context-loss edge cases live in attachWebglAddon
-    // (webglAttach.ts) so they're unit-testable without a real WebGL
-    // context — see that file for the failure-path reasoning.
-    return attachWebglAddon(term, () => new WebglAddon(), webglAddonRef);
-  }, [active]);
+    if (!term || !activeRef.current) return;
+    if (webglAddonRef.current) {
+      webglBudget.touch(id);
+      return;
+    }
+    webglBudget.claim(id, () => {
+      detachWebglRef.current?.();
+      detachWebglRef.current = undefined;
+    });
+    // Throw/dispose/context-loss edge cases live in attachWebglAddon (webglAttach.ts) so they're unit-testable
+    // without a real WebGL context — see that file for the failure-path reasoning. A context lost on its own
+    // gives the slot back, so the pane can ask again when it is used.
+    detachWebglRef.current = attachWebglAddon(term, () => new WebglAddon(), webglAddonRef, () => {
+      detachWebglRef.current = undefined;
+      webglBudget.free(id);
+    });
+    if (!detachWebglRef.current) webglBudget.free(id);
+  }, [id]);
+  useEffect(() => {
+    if (!active) return;
+    ensureWebgl();
+    return () => {
+      detachWebglRef.current?.();
+      detachWebglRef.current = undefined;
+      webglBudget.free(id);
+    };
+  }, [active, ensureWebgl, id]);
 
-  return <div className="term-pane" ref={ref} onFocus={() => onFocusPane?.(idRef.current)} />;
+  return <div
+      className="term-pane"
+      ref={ref}
+      onFocus={() => {
+        ensureWebgl();
+        onFocusPane?.(idRef.current);
+      }}
+    />;
 }
