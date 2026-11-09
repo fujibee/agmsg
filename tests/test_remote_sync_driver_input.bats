@@ -16,7 +16,15 @@
 # `bats --filter`.
 
 @test "driver-input: the staged input arrives whole and leaves nothing behind" {
-  run node --test \
+  # Bounded, so a hang names the test that stopped instead of sitting until the
+  # job is cancelled with nothing to read (a 17 minute hang on this leg, #1940's
+  # run, ended as "cancelled" with no output at all). --test-timeout fails the
+  # stuck test BY NAME; the outer timeout is the backstop for a process that
+  # stays alive after that, and is longer so the name is printed first. Where no
+  # `timeout` exists the run is as it was.
+  local bound=()
+  if command -v timeout >/dev/null 2>&1; then bound=(timeout 300); fi
+  run "${bound[@]}" node --test --test-timeout=90000 \
     --test-name-pattern 'whole input, from the start|leaves nothing behind' \
     "$BATS_TEST_DIRNAME/remote_sync_engine.test.mjs"
   # The whole captured output on failure, to fd 3, because bats truncates its
