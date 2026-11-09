@@ -53,6 +53,20 @@ function reportCell(term: Terminal, el: HTMLElement, onCellSize?: (widthPx: numb
   if (cell) onCellSize?.(cell.w, cell.h);
 }
 
+// A context the pane lets go of is freed at once, not whenever the browser collects the removed canvas: until then it
+// still counts against the page's limit (about 16), and the oldest context of the page, an add-on's board, is the one
+// that is dropped when a burst of panes swaps slots.
+function freeWebglContexts(root: HTMLElement | null | undefined) {
+  for (const canvas of Array.from(root?.querySelectorAll("canvas") ?? [])) {
+    try {
+      const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+      gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch {
+      // a canvas that cannot give its context up is left to the browser
+    }
+  }
+}
+
 /**
  * One embedded agent terminal: an xterm.js view bound to a backend PTY session.
  * Output streams in via `pty-output` events; keystrokes go back via `pty_write`.
@@ -290,6 +304,7 @@ export function TerminalPane({
       return;
     }
     webglBudget.claim(id, () => {
+      freeWebglContexts(termRef.current?.element);
       detachWebglRef.current?.();
       detachWebglRef.current = undefined;
     });
@@ -306,6 +321,7 @@ export function TerminalPane({
     if (!active) return;
     ensureWebgl();
     return () => {
+      freeWebglContexts(termRef.current?.element);
       detachWebglRef.current?.();
       detachWebglRef.current = undefined;
       webglBudget.free(id);
