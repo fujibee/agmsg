@@ -624,3 +624,119 @@ SH
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q 'is disconnected'
 }
+
+# Marks agmsgd confirmed ready, the same way
+# test_session_start_claude_code_native_channel.bats does: a session whose
+# project's delivery is agmsgd (the production default once agmsgd is turned
+# on) takes the native-channel branch of the claude-code SessionStart plug,
+# not the generic Monitor-directive branch these other cases in this file
+# exercise.
+_mark_daemon_ready_for_native_channel() {
+  sqlite3 "$RUN_DIR/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$RUN_DIR/install.db" "UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+}
+
+# #1947: the claude-code SessionStart plug (scripts/drivers/types/claude-code/
+# _session-start.sh) takes the native-channel branch above by calling `exit 0`
+# from inside `agmsg_session_start` -- a function this script SOURCES and
+# CALLS in its own top-level shell, not in a subshell. `exit 0` there ends
+# session-start.sh itself, never returning to the caller, so every block
+# written below the plug call (the #774 sync-autostart trigger among them)
+# is unreachable for the entire time a project's delivery is agmsgd: not a
+# flake, not conditional on timing, every single session start.
+#
+# Measured against the real production install's log (read-only) during this
+# investigation: a sync engine fatal at 02:38:34Z was never retried by any of
+# the many SessionStart/compact events in the 18h45m before someone ran
+# `sync start` by hand at 21:21:26Z -- `remote.sh status` kept reporting the
+# team as `connected (engine stale ...)` the whole time, which is what the
+# #774 trigger reads to decide which teams to (re)start.
+@test "session-start: agmsgd native-channel branch still starts a connected team's dead engine (#1947)" {
+  local fake calls="$TEST_SKILL_DIR/calls.txt"
+  fake="$(write_fake_remote starts)"
+  cp "$fake" "$SCRIPTS/remote.sh"
+  : > "$calls"
+  _mark_daemon_ready_for_native_channel
+  # actas-claim.sh has its OWN #774 trigger call (scripts/actas-claim.sh:315-324),
+  # separate from session-start.sh's. Not exercising it here, so its own
+  # unrelated sync-autostart call must not be mistaken for session-start.sh's:
+  # claim WITHOUT the fake's call-log var, then clear the log session-start.sh's
+  # own call will write to, right before invoking it.
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" /tmp/project-a claude-code alice "sid-1941" >/dev/null
+  : > "$calls"
+
+  run env AGMSG_AGENT_PID=$$ AGMSG_FAKE_REMOTE_CALLS="$calls" AGMSG_RESOLVE_PROJECT=0 \
+    CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-1941.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code /tmp/project-a <<< '{"session_id":"sid-1941"}'
+  [ "$status" -eq 0 ]
+  # The native-channel branch itself still ran (this case is not about
+  # breaking that): the plug's own success line is present, same as the
+  # existing native-channel tests pin.
+  grep -qF "agmsgd is running and will deliver" <<<"$output"
+  # The actual bug: the connected team's dead engine was never (re)started,
+  # so `calls` -- the fake remote.sh's own record of every `sync start`
+  # invocation it received -- stays empty.
+  wait_for_call "$calls" testteam
+}
+
+# #1947 scope limit (review §10): an agmsgd-mode or Codex session start
+# reaches ONLY the #774 sync-autostart trigger and the (read-only)
+# down_notice print -- not the cc-instance/watcher cleanup and dedup below
+# them, which can kill a live watcher process. Widening THAT to a mode it
+# never ran in before is its own automatic-stop/cleanup decision, not a side
+# effect of fixing the two blocks above. Pinned here with a stale
+# cc-instance record this session owns: the real cleanup code (session-
+# start.sh:~175-230) would remove it (and the dead PID guard makes it look
+# removable to that code) if this path reached it, so its SURVIVAL is what
+# proves the cleanup block was never reached, the same way the test above
+# proves the two blocks that SHOULD reach it did.
+@test "session-start: agmsgd native-channel branch does not run the cc-instance cleanup/dedup below it (#1947 scope)" {
+  _mark_daemon_ready_for_native_channel
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" /tmp/project-a claude-code alice "sid-scope" >/dev/null
+  # A pid certain to be dead on any machine, and a session_id this cc-
+  # instance record is the only reference to -- exactly what the cleanup
+  # loop in session-start.sh is written to remove.
+  local dead_pid=999999999
+  printf 'sid-owned-by-dead-pid\n' > "$RUN_DIR/cc-instance.$dead_pid"
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 \
+    CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-scope.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code /tmp/project-a <<< '{"session_id":"sid-scope"}'
+  [ "$status" -eq 0 ]
+  grep -qF "agmsgd is running and will deliver" <<<"$output"
+  [ -f "$RUN_DIR/cc-instance.$dead_pid" ]
+  [ "$(cat "$RUN_DIR/cc-instance.$dead_pid")" = "sid-owned-by-dead-pid" ]
+}
+
+# Codex has no path that reaches the Monitor-directive branches at all
+# (top-of-file comment in the codex plug: "Codex has no Monitor tool"), so
+# every Codex session start used to hit this hook's old `exit 0` -- the
+# #774 trigger and the down_notice print are #1947's fix for Codex too, and
+# the same cleanup/dedup scope limit applies: Codex reaches the two new
+# blocks and nothing past them.
+@test "session-start: a codex session reaches sync-autostart and down_notice but not the cleanup/dedup below (#1947)" {
+  local fake calls="$TEST_SKILL_DIR/calls.txt"
+  fake="$(write_fake_remote starts)"
+  cp "$fake" "$SCRIPTS/remote.sh"
+  : > "$calls"
+  bash "$SCRIPTS/join.sh" testteam codexagent codex /tmp/project-codex >/dev/null 2>&1 || true
+  local dead_pid=999999998
+  printf 'sid-codex-owned-by-dead-pid\n' > "$RUN_DIR/cc-instance.$dead_pid"
+  # down_notice_print_once's one visible effect: a line from an existing
+  # record, shown once. A fresh record (never shown) proves this ran.
+  source "$SCRIPTS/lib/down-notice.sh"
+  down_notice_set agmsgd down "a reason" "a recovery command"
+  run env AGMSG_FAKE_REMOTE_CALLS="$calls" AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" codex /tmp/project-codex <<< '{"session_id":"sid-codex-scope"}'
+  [ "$status" -eq 0 ]
+  wait_for_call "$calls" testteam
+  grep -qF "a reason" <<<"$output"
+  [ -f "$RUN_DIR/cc-instance.$dead_pid" ]
+  [ "$(cat "$RUN_DIR/cc-instance.$dead_pid")" = "sid-codex-owned-by-dead-pid" ]
+}

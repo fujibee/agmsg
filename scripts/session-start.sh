@@ -98,8 +98,13 @@ rm -f "$RUN_DIR/seat-pending.$_pending_sid"
 # scripts/drivers/types/<type>/_session-start.sh defining agmsg_session_start to override the
 # default no-op — codex uses it to hand the session off to the bridge. The plug
 # is sourced in this script's context so it sees PROJECT / RUN_DIR / SKILL_DIR /
-# PAIRS / INPUT / SESSION_ID and the helpers sourced above; it may exit 0
-# (codex does, having no Monitor tool) to skip the Monitor-directive path below.
+# PAIRS / INPUT / SESSION_ID and the helpers sourced above; it may set
+# AGMSG_SESSION_START_SKIP_DIRECTIVE=1 and return (codex does, having no
+# Monitor tool) to skip the Monitor-directive path below -- checked just
+# before that path starts (#1947), not here: the type-agnostic blocks
+# between here and there (cc-instance cleanup, the #774 sync-autostart
+# trigger, the down_notice print) must run whichever way the plug decides.
+AGMSG_SESSION_START_SKIP_DIRECTIVE=0
 agmsg_session_start_default() { :; }
 
 _tdir="$(agmsg_type_dir "$TYPE" 2>/dev/null || true)"
@@ -110,6 +115,82 @@ if [ -n "$_tdir" ] && [ -f "$_tdir/_session-start.sh" ]; then
 else
   agmsg_session_start_default
 fi
+
+# --- Start the engine for a connected team that has none (#761, #774). ---
+# A reboot leaves every sync engine dead and nothing restarts one: the five
+# commands that start it are all operator actions. `connected` keeps printing,
+# `send` keeps succeeding locally, and the only symptom is messages not arriving
+# — which reads as "nobody wrote anything". This is the first moment after a
+# reboot when anything of ours runs, so it is where it gets started.
+#
+# #765 made the absence VISIBLE here, in this block, and that was the right
+# first step and not enough: the warning appeared only when someone opened a
+# session, and it asked the person for something the machine can do. Starting it
+# is the same trigger doing the whole job.
+#
+# BEFORE the type-agnostic cleanup and the three Monitor-directive blocks
+# below: there are three ways out of this script on the Monitor path (a
+# watcher already streaming, the actas variant, and the default), and a
+# line added to one of them is missing from the other two -- and #1947
+# narrowed what an agmsgd-mode or Codex session start reaches to exactly
+# this block and the down_notice one right after it. Widening that to the
+# cc-instance/watcher cleanup below (which can kill a live watcher process)
+# is its own decision about what runs automatically, not a side effect of
+# restoring this trigger (review-criteria §10), so that cleanup stays
+# unreached for those sessions, same as before this fix. Placed BEFORE
+# that cleanup, not after, so the one guard below can skip everything past
+# this point in one place.
+#
+# WHICH TEAMS. `status` is asked for CONNECTED teams — the binding, not the
+# engine. Whether an engine is running is `sync start`'s question, under the
+# lock that makes the answer true; asking it here as well is the second answer
+# that diverges (see scripts/lib/sync-autostart.sh).
+#
+# Best-effort, and bounded IN TIME as well as in outcome. `status` is a
+# subprocess and needs python3; if it cannot run, this does nothing rather than
+# guessing. A start that fails never fails the session, and a start that is SLOW
+# never delays the Monitor directive below: the helper waits for a whole-call
+# budget (`AGMSG_SYNC_AUTOSTART_TIMEOUT_S`, 5s) and then leaves the start
+# running and moves on. An agent that will not open because a sync engine was
+# thinking is worse than a sync engine that is down.
+#
+# Reached by every delivery mode and every type now (#1947) -- `status` is
+# read-only and a start that fails never fails the session, so there is no
+# mode this is unsafe for; only the cleanup/Monitor-directive blocks below
+# stay narrowed to the modes that reached them before.
+if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-autostart.sh" ]; then
+  # shellcheck source=scripts/lib/sync-autostart.sh
+  . "$SKILL_DIR/scripts/lib/sync-autostart.sh"
+  _connected_teams="$("$SKILL_DIR/scripts/remote.sh" status 2>/dev/null \
+    | awk -F'\t' '$2 ~ /^connected/ {print $1}' || true)"
+  if [ -n "$_connected_teams" ]; then
+    # Word splitting on newlines only: a team name may contain a space, and
+    # `$(...)` unquoted would split it into two names that start nothing.
+    _old_ifs="$IFS"; IFS=$'\n'
+    # shellcheck disable=SC2086
+    set -- $_connected_teams
+    IFS="$_old_ifs"
+    agmsg_sync_autostart "$SKILL_DIR/scripts/remote.sh" "$@" || true
+  fi
+fi
+
+# A component that is down or degraded and could not recover itself: said
+# once, read-only (down_notice_print_once never writes a notice, only a
+# per-record ".shown" marker so it is not repeated) -- the other half of
+# what #1947 narrowed an agmsgd-mode/Codex session start to reach.
+if [ -r "$SKILL_DIR/scripts/lib/down-notice.sh" ]; then
+  # shellcheck source=scripts/lib/down-notice.sh
+  . "$SKILL_DIR/scripts/lib/down-notice.sh"
+  down_notice_print_once || true
+fi
+
+# #1947: the plug's own old `exit 0` ended the whole script here (same
+# point, same outcome) -- everything below this line is the cc-instance/
+# watcher cleanup and dedup, and the Monitor-directive logic that depends
+# on it, none of which ran for codex or an agmsgd-mode project before.
+# Keeping them unreached for those is the scope limit explained above, not
+# an oversight: only the two blocks just above are reached unconditionally.
+[ "$AGMSG_SESSION_START_SKIP_DIRECTIVE" != 1 ] || exit 0
 
 # One where.sh call, rendered once, reused by every text-emitting exit below —
 # so a session always learns its own terminal driver and capabilities as the
@@ -290,61 +371,6 @@ if [ -n "$CC_PID" ]; then
     printf 'agmsg: could not publish the complete instance marker: %s\n' "$STATE" >&2
     exit 1
   fi
-fi
-
-# --- Start the engine for a connected team that has none (#761, #774). ---
-# A reboot leaves every sync engine dead and nothing restarts one: the five
-# commands that start it are all operator actions. `connected` keeps printing,
-# `send` keeps succeeding locally, and the only symptom is messages not arriving
-# — which reads as "nobody wrote anything". This is the first moment after a
-# reboot when anything of ours runs, so it is where it gets started.
-#
-# #765 made the absence VISIBLE here, in this block, and that was the right
-# first step and not enough: the warning appeared only when someone opened a
-# session, and it asked the person for something the machine can do. Starting it
-# is the same trigger doing the whole job.
-#
-# BEFORE the three directive blocks below rather than inside them: there are
-# three ways out of this script (a watcher already streaming, the actas variant,
-# and the default), and a line added to one of them is missing from the other
-# two.
-#
-# WHICH TEAMS. `status` is asked for CONNECTED teams — the binding, not the
-# engine. Whether an engine is running is `sync start`'s question, under the
-# lock that makes the answer true; asking it here as well is the second answer
-# that diverges (see scripts/lib/sync-autostart.sh).
-#
-# Best-effort, and bounded IN TIME as well as in outcome. `status` is a
-# subprocess and needs python3; if it cannot run, this does nothing rather than
-# guessing. A start that fails never fails the session, and a start that is SLOW
-# never delays the Monitor directive below: the helper waits for a whole-call
-# budget (`AGMSG_SYNC_AUTOSTART_TIMEOUT_S`, 5s) and then leaves the start
-# running and moves on. An agent that will not open because a sync engine was
-# thinking is worse than a sync engine that is down.
-#
-# Reaches `monitor` and `both` only — this hook is not installed for `turn` or
-# `off`, so those modes still get the absence only from `status`.
-if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-autostart.sh" ]; then
-  # shellcheck source=scripts/lib/sync-autostart.sh
-  . "$SKILL_DIR/scripts/lib/sync-autostart.sh"
-  _connected_teams="$("$SKILL_DIR/scripts/remote.sh" status 2>/dev/null \
-    | awk -F'\t' '$2 ~ /^connected/ {print $1}' || true)"
-  if [ -n "$_connected_teams" ]; then
-    # Word splitting on newlines only: a team name may contain a space, and
-    # `$(...)` unquoted would split it into two names that start nothing.
-    _old_ifs="$IFS"; IFS=$'\n'
-    # shellcheck disable=SC2086
-    set -- $_connected_teams
-    IFS="$_old_ifs"
-    agmsg_sync_autostart "$SKILL_DIR/scripts/remote.sh" "$@" || true
-  fi
-fi
-
-# A component that is down or degraded and could not recover itself: said once.
-if [ -r "$SKILL_DIR/scripts/lib/down-notice.sh" ]; then
-  # shellcheck source=scripts/lib/down-notice.sh
-  . "$SKILL_DIR/scripts/lib/down-notice.sh"
-  down_notice_print_once || true
 fi
 
 # --- Skip directive when a watcher is already alive for this instance. ---
