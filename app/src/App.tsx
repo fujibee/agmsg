@@ -65,6 +65,7 @@ import {
 import { PulseDot } from "./pulseSync";
 import { RailAvatar, SidebarUser } from "./SidebarUser";
 import { resolveActiveTab } from "./tabMemory";
+import { updateCell } from "./cellMeasure";
 import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
@@ -986,8 +987,11 @@ export default function App() {
   const cellSizeRef = useRef<{ w: number; h: number } | null>(null);
   const [cellSize, setCellSize] = useState<{ w: number; h: number } | null>(null);
   const handleCellSize = useCallback((w: number, h: number) => {
-    cellSizeRef.current = { w, h };
-    setCellSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+    // A change smaller than xterm's own rounding is not a different cell (cellMeasure.ts): the gap between panes is
+    // made of this value and the width of a pane of the gap, so a flicker here would be a loop.
+    const next = updateCell(cellSizeRef.current, { w, h });
+    cellSizeRef.current = next;
+    setCellSize((prev) => (prev === next ? prev : next));
   }, []);
 
   // Which divider (by dividerDragKey, below) is currently being dragged —

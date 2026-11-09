@@ -48,7 +48,7 @@ function b64ToBytes(b64: string): Uint8Array {
 // Tells the window the size of one cell of this terminal (see cellMeasure.ts for why it is not pane width / columns).
 function reportCell(term: Terminal, el: HTMLElement, onCellSize?: (widthPx: number, heightPx: number) => void) {
   const screen = el.querySelector<HTMLElement>(".xterm-screen");
-  const cell = measureCell(screen ? screen.getBoundingClientRect() : null, { width: el.offsetWidth, height: el.offsetHeight }, term.cols, term.rows);
+  const cell = measureCell(screen ? screen.getBoundingClientRect() : null, term.cols, term.rows);
   if (cell) onCellSize?.(cell.w, cell.h);
 }
 
