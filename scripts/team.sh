@@ -409,7 +409,7 @@ while IFS='	' read -r name type project registered; do
   fi
 # LC_ALL=C tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
 # the `registrations` field "N\r" and trip the integer test in the loop (#130).
-done < <(sqlite3 -separator '	' :memory: \
+done < <(agmsg_sqlite_mem -separator '	' \
   "WITH agents AS (
      SELECT
        key AS name,
@@ -429,7 +429,7 @@ done < <(sqlite3 -separator '	' :memory: \
    -- listing entirely and from the count with it. That is the normal state on
    -- a machine that pulled the team rather than joining it.
    FROM agents LEFT JOIN json_each(agents.registrations) AS r
-   ORDER BY name, CAST(r.key AS INTEGER);" | LC_ALL=C tr -d '\r')
+   ORDER BY name, CAST(r.key AS INTEGER);")
 
 if [ "$OUTPUT_MODE" = json ]; then
   printf '\n]\n'

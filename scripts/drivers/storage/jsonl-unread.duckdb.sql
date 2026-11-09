@@ -9,12 +9,16 @@
 WITH log AS (
   SELECT * FROM read_json('__LG__', columns={type:'VARCHAR', id:'VARCHAR',
         team:'VARCHAR', "from":'VARCHAR', "to":'VARCHAR', body:'VARCHAR',
-        at:'VARCHAR', msg_id:'VARCHAR', agent:'VARCHAR'}, format='newline_delimited')
+        at:'VARCHAR', msg_id:'VARCHAR', agent:'VARCHAR', body_b64:'VARCHAR'}, format='newline_delimited')
 ), sent AS (
   SELECT *, row_number() OVER () AS position FROM log WHERE type='message_sent'
 )
-SELECT to_json(struct_pack(type := 'message_sent', id := s.id, team := s.team,
+SELECT CASE WHEN s.body_b64 IS NULL
+  THEN to_json(struct_pack(type := 'message_sent', id := s.id, team := s.team,
          "from" := s."from", "to" := s."to", body := s.body, at := s.at))
+  ELSE to_json(struct_pack(type := 'message_sent', id := s.id, team := s.team,
+         "from" := s."from", "to" := s."to", body := s.body, at := s.at,
+         body_b64 := s.body_b64)) END
 FROM sent s
 WHERE s.position > __CUR__ AND s.team='__TEAM__' AND s."to"='__AL__'
 AND s.id NOT IN (

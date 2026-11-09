@@ -214,10 +214,36 @@ storage_send() {
   local team="$1" from="$2" to="$3" body="$4"
   local id at line; id="$(compat_uuid7)"; at="$(_jsonl_now)"
   _jsonl_init_file
-  line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \
-    --arg to "$to" --arg body "$body" --arg at "$at" \
-    '{type:"message_sent",id:$id,team:$team,from:$from,to:$to,body:$body,at:$at}')" \
-    || return 1
+  if [ -n "${5:-}" ]; then
+    # A body with a NUL byte arrives as a file (5th argument; a shell variable
+    # cannot hold one). jq reads it whole and writes the NUL as its JSON escape
+    # (\u0000), which every reader of the log reads back as the same byte.
+    line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \
+      --arg to "$to" --rawfile body "$5" --arg at "$at" \
+      '{type:"message_sent",id:$id,team:$team,from:$from,to:$to,body:$body,at:$at}')" \
+      || { echo "agmsg: could not write a message body that contains a NUL byte (needs jq 1.6 or newer for --rawfile)" >&2; return 1; }
+  else
+    line="$(jq -nc --arg id "$id" --arg team "$team" --arg from "$from" \
+      --arg to "$to" --arg body "$body" --arg at "$at" \
+      '{type:"message_sent",id:$id,team:$team,from:$from,to:$to,body:$body,at:$at}')" \
+      || return 1
+  fi
+  # JSON text cannot hold a byte that is not valid UTF-8: jq turns it into
+  # U+FFFD, in "body" above. When that happened (or the body already held a
+  # U+FFFD, which costs nothing to record twice), the exact bytes also go in
+  # "body_b64" (base64), so the log never loses them. A reader that only knows
+  # "body" reads what it always read; one that wants the bytes decodes the field.
+  case "$line" in
+    *$'\xef\xbf\xbd'*)
+      local b64
+      if [ -n "${5:-}" ]; then
+        b64="$(base64 < "$5" | LC_ALL=C tr -d '\r\n')" || return 1
+      else
+        b64="$(printf '%s' "$body" | base64 | LC_ALL=C tr -d '\r\n')" || return 1
+      fi
+      line="$(printf '%s' "$line" | jq -c --arg b64 "$b64" '. + {body_b64:$b64}')" || return 1
+      ;;
+  esac
   _jsonl_with_lock _jsonl_append "$line" || return 1
   printf '%s\n' "$id"
 }
@@ -256,7 +282,7 @@ _jsonl_list_unread_locked() {
       [$events[] | select(.type=="message_sent")] | to_entries[] |
       select((.key + 1) > $cursor and .value.team==$team and .value.to==$agent and
         ($read[.value.id] | not)) | .value |
-      {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}' "$log")" || return 1
+      ({type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at} + (if .body_b64 then {body_b64:.body_b64} else {} end))' "$log")" || return 1
   fi
   [ -n "$out" ] || return 0
   if [ -n "$limit" ]; then printf '%s\n' "$out" | head -n "$limit"; else printf '%s\n' "$out"; fi
@@ -414,7 +440,7 @@ _jsonl_watch_after_locked() {
               and ((.value.team + ":" + .value.to) as $p | ($pairs | index($p)) != null)
               and (($read[[.value.team,.value.to,.value.id] | tojson] // false) | not)))
         | .[].value
-        | {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}),
+        | ({type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at} + (if .body_b64 then {body_b64:.body_b64} else {} end))),
       {type:"cursor",cursor:(($sent | length) | tostring)}
   ' "$(_jsonl_log)" 2>/dev/null
 }
@@ -438,7 +464,7 @@ _jsonl_history_locked() {
     .messages[]? | select(.status=="imported") | .local_event // empty else . end;
     [logical_events | select(.type=="message_sent" and .team==$team
             and ($agent=="" or .to==$agent or .from==$agent))
-     | {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}]
+     | ({type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at} + (if .body_b64 then {body_b64:.body_b64} else {} end))]
     | (if $limit >= 0 and (length > $limit) then .[length-$limit:] else . end)
     | .[]
   ' "$(_jsonl_log)" 2>/dev/null

@@ -293,3 +293,35 @@ _logging_sed_path() {
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$BATS_TEST_TMPDIR/sed.log" | tr -d ' ')" -eq 2 ]
 }
+
+@test "agmsg_sqlite_mem: a failing statement reads as nothing, and fails only for a caller with pipefail" {
+  unset AGMSG_SQLITE_CRLF
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; agmsg_sqlite_mem 'not valid sql;' >/dev/null 2>&1; echo plain=\$?"
+  [ "$output" = "plain=0" ]
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; set -o pipefail; agmsg_sqlite_mem 'not valid sql;' >/dev/null 2>&1; echo piped=\$?"
+  [ "$output" != "piped=0" ]
+}
+
+@test "agmsg_sqlite_mem: takes -separator ahead of the database, as the roster readers use it" {
+  unset AGMSG_SQLITE_CRLF
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; agmsg_sqlite_mem -separator '|' \"SELECT 'a','b';\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "a|b" ]
+}
+
+@test "send and inbox start no tr process to strip a CR on a platform without CRLF" {
+  unset AGMSG_SQLITE_CRLF
+  export AGMSG_AGENT_PID=""
+  bash "$SCRIPTS/join.sh" crteam alice claude-code /tmp/project-cr-a >/dev/null
+  bash "$SCRIPTS/join.sh" crteam bob claude-code /tmp/project-cr-b >/dev/null
+  local dir="$BATS_TEST_TMPDIR/trbin" real
+  real="$(command -v tr)"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\necho "$*" >> "%s/tr.log"\nexec "%s" "$@"\n' "$BATS_TEST_TMPDIR" "$real" > "$dir/tr"
+  chmod +x "$dir/tr"
+  PATH="$dir:$PATH"
+  bash "$SCRIPTS/send.sh" crteam alice bob "hello" >/dev/null
+  bash "$SCRIPTS/inbox.sh" crteam bob >/dev/null
+  # No tr of any kind strips a CR or whitespace from sqlite3 output any more.
+  ! LC_ALL=C grep -q -e '-d \\r' -e "-d \\[:space:\\]" "$BATS_TEST_TMPDIR/tr.log" 2>/dev/null
+}

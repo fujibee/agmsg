@@ -21,6 +21,17 @@
 # path leaves it unopenable. The two are not interchangeable, which is exactly
 # the substitution that caused #669.
 
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF. The
+# install recovery helper concatenates this file after sqlite-crlf.sh into one
+# script with no sibling files, so a loaded definition is not sourced again.
+if ! declare -F agmsg_sqlite_mem >/dev/null 2>&1; then
+  _agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+  case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+  # shellcheck disable=SC1091
+  . "$_agmsg_crlf_d/sqlite-crlf.sh"
+  unset _agmsg_crlf_d
+fi
+
 [ -n "${_AGMSG_SQLPATH_SH:-}" ] && return 0
 _AGMSG_SQLPATH_SH=1
 
@@ -50,8 +61,8 @@ agmsg_sql_readfile_path() {
 # looking like an empty file.
 agmsg_sql_readfile_ok() {
   local path="$1" seen
-  seen="$(sqlite3 :memory: \
+  seen="$(agmsg_sqlite_mem \
     "SELECT readfile('$(agmsg_sql_readfile_path "$path")') IS NOT NULL;" \
-    2>/dev/null | LC_ALL=C tr -d '\r')"
+    2>/dev/null)"
   [ "$seen" = "1" ]
 }

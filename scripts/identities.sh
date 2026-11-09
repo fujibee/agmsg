@@ -40,7 +40,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
   [ "$TEAM_NAME" = "null" ] && continue
   TEAM_SQL=$(printf '%s' "$TEAM_NAME" | LC_ALL=C sed "s/'/''/g")
 
-  sqlite3 -separator $'\t' :memory: "
+  agmsg_sqlite_mem -separator $'\t' "
     WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
     cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
     agents AS (
@@ -57,5 +57,5 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     WHERE json_extract(r.value, '\$.project') IN ($PROJECT_SQL_IN)
       AND json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL'
     ORDER BY team, name;
-  " | LC_ALL=C tr -d '\r'
+  "
 done

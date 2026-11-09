@@ -89,7 +89,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     [ -n "$agent_name" ] || continue
     SUGGESTED_MATCHES="${SUGGESTED_MATCHES:+$SUGGESTED_MATCHES
 }$TEAM_NAME	$agent_name"
-  done < <(sqlite3 -separator '	' :memory: "
+  done < <(agmsg_sqlite_mem -separator '	' "
     WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
     cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
     agents AS (
@@ -104,7 +104,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     SELECT DISTINCT name
     FROM agents, json_each(agents.registrations) AS r
     WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL';
-  " | LC_ALL=C tr -d '\r')
+  ")
 done
 
 if [ -z "$EXACT_MATCHES" ] && [ -z "$SUGGESTED_MATCHES" ]; then

@@ -114,11 +114,37 @@ function envelopeEqual(left, right) {
     left?.key_id === right?.key_id && left?.blob === right?.blob;
 }
 
+// The exact bytes of a message body. The log keeps a body that is valid UTF-8
+// as the string `body`; one that is not has `body` as a lossy view and its real
+// bytes in `body_b64`. The digest and the sealed message both use the bytes.
+function bodyBytes(message) {
+  return message.body_b64 !== undefined ? Buffer.from(message.body_b64, "base64") :
+    Buffer.from(message.body, "utf8");
+}
+
+// A body that arrives as bytes (`body_hex`, the sync engine's form for a body it
+// cannot frame as text) written back the way the log keeps it: as the string when
+// the bytes are valid UTF-8, otherwise as `body_b64` beside a lossy `body`.
+function logBodyFields(projection) {
+  if (typeof projection.body_hex !== "string" || projection.body_hex === "") {
+    return { body: projection.body };
+  }
+  if (projection.body_hex.length % 2 !== 0 || !/^[0-9a-f]+$/u.test(projection.body_hex)) {
+    fail("pull message body_hex is not hex");
+  }
+  const bytes = Buffer.from(projection.body_hex, "hex");
+  try {
+    return { body: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) };
+  } catch {
+    return { body: bytes.toString("utf8"), body_b64: bytes.toString("base64") };
+  }
+}
+
 function localPayloadDigest(message) {
   const hash = createHash("sha256");
   for (const value of [message.local_id, message.from_agent, message.to_agent,
-    message.body, canonicalCreatedAt(message.at)]) {
-    const bytes = Buffer.from(value, "utf8");
+    bodyBytes(message), canonicalCreatedAt(message.at)]) {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
     const length = Buffer.allocUnsafe(4);
     length.writeUInt32BE(bytes.length);
     hash.update(length); hash.update(bytes);
@@ -290,7 +316,8 @@ function fold(records, target) {
 function localMessages(records, localTeam) {
   return records.filter(({ value }) => value.type === "message_sent" && value.team === localTeam)
     .map(({ value, end }) => ({ local_position: String(end), local_id: value.id,
-      body: value.body, at: value.at, from_agent: value.from, to_agent: value.to }));
+      body: value.body, ...(value.body_b64 !== undefined ? { body_b64: value.body_b64 } : {}),
+      at: value.at, from_agent: value.from, to_agent: value.to }));
 }
 
 function pushCursor(messages, state) {
@@ -367,7 +394,9 @@ function prepare(path, target, limit, inputText) {
       cipher: input.cipher, key_id: input.key_id, recipients: input.recipients,
       max_blob_bytes: input.max_blob_bytes, wire_id: wireId,
       team_id: target.remote_team_id, protocol_version: target.protocol_version,
-      projection: { body: message.body, created_at: canonicalCreatedAt(message.at),
+      projection: { ...(message.body_b64 !== undefined ?
+          { body_hex: bodyBytes(message).toString("hex") } : { body: message.body }),
+        created_at: canonicalCreatedAt(message.at),
         from_agent: message.from_agent, to_agent: message.to_agent } });
     if (process.env.AGMSG_SYNC_TEST_ABORT_AFTER_SEAL === "1") fail("aborted after seal", 75);
     const reservation = { driver_generation: generation,
@@ -535,7 +564,7 @@ function apply(path, target, inputText) {
       if (source.projection.kind === undefined) {
         localEvent = prior?.local_event ?? { type: "message_sent", id: uuid7(), team: target.local_team,
           from: source.projection.from_agent, to: source.projection.to_agent,
-          body: source.projection.body, at: source.projection.created_at };
+          ...logBodyFields(source.projection), at: source.projection.created_at };
       }
       status = "imported";
     }

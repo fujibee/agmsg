@@ -63,7 +63,7 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
 {
   printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.to') || char(31) ||"
-  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(13), ''), char(10), char(30)) || char(31) ||"
+  printf "%s\n" "       replace(replace(${_AGMSG_SQL_BODY_DISPLAY}, char(13), ''), char(10), char(30)) || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.id')"
   printf "FROM json_each('"

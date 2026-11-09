@@ -377,7 +377,7 @@ for team in "${TEAM_LIST[@]}"; do
     trap 'rm -f "$_agmsg_ci_sql"' EXIT HUP INT TERM
     {
       printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
-      printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+      printf "%s\n" "       replace(replace(${_AGMSG_SQL_BODY_DISPLAY}, char(10), '\n'), char(9), '\t') || char(31) ||"
       printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
       printf "%s\n" "       json_extract(value,'\$.id')"
       printf "FROM json_each('"

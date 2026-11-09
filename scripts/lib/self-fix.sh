@@ -34,6 +34,13 @@
 #   fix none:<no_seat_for_this_session|arguments_refused|...>
 # Exit: 0 when every held seat was written; 2 when at least one was not; 1 on refusal.
 
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 : "${SKILL_DIR:?self-fix.sh requires SKILL_DIR}"
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/actas-lock.sh"
@@ -99,9 +106,9 @@ _fix_seats_of() {   # <bare-sid>
     # this codebase carries (confirmed against resolve-project.sh's own
     # two-shape handling of what each agent's VALUE looks like -- only
     # the value's inner shape varies by vintage, never the outer keying).
-    agents="$(sqlite3 :memory: "
+    agents="$(agmsg_sqlite_mem "
       SELECT key FROM json_each(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$cfg")') AS TEXT), '\$.agents'));
-    " 2>/dev/null | LC_ALL=C tr -d '\r')"
+    " 2>/dev/null)"
     [ -n "$agents" ] || continue
     while IFS= read -r agent; do
       [ -n "$agent" ] || continue
