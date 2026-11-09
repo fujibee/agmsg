@@ -1758,3 +1758,83 @@ _968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact"
   [ "$status" -eq 13 ]
   [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
 }
+
+# A message body is data: what machine A's store holds is what machine B's
+# store holds, byte for byte, including a body that is not valid UTF-8 (cut
+# mid-character, a stray 0xff). One such message in a batch used to fail the
+# whole push (a UTF-8 locale's sed) and, with the text tools made byte-wise,
+# still arrived changed (jq turned the bad bytes into U+FFFD).
+#
+# This drives the real pipeline end to end except the HTTP hop, which carries
+# the envelope untouched: A's store -> prepare (driver + seal helper) -> the
+# receiving helper opens each envelope -> B's store through apply.
+bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per line
+  local a_store="$BATS_TEST_TMPDIR/store" b_store="$BATS_TEST_TMPDIR/store-b"
+  local candidates records seq=0 line
+  candidates=$(prepare_push | grep '"type":"sync_push_candidate"')
+  [ "$(printf '%s\n' "$candidates" | wc -l | tr -d ' ')" = "$1" ]
+  records=$(printf '%s\n' "$candidates" | node -e '
+    const { openEnvelope } = await import(process.argv[1]);
+    const lines = (await new Promise((resolve) => { let s = ""; process.stdin.on("data", (c) => s += c);
+      process.stdin.on("end", () => resolve(s.split("\n").filter(Boolean))); }));
+    let seq = 0;
+    for (const line of lines) {
+      const c = JSON.parse(line);
+      const projection = await openEnvelope({ envelope: c.envelope, max_blob_bytes: 1048576 });
+      seq += 1;
+      console.log(JSON.stringify({ type: "sync_pull_message", server_seq: String(seq), id: c.id,
+        server_received_at: "2026-07-20T13:00:01.000000Z", envelope: c.envelope,
+        status: "importable", policy_revision: "0", local_security_revision: "0", projection }));
+    }
+    console.log(JSON.stringify({ type: "sync_pull_cursor", next_after: String(seq) }));
+  ' --input-type=module "$SCRIPTS/internal/sync-cipher.mjs")
+  AGMSG_STORAGE_PATH="$b_store" storage_init demo >/dev/null
+  AGMSG_STORAGE_PATH="$b_store" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    printf "%s\n" "$2" | storage_sync_apply_pull demo "$3" "$4" 1' _ "$SCRIPTS" "$records" "$SERVER_ID" "$TEAM_ID" >/dev/null
+  sqlite3 "$(AGMSG_STORAGE_PATH="$b_store" agmsg_db_path demo)" \
+    "SELECT lower(hex(CAST(body AS BLOB))) FROM events WHERE type='message_sent' ORDER BY seq"
+}
+
+@test "sync contract: a body that is not valid UTF-8 reaches the other machine as the same bytes" {
+  local db a_hex b_hex
+  storage_send demo alice bob "first, plain" >/dev/null
+  storage_send demo alice bob "placeholder-middle" >/dev/null
+  storage_send demo alice bob "third — ünïcode 日本語" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET body=CAST(x'61e381' AS TEXT) WHERE body='placeholder-middle'"
+  a_hex=$(sqlite3 "$db" "SELECT lower(hex(CAST(body AS BLOB))) FROM events ORDER BY seq")
+  [ "$(printf '%s\n' "$a_hex" | sed -n 2p)" = "61e381" ]
+
+  b_hex=$(bodies_through_sync 3)
+  [ "$b_hex" = "$a_hex" ]
+}
+
+@test "sync contract: every shape of broken or awkward UTF-8 survives, and a batch with one of them still sends the rest" {
+  local db a_hex b_hex i
+  # The last three are valid UTF-8 that a text pipeline still mishandles: a
+  # byte order mark (stripped by a default decoder), a mark alone, and a NUL
+  # (the apply frame's own separator).
+  local -a shapes=(ff 80 c080 eda080 f4908080 e38182e3 6162ff6364 efbbbf68656c6c6f efbbbf 610062)
+  for i in "${!shapes[@]}"; do storage_send demo alice bob "slot-$i" >/dev/null; done
+  storage_send demo alice bob "last, plain" >/dev/null
+  db="$(_sqlite_db demo)"
+  for i in "${!shapes[@]}"; do
+    sqlite3 "$db" "UPDATE events SET body=CAST(x'${shapes[$i]}' AS TEXT) WHERE body='slot-$i'"
+  done
+  a_hex=$(sqlite3 "$db" "SELECT lower(hex(CAST(body AS BLOB))) FROM events ORDER BY seq")
+
+  b_hex=$(bodies_through_sync $(( ${#shapes[@]} + 1 )))
+  [ "$b_hex" = "$a_hex" ]
+}
+
+@test "sync contract: a body that is valid UTF-8 is sealed exactly as before" {
+  # The golden: the bytes inside the envelope for text are the JSON the earlier
+  # releases wrote, with `body` a string and no `body_b64`/`body_hex` field.
+  local blob inner
+  storage_send demo alice bob 'plain "quoted" \ back — 日本語' >/dev/null
+  blob=$(prepare_push | grep '"type":"sync_push_candidate"' | jq -r '.envelope.blob')
+  inner=$(printf '%s' "$blob" | base64 -d)
+  [ "$(printf '%s' "$inner" | jq -r 'keys_unsorted | join(",")')" = "body,created_at,from_agent,to_agent" ]
+  [ "$(printf '%s' "$inner" | jq -r '.body')" = 'plain "quoted" \ back — 日本語' ]
+}
