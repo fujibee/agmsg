@@ -265,6 +265,10 @@ specification:
 {"body":"Run the test suite","created_at":"2026-07-20T06:30:00.000000Z","from_agent":"leader","to_agent":"worker-1"}
 ```
 
+A body that is not valid UTF-8 is carried as `body_b64` (canonical base64 of
+its bytes) in place of `body`, exactly as specified for `cipher: "none"` in the
+HTTP v1 specification; a body that is valid UTF-8 is always `body`.
+
 On receipt, known fields are validated as before; unknown fields are ignored.
 A reader does not require the message bytes to be byte-identical JCS: field
 presence, value shape, and the absence of a duplicate key are what is

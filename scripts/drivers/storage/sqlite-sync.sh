@@ -779,7 +779,7 @@ storage_sync_prepare_push() {
   # check below is a filter on rows already in hand, not a lookup per message.
   rows=$(_sqlite_data "$team" "
     SELECT json_object('local_position',CAST(e.seq AS TEXT),'local_id',e.id,
-                       'body',e.body,'at',e.at,'from_agent',e.from_agent,
+                       'body_hex',lower(hex(CAST(e.body AS BLOB))),'at',e.at,'from_agent',e.from_agent,
                        'to_agent',e.to_agent,'reserved',m.wire_id)
       FROM events e
       JOIN sync_bindings b ON b.local_team='$tl'
@@ -890,14 +890,14 @@ storage_sync_prepare_push() {
         --argjson version "$version" --argjson protocol "$protocol" \
         --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
         split("\t") as $pair | ($pair[1] | fromjson) as $row
-        | (if ($row.body | length) == 0 then error("empty message body") else . end)
+        | (if ($row.body_hex | length) == 0 then error("empty message body") else . end)
         | (if ($row.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
              then ($row.at | .[0:19] + ".000000Z") else $row.at end) as $created
         | {type:"sync_seal",envelope_v:$version,cipher:$cipher,
            key_id:(if $key=="" then null else $key end),max_blob_bytes:$max_blob,
            wire_id:$pair[0],team_id:$team_id,protocol_version:$protocol,
            recipients:$recipients,
-           projection:{body:$row.body,created_at:$created,
+           projection:{body_hex:$row.body_hex,created_at:$created,
                        from_agent:$row.from_agent,to_agent:$row.to_agent}}' \
       | "$node_bin" "$cipher_helper" seal-batch "$pending" \
       | _sqlite_sync_jq -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
@@ -1144,9 +1144,9 @@ storage_sync_apply_pull() {
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
-  local from to body at local_id q line_next_after jq_ok
+  local from to body at body_hex local_id q line_next_after jq_ok
   local cipher_q blob_q key_id_q received_q policy_q local_rev_q reason_q
-  local from_q to_q body_q at_q
+  local from_q to_q body_q at_q body_sql
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
   sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-sync-sql.XXXXXX") || { _sqlite_sync_why; return 13; }
@@ -1191,7 +1191,7 @@ storage_sync_apply_pull() {
                  "envelope.v","envelope.cipher","envelope.key_id","envelope.blob",
                  "status","policy_revision","local_security_revision","reason",
                  "projection.kind","projection.from_agent","projection.to_agent",
-                 "projection.body","projection.created_at"];
+                 "projection.body","projection.created_at","projection.body_hex"];
     # envelope.blob and envelope.cipher have NO `// ""` default, unlike the twelve
     # fields that do, and the value is `tostring`-ed below -- so on a message a
     # JSON null, an absent key, or a number was silently stored as the plausible-
@@ -1230,6 +1230,7 @@ storage_sync_apply_pull() {
        elif $name == "projection.from_agent"   then $r.projection.from_agent // ""
        elif $name == "projection.to_agent"     then $r.projection.to_agent // ""
        elif $name == "projection.body"         then $r.projection.body // ""
+       elif $name == "projection.body_hex"     then $r.projection.body_hex // ""
        else                                         $r.projection.created_at // ""
        end) | tostring;
     [ split("\n")[] | select(length > 0) ] as $lines
@@ -1267,7 +1268,7 @@ storage_sync_apply_pull() {
   while [ "$record_index" -lt "$page_count" ]; do
     record_index=$((record_index + 1))
     for field_name in type line_next_after seq wire received v cipher key_id blob \
-                      status policy local_rev reason kind from to body at; do
+                      status policy local_rev reason kind from to body at body_hex; do
       if ! IFS= read -r -d '' "$field_name" <&3; then
         _sqlite_sync_apply_fail "record $record_index ended mid-frame at field $field_name"
         _sqlite_sync_why; return 13
@@ -1305,6 +1306,17 @@ storage_sync_apply_pull() {
     _sqlite_sync_lit_into "$from"; from_q="$_SQLITE_SYNC_LIT"
     _sqlite_sync_lit_into "$to"; to_q="$_SQLITE_SYNC_LIT"
     _sqlite_sync_lit_into "$body"; body_q="$_SQLITE_SYNC_LIT"
+    # A body that is not text arrives as hex and is stored as those exact bytes.
+    # Only hex digits can reach the SQL, so there is nothing to quote.
+    body_sql="'$body_q'"
+    if [ -n "$body_hex" ]; then
+      case "$body_hex" in
+        *[!0-9a-f]*) _sqlite_sync_apply_fail "record $record_index has a body that is not hex"; _sqlite_sync_why; return 13 ;;
+      esac
+      [ $(( ${#body_hex} % 2 )) -eq 0 ] \
+        || { _sqlite_sync_apply_fail "record $record_index has a body of odd hex length"; _sqlite_sync_why; return 13; }
+      body_sql="CAST(x'$body_hex' AS TEXT)"
+    fi
     _sqlite_sync_lit_into "$at"; at_q="$_SQLITE_SYNC_LIT"
     q="'$key_id_q'"; [ -n "$key_id" ] || q=NULL
     printf "%s\n" "
@@ -1420,7 +1432,7 @@ storage_sync_apply_pull() {
              AND server_seq='$seq' AND status='importable';" >> "$sql_file"
         continue
       fi
-      [ -n "$from" ] && [ -n "$to" ] && [ -n "$body" ] && [ -n "$at" ] || {
+      [ -n "$from" ] && [ -n "$to" ] && { [ -n "$body" ] || [ -n "$body_hex" ]; } && [ -n "$at" ] || {
         echo "agmsg: storage sync apply received an importable message without its projection" >&2
         _sqlite_sync_apply_fail; _sqlite_sync_why; return 13;
       }
@@ -1428,7 +1440,7 @@ storage_sync_apply_pull() {
       printf "%s\n" "
         INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
         SELECT 'message_sent','$local_id','$tl','$from_q',
-               '$to_q','$body_q','$at_q'
+               '$to_q',$body_sql,'$at_q'
         WHERE NOT EXISTS(SELECT 1 FROM sync_messages m
           WHERE m.server_instance_id='$server' AND m.remote_team_id='$remote'
             AND m.protocol_version=$protocol AND m.wire_id='$wire')
@@ -1450,7 +1462,7 @@ storage_sync_apply_pull() {
         -- last_insert_rowid() is never read.
         INSERT INTO messages(team,from_agent,to_agent,body,created_at)
         SELECT '$tl','$from_q','$to_q',
-               '$body_q','$at_q'
+               $body_sql,'$at_q'
          WHERE EXISTS(SELECT 1 FROM events e
                        WHERE e.id='$local_id' AND e.legacy_id IS NULL);
         UPDATE events SET legacy_id=last_insert_rowid()
