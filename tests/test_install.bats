@@ -1017,6 +1017,61 @@ EOF
   grep -q unrelated "$wrong_root/run/down/agmsgd.json"
 }
 
+# A CI-only (never reproduced locally) failure measured on #1904: a schema
+# apply right after a prior test's real agmsgd stop occasionally failed with
+# "could not apply the daemon schema to install.db" -- `cmd_stop` confirms
+# install.db's own row says the daemon is gone before returning, not that
+# the OS process has actually released its own sqlite3 connection, so a
+# caller right behind it can still race that close. Every other sqlite3 call
+# against install.db in this codebase already carries a `.timeout`
+# (daemon-state.sh, daemon-seats.sh, install.sh's own reads, ...); this
+# function was the one write path that did not. Proven directly here, not by
+# trying to reproduce the exact agmsgd-shutdown race: a background writer
+# holds an EXCLUSIVE transaction on the schema's own db file for longer than
+# sqlite3's default busy_timeout (0, i.e. fail immediately) but well inside
+# the 5000ms this function now asks for, and the call still succeeds once
+# that writer lets go.
+@test "agmsg_install_db_apply_schema: tolerates a brief exclusive hold instead of failing immediately" {
+  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install.db" schema="$REPO_ROOT/scripts/daemon/schema.sql" fifodir in_fifo out_fifo holder_pid
+  # The real bootstrap, not a hand-rolled meta table: schema.sql expects
+  # columns (schema_version among them) a minimal stand-in would not have,
+  # which fails for an unrelated reason (a genuine schema mismatch) that
+  # looks identical to this test's own subject from the outside -- confirmed
+  # by reproducing it directly while developing this case.
+  bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$lib" "$db" >/dev/null
+  # A real held EXCLUSIVE lock, not a fake one -- a plain heredoc/pipe into
+  # sqlite3 hits EOF and ends the transaction as soon as it is written, so
+  # this needs the same fifo-backed, held-open connection pattern
+  # install-op-lock.sh uses for the same reason (sqlite3 only holds the lock
+  # for as long as its stdin stays open).
+  fifodir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-test-lock.XXXXXX")"
+  in_fifo="$fifodir/in"; out_fifo="$fifodir/out"
+  mkfifo "$in_fifo" "$out_fifo"
+  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
+  holder_pid=$!
+  exec 9> "$in_fifo"
+  exec 8< "$out_fifo"
+  printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
+  local line
+  IFS= read -r -t 5 -u 8 line
+  [ "$line" = held ]
+  # Released well inside this function's own 5000ms timeout, from a second
+  # process so the release genuinely overlaps the foreground call below
+  # rather than happening before it starts.
+  ( sleep 0.5; printf 'COMMIT;\n' >&9 ) &
+  local releaser_pid=$!
+  run bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_apply_schema "$2" "$3"' _ "$lib" "$db" "$schema"
+  [ "$status" -eq 0 ]
+  wait "$releaser_pid" 2>/dev/null || true
+  exec 9>&- 8<&-
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  rm -rf "$fifodir"
+  # The schema genuinely applied, not just "did not error": daemon_intent's
+  # own always-exactly-one-row seed (schema.sql) is present.
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM daemon_intent;")" = 1 ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.

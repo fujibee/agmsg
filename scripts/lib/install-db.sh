@@ -67,12 +67,26 @@ agmsg_install_db_ensure_meta() {   # <install_db_path>
 # Returns 1 on any sqlite failure.
 agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
   local db="$1" schema="$2" col present
+  # A writer elsewhere (agmsgd's own shutdown, a concurrent `agmsg` command)
+  # can hold install.db for a moment -- `cmd_stop` confirms the DB row says
+  # `none` before returning, not that the OS process has fully released its
+  # connection, so a caller right behind it can still race that close. The
+  # default busy_timeout is 0: no other writer in this codebase touches
+  # install.db (or any sqlite file) without `.timeout`, and this was the one
+  # gap (a CI-only "could not apply the daemon schema" failure measured
+  # immediately after a prior test's agmsgd stop -- never reproduced locally,
+  # consistent with a race that only a slower/more loaded machine widens
+  # enough to hit). Matches this file's own writer-side convention elsewhere
+  # (storage.sh's AGMSG_BUSY_TIMEOUT default) rather than the shorter reads
+  # above use (daemon-state.sh etc., 100ms) -- schema apply runs once per
+  # install/update, never on a hot path, so a few seconds of tolerance costs
+  # nothing real.
   for col in node_path node_version codex_path; do
     # One scalar per column: a multi-line result carries a CR on every line
     # from native Windows sqlite3.exe, which a name comparison would miss.
-    present="$(agmsg_sqlite_capture "$db" "SELECT count(*) FROM pragma_table_info('meta') WHERE name = '$col';")" || return 1
+    present="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT count(*) FROM pragma_table_info('meta') WHERE name = '$col';")" || return 1
     [ "$present" = 1 ] && continue
-    sqlite3 "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>/dev/null || return 1
+    sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>/dev/null || return 1
   done
-  sqlite3 "$db" < "$schema" 2>/dev/null
+  sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>/dev/null
 }
