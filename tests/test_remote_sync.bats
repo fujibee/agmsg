@@ -1838,3 +1838,159 @@ bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per li
   [ "$(printf '%s' "$inner" | jq -r 'keys_unsorted | join(",")')" = "body,created_at,from_agent,to_agent" ]
   [ "$(printf '%s' "$inner" | jq -r '.body')" = 'plain "quoted" \ back — 日本語' ]
 }
+
+# One local row the seal helper refuses (an agent name the wire cannot carry, a
+# timestamp it cannot read) must not stop the rest of the batch. It used to fail
+# the whole prepare (sealed != pending) every cycle, forever: the same row came
+# back first each time.
+@test "sync contract: a row the seal helper refuses is reported and skipped, the rest of the batch is prepared" {
+  local db out
+  storage_send demo alice bob "first" >/dev/null
+  storage_send demo alice bob "middle" >/dev/null
+  storage_send demo alice bob "third" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='middle'"
+
+  run prepare_push
+  [ "$status" -eq 0 ]
+  out="$output"
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_push_candidate"')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 1 ]
+  printf '%s\n' "$out" | grep '"type":"sync_skipped"' | jq -e '.local_position == "2" and (.reason | length > 0) and (has("body") | not)' >/dev/null
+}
+
+# The point of "skip, do not drop": a row left out of a page is still owed. The
+# cursor may not pass it while rows behind it are acknowledged, so that once it
+# can be sealed the next prepare offers it again. The engine's own exclusion
+# list (skip_positions) only keeps it from taking a page slot meanwhile.
+@test "sync contract: a skipped row is still owed after the rows behind it are acknowledged" {
+  local db out acks result
+  storage_send demo alice bob "first" >/dev/null
+  storage_send demo alice bob "middle" >/dev/null
+  storage_send demo alice bob "third" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='middle'"
+
+  out=$(prepare_push)
+  acks=$(printf '%s\n' "$out" | jq -c 'select(.type=="sync_push_candidate")
+    | {type:"sync_push_ack",local_position,id,server_seq:.local_position,disposition:"stored"}')
+  result=$(printf '%s\n' "$acks" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1)
+  # Rows 1 and 3 are acknowledged; the cursor stops at 1, under the skipped row.
+  [ "$(printf '%s\n' "$result" | jq -r '.push_cursor')" = 1 ]
+
+  # Still broken: it comes back as skipped, nothing else is offered again.
+  out=$(prepare_push)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_push_candidate"')" = 0 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 1 ]
+
+  # Fixed: it is sent.
+  sqlite3 "$db" "UPDATE events SET from_agent='alice' WHERE body='middle'"
+  out=$(prepare_push)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = 2 ]
+}
+
+@test "sync contract: positions the engine asks to leave out do not take a page slot" {
+  local db out
+  storage_send demo alice bob "bad one" >/dev/null
+  storage_send demo alice bob "good" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='bad one'"
+  # A page of one: without the exclusion the bad row is all it would hold.
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"skip_positions":[1]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+  # And a malformed list is refused, not interpolated into SQL.
+  prepare_with_bad_list() {
+    printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"skip_positions":["1) OR (1"]}' \
+      | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1
+  }
+  run prepare_with_bad_list
+  [ "$status" -ne 0 ]
+}
+
+@test "sync contract: an empty body is skipped with the rest of the batch, not fatal to it" {
+  local db out
+  storage_send demo alice bob "first" >/dev/null
+  storage_send demo alice bob "empty" >/dev/null
+  storage_send demo alice bob "third" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET body='' WHERE body='empty'"
+  run prepare_push
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_push_candidate"')" = 2 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 1 ]
+}
+
+@test "sync contract: a retry looks at every position it names, whatever the page limit" {
+  local db out
+  storage_send demo alice bob "bad one" >/dev/null
+  storage_send demo alice bob "bad two" >/dev/null
+  storage_send demo alice bob "good" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body IN ('bad one','bad two')"
+  # A page of one, but both remembered positions are named: both are examined.
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"recheck_positions":[1,2]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_resolved"')" = 0 ]
+}
+
+@test "sync contract: a position that can be sent now is reported resolved, one that is still bad is not" {
+  local db out
+  storage_send demo alice bob "fixed" >/dev/null
+  storage_send demo alice bob "still bad" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='still bad'"
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"recheck_positions":[1,2]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_resolved") | .local_position')" = 1 ]
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_skipped") | .local_position')" = 2 ]
+}
+
+@test "sync contract: with sends not allowed nothing is examined, so nothing is claimed resolved" {
+  local out
+  storage_send demo alice bob "anything" >/dev/null
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":false,"recheck_positions":[1]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_resolved"')" = 0 ]
+}
+
+@test "sync contract: a failure that is true of every row fails the call, it is not skipped as one bad row" {
+  # age-v1 with no age binary: nothing about row 1 is wrong, and "skipped" would
+  # report a healthy message and let prepare succeed with nothing sealed.
+  local recipient out
+  recipient=$(jq -r '.recipient_sets.team_a.recipient' "$BATS_TEST_DIRNAME/../docs/spec/vectors/age-v1-vectors.json")
+  storage_send demo alice bob "a perfectly good message" >/dev/null
+  age_prepare() {
+    printf '%s\n' "{\"type\":\"sync_prepare\",\"envelope_v\":1,\"cipher\":\"age-v1\",\"key_id\":\"epoch-1\",\"recipients\":[\"$recipient\"],\"max_blob_bytes\":1048576,\"allow_new\":true}" \
+      | AGMSG_AGE_BIN=/nonexistent/agmsg-test-age storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100
+  }
+  run age_prepare
+  [ "$status" -ne 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 0 ]
+}
+
+@test "sync contract: more known bad rows than a page holds do not keep the good row behind them out" {
+  # 1100 rows the wire cannot carry, then one good row, a page of 100. Every known
+  # bad position is left out, however many there are, so the page reaches the
+  # good row; with a cap on the list the page fills with bad rows again.
+  local db out
+  storage_send demo alice bob "seed" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<1100)
+    INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
+    SELECT 'message_sent','bulk-'||i,'demo','bad/name','bob','x','2026-11-08T00:00:00Z' FROM c;
+    UPDATE events SET from_agent='bad/name' WHERE id='bulk-1' OR body='seed';"
+  storage_send demo alice bob "the good one" >/dev/null
+  local good bad_list
+  good=$(sqlite3 "$db" "SELECT seq FROM events WHERE body='the good one'")
+  bad_list=$(sqlite3 "$db" "SELECT json_group_array(seq) FROM events WHERE from_agent='bad/name'")
+  [ "$(printf '%s' "$bad_list" | jq 'length')" -gt 1100 ]
+  out=$(printf '%s\n' "{\"type\":\"sync_prepare\",\"envelope_v\":1,\"cipher\":\"none\",\"key_id\":null,\"max_blob_bytes\":1048576,\"allow_new\":true,\"skip_positions\":$bad_list}" \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = "$good" ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+}

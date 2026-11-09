@@ -1796,6 +1796,11 @@ _remote_sync_engine_cycle_stamp() { printf '%s' "$CONNECTION_ROOT/run/remote-syn
 # from, not a new place to write.
 _remote_sync_engine_refusal() { printf '%s' "$CONNECTION_ROOT/run/remote-sync.$1.refusal.json"; }
 
+# Rows the engine found it cannot send and left out of the push so the rest went
+# through (run/remote-sync.<team>.skipped.json). Nothing is dropped: the engine
+# offers them again and sends them once they can be sent.
+_remote_sync_engine_skipped() { printf '%s' "$CONNECTION_ROOT/run/remote-sync.$1.skipped.json"; }
+
 # The refusal record, or nothing when a cycle has SINCE succeeded.
 #
 # THE READER DOES NOT TRUST THE DELETE. The engine removes this file after a
@@ -2825,6 +2830,20 @@ _remote_status_one() {
       fi
     fi
   fi
+  # Named, one line each (the first few): which message, why. An unreadable record
+  # reads as absent, like the refusal above.
+  local skipped_file skipped_i skipped_id skipped_reason
+  skipped_file="$(_remote_sync_engine_skipped "$team")"
+  if [ -f "$skipped_file" ]; then
+    for skipped_i in 0 1 2 3 4; do
+      skipped_id="$(_remote_read_config_field "$skipped_file" "\$.rows[$skipped_i].id" 2>/dev/null)"
+      { [ -n "$skipped_id" ] && [ "$skipped_id" != "null" ]; } || break
+      skipped_reason="$(_remote_read_config_field "$skipped_file" "\$.rows[$skipped_i].reason" 2>/dev/null)"
+      echo "		skipped: message $skipped_id could not be sent (push: $skipped_reason); the rest went through, and it is offered again"
+    done
+    skipped_id="$(_remote_read_config_field "$skipped_file" '$.rows[5].id' 2>/dev/null)"
+    { [ -z "$skipped_id" ] || [ "$skipped_id" = "null" ]; } || echo "		skipped: and more (see $skipped_file)"
+  fi
   if [ "$binding_cipher" = "age-v1" ]; then
     if [ -n "$key_id" ] && [ "$key_id" != "null" ]; then
       echo "		encryption: age-v1, key present"
@@ -2942,9 +2961,10 @@ _remote_status_json_one() {
   # change here.
   # Same currency check as the human line, from the same helper: the two must
   # not be able to disagree about whether a refusal still stands.
-  local refusal_raw
+  local refusal_raw skipped_raw=""
   refusal_raw="$(_remote_sync_engine_refusal_current "$team")"
-  printf '%s' "$raw" | REFUSAL_JSON="$refusal_raw" python3 -c '
+  [ ! -f "$(_remote_sync_engine_skipped "$team")" ] || skipped_raw="$(cat "$(_remote_sync_engine_skipped "$team")" 2>/dev/null || true)"
+  printf '%s' "$raw" | REFUSAL_JSON="$refusal_raw" SKIPPED_JSON="$skipped_raw" python3 -c '
 import json, os, sys
 team, engine_state, engine_pid_text = sys.argv[1:4]
 try:
@@ -2967,6 +2987,11 @@ except Exception:
     refusal = None
 if not isinstance(refusal, dict):
     refusal = None
+try:
+    skipped = json.loads(os.environ.get("SKIPPED_JSON") or "null")
+except Exception:
+    skipped = None
+skipped = skipped.get("rows") if isinstance(skipped, dict) and isinstance(skipped.get("rows"), list) and skipped["rows"] else None
 print(json.dumps({
     "local_team": team,
     "endpoint": binding.get("endpoint"),
@@ -2980,6 +3005,9 @@ print(json.dumps({
     # cannot be read. An unreadable record is reported as absent rather than
     # guessed at; the human line above is derived from the same file.
     "refusal": refusal,
+    # The rows left out of the push (position, id, reason, first_seen, count),
+    # null when none, or when the record cannot be read.
+    "skipped": skipped,
 }, sort_keys=True))
 ' "$team" "$engine_state" "$engine_pid"
 }

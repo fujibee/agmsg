@@ -272,6 +272,163 @@ function hostOf(endpoint) {
   }
 }
 
+// Rows the engine has found it cannot send, and has left out of the push so the
+// rows behind them still go.
+//
+// ONE ROW MUST NOT STOP THE REST. A local row the wire cannot carry (a name or
+// timestamp the seal refuses, a body past the blob limit) used to fail the whole
+// prepare every cycle, forever, because the same row came back first each time.
+// The driver now reports it as `sync_skipped` and prepares everything else; this
+// is what the engine does with the report.
+//
+// NOTHING IS DROPPED. A skipped row has no reservation, so the push cursor stays
+// under it while rows behind it are acknowledged, and any later prepare that can
+// seal it sends it. Meanwhile the engine hands the driver the positions it has
+// already found unsendable (`skip_positions`) so they do not take page slots, and
+// asks again for all of them every SKIP_RETRY_CYCLES prepares, and on every
+// restart (the memory is not persisted). A row whose cause has gone is sent then.
+//
+// IT IS SAID, ONCE. A skipped row is named in `run/remote-sync.<team>.skipped.json`
+// (what `status` and `doctor` read) and in one `sync.skipped` event when first
+// seen, one `sync.skip-cleared` when it stops being skipped; not once per cycle.
+// Position, id, direction and the driver's own fixed-text reason; never a body.
+const SKIP_RETRY_CYCLES = 20;
+// How many remembered rows one retry looks at again. A row can be a megabyte, so
+// the retry's cost is bounded; the retries ROTATE (each continues after the last
+// position the previous one examined) so every remembered row is eventually
+// looked at. The exclusion list has no bound: every known row stays out of
+// ordinary pages, or a pile of bad rows would fill the page again.
+const SKIP_RECHECK_MAX = 100;
+
+export function newSkipState() {
+  // `dirty`: the record file is out of date. `noticeDirty`: the SET of rows
+  // changed (one added, one cleared), which is all the notice's text depends on, so
+  // a count that only went up does not start a process.
+  return { rows: new Map(), cycles: 0, dirty: true, noticeDirty: true, recheckAfter: null };
+}
+
+function skippedPath(team) {
+  const connectionRoot = process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR;
+  if (!connectionRoot) throw new Error("sync connection root is unavailable");
+  return join(connectionRoot, "run", `remote-sync.${team}.skipped.json`);
+}
+
+// What to leave out of this prepare, and whether this is the retry of everything.
+//
+// A retry names the next window of remembered positions (`recheck`) for the
+// driver to look at again whatever its page limit, continuing after the last one
+// the previous retry examined and wrapping at the end. Every known position stays
+// in `positions` (out of the ordinary page) either way.
+const byPosition = (left, right) =>
+  left.length - right.length || (left < right ? -1 : left > right ? 1 : 0);
+
+export function skipPlan(skips) {
+  const retrying = skips.rows.size > 0 && skips.cycles >= SKIP_RETRY_CYCLES;
+  const keys = [...skips.rows.keys()].sort(byPosition);
+  let recheck = [];
+  if (retrying) {
+    const after = skips.recheckAfter;
+    const start = after === null ? 0 : keys.findIndex((key) => byPosition(key, after) > 0);
+    const from = start === -1 ? 0 : start;
+    recheck = [...keys.slice(from), ...keys.slice(0, from)].slice(0, SKIP_RECHECK_MAX);
+  }
+  return { retrying, positions: keys, recheck };
+}
+
+// Fold one prepare's `sync_skipped` records into the memory. Returns what changed.
+//
+// A remembered row is cleared only on positive evidence: the driver says it
+// RESOLVED that position (`resolved`: it looked at the row again and it is no
+// longer skipped, because it sealed, was already reserved or acknowledged, or is
+// gone). A row nobody looked at (sends not allowed, more rows than one retry
+// covers) is kept, and the driver is not claimed to have read it.
+export function noteSkips(skips, plan, reported, resolved = [], now = new Date()) {
+  const added = [];
+  const cleared = [];
+  const seen = new Set();
+  for (const record of reported) {
+    const key = String(record.local_position);
+    seen.add(key);
+    const known = skips.rows.get(key);
+    if (known) {
+      known.count += 1;
+      if (known.reason !== record.reason) known.reason = record.reason;
+      skips.dirty = true;
+    } else {
+      skips.rows.set(key, { direction: "push", local_position: key, id: record.id,
+        reason: record.reason, first_seen: now.toISOString(), count: 1 });
+      added.push(skips.rows.get(key));
+    }
+  }
+  if (plan.retrying) {
+    for (const position of resolved) {
+      const key = String(position);
+      const row = skips.rows.get(key);
+      if (row && !seen.has(key)) { skips.rows.delete(key); cleared.push(row); }
+    }
+    skips.cycles = 0;
+    if (plan.recheck.length > 0) skips.recheckAfter = plan.recheck.at(-1);
+  } else {
+    skips.cycles += 1;
+  }
+  if (added.length > 0 || cleared.length > 0) { skips.dirty = true; skips.noticeDirty = true; }
+  return { added, cleared };
+}
+
+// The same fact, for the places that already list what is degraded (`doctor`):
+// one down-notice record per team, set when rows are skipped and cleared when none
+// are. One short bash per CHANGE (a row first skipped, or the last one cleared),
+// never per cycle.
+const SKIP_NOTICE_SCRIPT = [
+  'lib="$1/lib/down-notice.sh"; [ -f "$lib" ] || exit 0; . "$lib" || exit 0',
+  'root="$2"; team="$3"; key="$(down_notice_key sync "$team skipped")" || exit 0',
+  'if [ -z "$4" ]; then AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_clear "$key"',
+  'else AGMSG_DOWN_NOTICE_ROOT="$root" down_notice_set "$key" degraded "$4" "bash $(printf %q "$1/remote.sh") status $(printf %q "$team")"; fi',
+].join("\n");
+
+function skipNoticeReason(team, skips) {
+  const rows = [...skips.rows.values()];
+  const named = rows.slice(0, 3).map((row) => `${row.id} (${row.reason})`).join(", ");
+  const more = rows.length > 3 ? ` and ${rows.length - 3} more` : "";
+  return `${rows.length} message${rows.length === 1 ? "" : "s"} in team ${team} could not be sent and ` +
+    `${rows.length === 1 ? "was" : "were"} skipped: ${named}${more}. The rest of each batch went through; ` +
+    "the engine offers them again and sends them once they can be sent.";
+}
+
+function setSkipNotice(team, skips, scriptsRoot) {
+  const root = process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR;
+  if (!root) return Promise.resolve();
+  const reason = skips.rows.size === 0 ? "" : skipNoticeReason(team, skips);
+  return new Promise((done) => {
+    try {
+      const writer = spawn("bash", ["-c", SKIP_NOTICE_SCRIPT, "skip-notice", scriptsRoot, root, team, reason],
+        { stdio: "ignore" });
+      const timer = setTimeout(() => { try { writer.kill("SIGKILL"); } catch { /* gone */ } done(); }, 5000);
+      writer.on("error", () => { clearTimeout(timer); done(); });
+      writer.on("close", () => { clearTimeout(timer); done(); });
+    } catch { done(); }
+  });
+}
+
+// Best-effort, like the cycle stamp: bookkeeping must never take syncing down.
+export async function recordSkips(team, skips, writeFileCall = writeFile, rmCall = rm,
+  noticeCall = setSkipNotice) {
+  try {
+    if (skips.rows.size === 0) {
+      await rmCall(skippedPath(team), { force: true });
+    } else {
+      await writeFileCall(skippedPath(team), `${JSON.stringify({
+        type: "sync_skipped_rows", updated_at: new Date().toISOString(),
+        rows: [...skips.rows.values()] })}\n`);
+    }
+    if (skips.noticeDirty) {
+      await noticeCall(team, skips, resolve(dirname(fileURLToPath(import.meta.url)), ".."));
+      skips.noticeDirty = false;
+    }
+    skips.dirty = false;
+  } catch { /* best-effort: the next change tries again */ }
+}
+
 export function isRefusal(error) {
   const status = error?.status;
   if (typeof status !== "number") return false;
@@ -3379,8 +3536,8 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
 // a long sleep begins go unchecked for close to double this value.
 export const IDLE_SAFETY_NET_MS = 60000;
 
-export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null, pendingCheckpoint = null },
-  dependencies = {}) {
+export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null, pendingCheckpoint = null,
+  skips = newSkipState() }, dependencies = {}) {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
   const driverCall = dependencies.driverCall ?? driver;
@@ -3475,10 +3632,29 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
       cipher: writeProfile.profile, key_id: writeProfile.key_id ?? null,
       recipients: writeProfile.recipients ?? [], max_blob_bytes: Number(capabilities.max_blob_bytes),
       allow_new: writeProfile.eligible }];
+    // Only the storage driver is told what to leave out, and only when there is
+    // something: its input is otherwise byte-for-byte what it always was.
+    const plan = skipPlan(skips);
+    const storageInput = plan.positions.length === 0 && plan.recheck.length === 0 ? prepareInput :
+      [{ ...prepareInput[0],
+        ...(plan.positions.length > 0 ? { skip_positions: plan.positions } : {}),
+        ...(plan.recheck.length > 0 ? { recheck_positions: plan.recheck } : {}) }];
     const [prepared, rosterPrepared] = await Promise.all([
-      driverCall("prepare", config, prepareInput, [String(pushLimit)]),
+      driverCall("prepare", config, storageInput, [String(pushLimit)]),
       rosterDriverCall("prepare", config, prepareInput, [String(pushLimit)]),
     ]);
+    const skipChange = noteSkips(skips, plan,
+      prepared.filter((record) => record.type === "sync_skipped"),
+      prepared.filter((record) => record.type === "sync_resolved").map((record) => record.local_position));
+    for (const row of skipChange.added) {
+      await note(eventCall, "sync.skipped", { direction: row.direction,
+        local_position: row.local_position, id: row.id, reason: row.reason });
+    }
+    for (const row of skipChange.cleared) {
+      await note(eventCall, "sync.skip-cleared", { direction: row.direction,
+        local_position: row.local_position, id: row.id });
+    }
+    if (skips.dirty) await (dependencies.recordSkipsCall ?? recordSkips)(config.local_team, skips);
     state = prepared.find((record) => record.type === "sync_state");
     const rosterState = rosterPrepared.find((record) => record.type === "roster_sync_state");
     // Registry mutations lead the page. They establish the identity needed to
@@ -3899,6 +4075,8 @@ export async function runLoop(config, options, dependencies = {}) {
   // comment on `pendingCheckpoint`/`nextPendingCheckpoint` for why a single
   // post-`prepare` stat cannot arm `idleCheckpoint` by itself.
   let pendingCheckpoint = null;
+  // Rows found unsendable, remembered across cycles (see newSkipState).
+  const skips = newSkipState();
   let idleStreak = 0;
   for (;;) {
     // Checked at the cycle boundary, BEFORE any driver can be spawned: past
@@ -3939,7 +4117,7 @@ export async function runLoop(config, options, dependencies = {}) {
       const effectivePending = pendingCheckpoint ??
         (idleCheckpoint !== null ? { paths: idleCheckpoint.paths, fingerprint: idleCheckpoint.fingerprint } : null);
       const result = await cycleCall(config,
-        { pushLimit, pullLimit, idleCheckpoint, pendingCheckpoint: effectivePending }, dependencies);
+        { pushLimit, pullLimit, idleCheckpoint, pendingCheckpoint: effectivePending, skips }, dependencies);
       consecutiveFailures = 0;
       idleCheckpoint = result?.checkpoint ?? null;
       pendingCheckpoint = result?.pendingCheckpoint ?? null;

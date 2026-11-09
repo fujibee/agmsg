@@ -24,6 +24,10 @@ import {
   consistentReadStateContext,
   configure,
   cycle,
+  newSkipState,
+  noteSkips,
+  skipPlan,
+  recordSkips,
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
@@ -5791,4 +5795,240 @@ test("a roster state file the driver set aside is reported in the engine log, no
   const logged = (await readFile(process.env.AGMSG_SYNC_LOG_FILE, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(logged.map(({ event, team, file }) => [event, team, file]),
     [["roster.state_reset", config.local_team, "/t/First Last/roster-sync.json.corrupt-1-2"]]);
+});
+
+// A row the driver cannot seal is reported as `sync_skipped`; the engine says so
+// once, leaves it out of later pages without losing it, and asks for it again.
+const skipDrivers = (log, { reported }) => ({
+  driverCall: async (operation, _config, input) => {
+    if (operation !== "prepare") return [{ type: "sync_apply_result", transport_cursor: "9", corrupt_count: 0 }];
+    log.inputs.push(input[0].skip_positions ?? null);
+    log.rechecks = [...(log.rechecks ?? []), input[0].recheck_positions ?? null];
+    const left = input[0].skip_positions ?? [];
+    const again = input[0].recheck_positions ?? [];
+    // Like the real driver: a position it was told to leave out is not looked at,
+    // one it was asked to look at again is, and is either still skipped or resolved.
+    const looked = !left.includes("2") || again.includes("2");
+    const skipped = reported() && looked ? [{ type: "sync_skipped", local_position: "2",
+      id: "local-2", reason: "malformed: from_agent is invalid" }] : [];
+    const resolved = !reported() && again.includes("2") ?
+      [{ type: "sync_resolved", local_position: "2" }] : [];
+    return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9", db_path: "/db/messages.db" },
+      ...skipped, ...resolved];
+  },
+  rosterDriverCall: async (operation) => operation === "prepare" ?
+    [{ type: "roster_sync_state", transport_cursor: "0", config_path: "/c", journal_path: "/j" }] : [],
+});
+
+test("cycle: a row the driver skips is reported once, kept out of later pages, and does not fail the cycle", async () => {
+  const log = { inputs: [], events: [], records: [] };
+  let broken = true;
+  const skips = newSkipState();
+  const deps = idleCycleBaseDeps({ extra: {
+    ...skipDrivers(log, { reported: () => broken }),
+    eventCall: async (name, payload) => { log.events.push([name, payload]); },
+    recordSkipsCall: async (_team, state) => { log.records.push([...state.rows.values()].map((row) => ({ ...row }))); state.dirty = false; },
+  } });
+  const params = { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null, skips };
+  await cycle(config, params, deps);
+  await cycle(config, params, deps);
+  await cycle(config, params, deps);
+  // The first page offers everything; the next two leave position 2 out.
+  assert.deepEqual(log.inputs, [null, ["2"], ["2"]]);
+  // Said once, and written once, naming the row and not a body.
+  const skippedEvents = log.events.filter(([name]) => name === "sync.skipped");
+  assert.equal(skippedEvents.length, 1);
+  assert.deepEqual(skippedEvents[0][1], { direction: "push", local_position: "2", id: "local-2",
+    reason: "malformed: from_agent is invalid" });
+  assert.equal(log.records.length, 1);
+  assert.equal(log.records[0][0].id, "local-2");
+  assert.equal(log.records[0][0].count, 1);
+});
+
+test("cycle: every few cycles the skipped rows are offered again, and one that can now be sent is cleared", async () => {
+  const log = { inputs: [], events: [], records: [] };
+  let broken = true;
+  const skips = newSkipState();
+  const deps = idleCycleBaseDeps({ extra: {
+    ...skipDrivers(log, { reported: () => broken }),
+    eventCall: async (name, payload) => { log.events.push([name, payload]); },
+    recordSkipsCall: async (_team, state) => { log.records.push(state.rows.size); state.dirty = false; },
+  } });
+  const params = { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null, skips };
+  await cycle(config, params, deps);                 // found
+  broken = false;                                    // the cause goes away
+  for (let i = 0; i < 25; i += 1) await cycle(config, params, deps);
+  // Found on the first and left out of every page after it; the 21st names it
+  // for a second look (it stays in the left-out list, the recheck is separate);
+  // once cleared it is no longer left out.
+  assert.deepEqual(log.inputs.slice(0, 21), [null, ...Array(20).fill(["2"])]);
+  assert.deepEqual(log.rechecks.slice(0, 21), [null, ...Array(19).fill(null), ["2"]]);
+  assert.ok(log.inputs.slice(21).every((input) => input === null));
+  assert.ok(log.events.some(([name]) => name === "sync.skip-cleared"));
+  assert.deepEqual(log.records, [1, 0]);
+  assert.equal(skips.rows.size, 0);
+});
+
+test("cycle: a row that is still unsendable at the retry stays, counted, and is not announced again", async () => {
+  const log = { inputs: [], events: [], records: [] };
+  const skips = newSkipState();
+  const deps = idleCycleBaseDeps({ extra: {
+    ...skipDrivers(log, { reported: () => true }),
+    eventCall: async (name, payload) => { log.events.push([name, payload]); },
+    recordSkipsCall: async (_team, state) => { log.records.push(state.rows.size); state.dirty = false; },
+  } });
+  const params = { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null, skips };
+  for (let i = 0; i < 45; i += 1) await cycle(config, params, deps);
+  assert.equal(log.events.filter(([name]) => name === "sync.skipped").length, 1);
+  assert.equal(log.events.filter(([name]) => name === "sync.skip-cleared").length, 0);
+  assert.equal(skips.rows.get("2").count, 3);
+});
+
+test("recordSkips: the record names the row, a down notice is set for doctor, and both go when nothing is skipped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-skips-"));
+  const savedConnection = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    await mkdir(join(root, "run"), { recursive: true });
+    const skips = newSkipState();
+    skips.rows.set("2", { direction: "push", local_position: "2", id: "01a1bd0d-ab00-7b4c-8a5a-d62d6be756dc",
+      reason: "malformed: from_agent is invalid", first_seen: "2026-11-08T00:00:00.000Z", count: 1 });
+    await recordSkips("team-one", skips);
+    assert.equal(skips.dirty, false);
+    const record = JSON.parse(readFileSync(join(root, "run", "remote-sync.team-one.skipped.json"), "utf8"));
+    assert.equal(record.rows[0].id, "01a1bd0d-ab00-7b4c-8a5a-d62d6be756dc");
+    // No body anywhere in it.
+    assert.deepEqual(Object.keys(record.rows[0]).sort(),
+      ["count", "direction", "first_seen", "id", "local_position", "reason"]);
+    const notices = readdirSync(join(root, "run", "down"));
+    assert.equal(notices.length, 1);
+    const notice = readFileSync(join(root, "run", "down", notices[0]), "utf8");
+    assert.match(notice, /degraded/u);
+    assert.match(notice, /01a1bd0d-ab00-7b4c-8a5a-d62d6be756dc/u);
+
+    skips.rows.clear();
+    skips.dirty = true;
+    skips.noticeDirty = true;   // what noteSkips sets when the last row clears
+    await recordSkips("team-one", skips);
+    assert.equal(existsSync(join(root, "run", "remote-sync.team-one.skipped.json")), false);
+    assert.deepEqual(readdirSync(join(root, "run", "down")), []);
+  } finally {
+    if (savedConnection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = savedConnection;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("noteSkips: a retry clears only the rows the driver says it resolved, and keeps the ones nobody looked at", () => {
+  const skips = newSkipState();
+  const add = (position) => skips.rows.set(position, { direction: "push", local_position: position,
+    id: `local-${position}`, reason: "malformed: x", first_seen: "t", count: 1 });
+  add("1"); add("2"); add("3");
+  skips.cycles = 20;
+  const plan = skipPlan(skips);
+  assert.deepEqual(plan.recheck, ["1", "2", "3"]);
+  // Every known row stays out of the ordinary page, the retry included.
+  assert.deepEqual(plan.positions, ["1", "2", "3"]);
+  // The driver looked at 1 (resolved) and 3 (still bad); 2 was not examined.
+  const change = noteSkips(skips, plan, [{ local_position: "3", id: "local-3", reason: "malformed: x" }], ["1"]);
+  assert.deepEqual(change.cleared.map((row) => row.local_position), ["1"]);
+  assert.deepEqual([...skips.rows.keys()].sort(), ["2", "3"]);
+  assert.equal(skips.rows.get("3").count, 2);
+  assert.equal(skips.dirty, true);
+});
+
+test("noteSkips: a retry in which nothing was examined (sends not allowed) clears nothing", () => {
+  const skips = newSkipState();
+  skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "r", first_seen: "t", count: 1 });
+  skips.cycles = 20;
+  const change = noteSkips(skips, skipPlan(skips), [], []);
+  assert.deepEqual(change.cleared, []);
+  assert.equal(skips.rows.size, 1);
+  assert.equal(skips.cycles, 0);
+});
+
+test("noteSkips: a changed count or reason alone marks the record to be written again", () => {
+  const skips = newSkipState();
+  skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "old", first_seen: "t", count: 1 });
+  skips.dirty = false;
+  noteSkips(skips, skipPlan(skips), [{ local_position: "2", id: "local-2", reason: "new" }], []);
+  assert.equal(skips.dirty, true);
+  assert.equal(skips.rows.get("2").reason, "new");
+});
+
+test("skipPlan: no known row ever takes an ordinary page slot, however many there are", () => {
+  const skips = newSkipState();
+  for (let position = 1; position <= 1100; position += 1) {
+    skips.rows.set(String(position), { direction: "push", local_position: String(position),
+      id: `local-${position}`, reason: "r", first_seen: "t", count: 1 });
+  }
+  const plan = skipPlan(skips);
+  assert.equal(plan.positions.length, 1100);
+  assert.equal(plan.positions[0], "1");
+  assert.equal(plan.positions.at(-1), "1100");
+});
+
+test("skipPlan: retries rotate, so every remembered position is eventually looked at, a bounded window at a time", () => {
+  const skips = newSkipState();
+  for (let position = 1; position <= 1001; position += 1) {
+    skips.rows.set(String(position), { direction: "push", local_position: String(position),
+      id: `local-${position}`, reason: "r", first_seen: "t", count: 1 });
+  }
+  const looked = new Set();
+  let windows = 0;
+  while (looked.size < 1001 && windows < 50) {
+    skips.cycles = 20;
+    const plan = skipPlan(skips);
+    assert.ok(plan.recheck.length > 0 && plan.recheck.length <= 100);
+    for (const position of plan.recheck) looked.add(position);
+    // The driver examined the window and every row in it is still bad.
+    noteSkips(skips, plan, plan.recheck.map((position) => ({ local_position: position,
+      id: `local-${position}`, reason: "r" })), []);
+    windows += 1;
+  }
+  assert.equal(looked.size, 1001);
+  assert.ok(looked.has("1001"), "the last remembered position is reached");
+  assert.equal(windows, 11);
+});
+
+test("noteSkips: a position far down the list is cleared when its window comes round and the driver resolves it", () => {
+  const skips = newSkipState();
+  for (let position = 1; position <= 250; position += 1) {
+    skips.rows.set(String(position), { direction: "push", local_position: String(position),
+      id: `local-${position}`, reason: "r", first_seen: "t", count: 1 });
+  }
+  let cleared = false;
+  for (let round = 0; round < 3 && !cleared; round += 1) {
+    skips.cycles = 20;
+    const plan = skipPlan(skips);
+    const resolved = plan.recheck.filter((position) => position === "230");
+    const stillBad = plan.recheck.filter((position) => position !== "230")
+      .map((position) => ({ local_position: position, id: `local-${position}`, reason: "r" }));
+    cleared = noteSkips(skips, plan, stillBad, resolved).cleared.some((row) => row.local_position === "230");
+  }
+  assert.ok(cleared);
+  assert.equal(skips.rows.has("230"), false);
+});
+
+test("recordSkips: a count that only went up rewrites the record but does not start the notice process", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-skips-"));
+  const savedConnection = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    await mkdir(join(root, "run"), { recursive: true });
+    const skips = newSkipState();
+    skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "r",
+      first_seen: "t", count: 1 });
+    const notices = [];
+    await recordSkips("team-one", skips, writeFile, rm, async () => { notices.push("set"); });
+    skips.rows.get("2").count = 2;
+    skips.dirty = true;
+    await recordSkips("team-one", skips, writeFile, rm, async () => { notices.push("set"); });
+    assert.deepEqual(notices, ["set"]);
+    assert.equal(JSON.parse(readFileSync(join(root, "run", "remote-sync.team-one.skipped.json"), "utf8")).rows[0].count, 2);
+  } finally {
+    if (savedConnection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = savedConnection;
+    await rm(root, { recursive: true, force: true });
+  }
 });
