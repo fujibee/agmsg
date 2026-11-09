@@ -134,3 +134,37 @@ stored_body_hex() {
   run bash "$SCRIPTS/inbox.sh" team bob
   grep -qF "No new messages." <<<"$output"
 }
+
+@test "jsonl driver: a body with a NUL and a byte that is not UTF-8 is recorded exactly (body_b64), and the log still reads as before" {
+  export AGMSG_STORAGE_DRIVER=jsonl
+  printf 'a\0\xff\0b' > "$NULBODY"
+  run bash "$SCRIPTS/send.sh" team alice bob --body-file "$NULBODY"
+  [ "$status" -eq 0 ]
+  bash "$SCRIPTS/export.sh" --team team | jq -r 'select(.type=="message_sent") | .body_b64' | base64 -d > "$BATS_TEST_TMPDIR/back"
+  cmp "$NULBODY" "$BATS_TEST_TMPDIR/back"
+  # Readers that only know "body" still get a body, and the message is delivered.
+  run bash "$SCRIPTS/inbox.sh" team bob
+  [ "$status" -eq 0 ]
+  grep -qF "1 new message(s)" <<<"$output"
+}
+
+@test "jsonl driver: a body that is not UTF-8 and has no NUL is recorded exactly too" {
+  export AGMSG_STORAGE_DRIVER=jsonl
+  bash "$SCRIPTS/send.sh" team alice bob "x=$(printf '\xff\xfe')y" >/dev/null
+  bash "$SCRIPTS/export.sh" --team team | jq -r 'select(.type=="message_sent") | .body_b64' | base64 -d > "$BATS_TEST_TMPDIR/back"
+  printf 'x=\xff\xfey' > "$BATS_TEST_TMPDIR/want"
+  cmp "$BATS_TEST_TMPDIR/want" "$BATS_TEST_TMPDIR/back"
+}
+
+@test "jsonl driver: a plain body gets no body_b64 field" {
+  export AGMSG_STORAGE_DRIVER=jsonl
+  bash "$SCRIPTS/send.sh" team alice bob "plain text" >/dev/null
+  [ "$(bash "$SCRIPTS/export.sh" --team team | jq -c 'select(.type=="message_sent") | has("body_b64")')" = "false" ]
+}
+
+@test "sqlite store: a body with a NUL and a byte that is not UTF-8 is stored exactly" {
+  printf 'a\0\xff\0b' > "$NULBODY"
+  run bash "$SCRIPTS/send.sh" team alice bob --body-file "$NULBODY"
+  [ "$status" -eq 0 ]
+  [ "$(stored_body_hex)" = "6100FF0062" ]
+}
