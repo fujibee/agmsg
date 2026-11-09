@@ -18,7 +18,7 @@
 #     to ~/.claude, since this machine's own accounts live elsewhere.
 
 agmsg_session_start() {
-  # #1941: every branch below this point that decides "no Monitor directive"
+  # #1947: every branch below this point that decides "no Monitor directive"
   # sets this and RETURNS rather than exiting. `agmsg_session_start` is a
   # function this script SOURCES and CALLS in session-start.sh's own
   # top-level shell, not in a subshell -- `exit 0` there used to end

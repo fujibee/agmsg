@@ -143,7 +143,7 @@ agmsg_codex_unseated_notice() {
 }
 
 agmsg_session_start() {
-  # #1941: this plug has no path that keeps the generic Monitor directive --
+  # #1947: this plug has no path that keeps the generic Monitor directive --
   # codex has no Monitor tool at all (top-of-file comment) -- so it always
   # skips that directive. It used to do that with `exit 0`, which, because
   # this function is SOURCED and CALLED in session-start.sh's own top-level
