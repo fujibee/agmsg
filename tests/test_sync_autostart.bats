@@ -686,7 +686,7 @@ _mark_daemon_ready_for_native_channel() {
   wait_for_call "$calls" testteam
 }
 
-# #1947 scope ruling (review §10, pm): an agmsgd-mode or Codex session start
+# #1947 scope limit (review §10): an agmsgd-mode or Codex session start
 # reaches ONLY the #774 sync-autostart trigger and the (read-only)
 # down_notice print -- not the cc-instance/watcher cleanup and dedup below
 # them, which can kill a live watcher process. Widening THAT to a mode it

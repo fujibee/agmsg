@@ -133,11 +133,13 @@ fi
 # watcher already streaming, the actas variant, and the default), and a
 # line added to one of them is missing from the other two -- and #1947
 # narrowed what an agmsgd-mode or Codex session start reaches to exactly
-# this block and the down_notice one right after it (pm ruling under
-# review-criteria §10: widening that to the cc-instance/watcher cleanup
-# below needs its own decision, not a side effect of this fix). Placed
-# BEFORE that cleanup, not after, so the one guard below can skip
-# everything past this point in one place.
+# this block and the down_notice one right after it. Widening that to the
+# cc-instance/watcher cleanup below (which can kill a live watcher process)
+# is its own decision about what runs automatically, not a side effect of
+# restoring this trigger (review-criteria §10), so that cleanup stays
+# unreached for those sessions, same as before this fix. Placed BEFORE
+# that cleanup, not after, so the one guard below can skip everything past
+# this point in one place.
 #
 # WHICH TEAMS. `status` is asked for CONNECTED teams — the binding, not the
 # engine. Whether an engine is running is `sync start`'s question, under the
@@ -186,8 +188,8 @@ fi
 # point, same outcome) -- everything below this line is the cc-instance/
 # watcher cleanup and dedup, and the Monitor-directive logic that depends
 # on it, none of which ran for codex or an agmsgd-mode project before.
-# Keeping them unreached for those is the pm ruling above, not an
-# oversight: only the two blocks just above are reached unconditionally.
+# Keeping them unreached for those is the scope limit explained above, not
+# an oversight: only the two blocks just above are reached unconditionally.
 [ "$AGMSG_SESSION_START_SKIP_DIRECTIVE" != 1 ] || exit 0
 
 # One where.sh call, rendered once, reused by every text-emitting exit below —
