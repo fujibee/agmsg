@@ -25,8 +25,8 @@ describe("updateCell", () => {
   });
 });
 
-// A model of what one pane does, from xterm's own rounding (DomRenderer / WebglRenderer set the canvas width to
-// Math.round(device width / dpr)) and FitAddon (the parent's CSS width is parseInt'ed): the gap between panes is the
+// A model of what one pane does, from xterm's own rounding (DomRenderer / WebglRenderer set the CSS width of the
+// canvas to Math.round(device width / dpr), a whole CSS pixel) and FitAddon (the parent's CSS width is parseInt'ed): the gap between panes is the
 // reported cell, the room for the terminal is what is left of the pane's share, the columns follow from that, and the
 // reported cell follows from the columns. Whatever is reported goes round again; a loop that does not settle is the
 // layout loop that kept the window's ResizeObserver firing.
@@ -43,7 +43,7 @@ function settle(share: number, report: Report): Set<string> {
     const gap = cell ? cell.w : 8;
     const inner = Math.floor(share - gap - PAD);
     const cols = Math.max(1, Math.floor(inner / (DEVICE_CELL / DPR)));
-    const screenW = Math.round(cols * DEVICE_CELL) / DPR;
+    const screenW = Math.round((cols * DEVICE_CELL) / DPR); // xterm: Math.round(device canvas width / dpr), a whole CSS pixel
     const next = report(inner, cols, screenW, cell);
     if (next) cell = next;
     if (i >= 40) lastRuns.push(cell ? `${cell.w.toFixed(4)}x${cell.h}` : "none");

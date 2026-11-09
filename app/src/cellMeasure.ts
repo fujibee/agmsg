@@ -6,9 +6,10 @@
 // column count flipped between two values, every pane changed width by about half a pixel about twelve times a
 // second, and the window's ResizeObserver callbacks never stopped.
 //
-// xterm sets its screen element to `columns x cell width`, rounded to a whole device pixel. So the screen width over
-// the columns is the cell width with an error of up to half a pixel over the number of columns: negligible with a
-// few dozen columns, as large as the cell itself with two. Two rules keep the report from feeding back:
+// xterm sets its screen element to `columns x cell width`, with the CSS width rounded to a whole pixel
+// (Math.round(device canvas width / dpr)). So the screen width over the columns is the cell width with an error of
+// up to half a pixel over the number of columns: negligible with a few dozen columns, as large as the cell itself
+// with two. Two rules keep the report from feeding back:
 //  - a grid with too few columns or rows reports nothing (the last good value stays), and
 //  - a change smaller than the rounding error is not a change (updateCell), a real one (a font size step is about
 //    half a pixel or more) is.
