@@ -367,7 +367,10 @@ _sqlite_message_sent_sql() {
 storage_send() {
   local team="$1" from="$2" to="$3" body="$4" body_file="${5:-}"
   local id at db; id="$(compat_uuid7)"; at="$(_sqlite_now)"; db="$(_sqlite_db "$team")"
-  local insert; insert="$(_sqlite_message_sent_sql "$team" "$from" "$to" "$body" "$id" "$at" "$body_file")"
+  # An empty id, time or store path would be written as a message with no id, or
+  # to sqlite's throwaway database, and reported as sent.
+  [ -n "$id" ] && [ -n "$at" ] && [ -n "$db" ] || return 1
+  local insert; insert="$(_sqlite_message_sent_sql "$team" "$from" "$to" "$body" "$id" "$at" "$body_file")" || return 1
   # Try the INSERT first and only fall back to storage_init on failure (the #114
   # pattern). Running storage_init — which issues PRAGMA journal_mode=WAL and the
   # CREATE TABLE/INDEX statements — on EVERY send serializes badly under a
@@ -651,9 +654,9 @@ storage_import() {
   # each imported RECORD, which is a different thing from the store being
   # written to. Sharing one name here would read as if they had to match.
   local selector="$1" file="$2" db; db="$(_sqlite_db "$selector")"
-  [ -f "$file" ] || return 1
+  [ -f "$file" ] && [ -n "$db" ] || return 1
   storage_init "$selector" >/dev/null
-  local line t id team frm to body msg_id agent at import_rc=0
+  local line t id team frm to body msg_id agent at import_rc=0 ins_rc=0
   j() { sqlite3 :memory: "SELECT COALESCE(json_extract('$(_sqlite_lit "$line")','\$.$1'),'')" 2>/dev/null | LC_ALL=C tr -d '\r'; }
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -700,8 +703,15 @@ storage_import() {
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
       agmsg_sqlite_warm
-      printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at" "$body_file")" \
-        | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || ins_rc=$?
+      local ins_sql
+      if ins_sql="$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at" "$body_file")"; then
+        printf '%s\n' "$ins_sql" | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || ins_rc=$?
+      else
+        # The statement could not be built (its body file is not readable): a
+        # failed import, never an empty statement run as if it had succeeded.
+        ins_rc=1
+        echo "agmsg: import: could not build the insert for message $id" >&2
+      fi
       [ -z "$body_file" ] || rm -f "$body_file"
       [ "$ins_rc" -eq 0 ] || [ "$import_rc" -ne 0 ] || import_rc=$ins_rc
     elif [ "$t" = message_read ]; then
@@ -714,7 +724,7 @@ storage_import() {
            AND id = (SELECT e.legacy_id FROM events e
                       WHERE e.type='message_sent' AND e.team='$(_sqlite_lit "$team")'
                         AND e.id='$(_sqlite_lit "$msg_id")' AND e.legacy_id IS NOT NULL);" \
-        >/dev/null 2>&1 || { [ "$import_rc" -ne 0 ] || import_rc=$?; }
+        >/dev/null 2>&1 || { ins_rc=$?; [ "$import_rc" -ne 0 ] || import_rc=$ins_rc; }
     fi
   done < "$file"
   return "$import_rc"

@@ -733,3 +733,21 @@ _two_plain_lines() {
   [ "$status" -ne 0 ]
   LC_ALL=C grep -qF "not valid JSON" <<<"$output"
 }
+
+@test "sqlite storage_send: a body file that is not there is a failed send, not a made-up id with no message" {
+  run env AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store-imp" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; storage_init demo >/dev/null
+    storage_send demo alice bob "" /nonexistent/body-file' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [ -z "$(_imported_hexes)" ]
+}
+
+@test "sqlite import: a failed read-mark returns the SQL status itself, not the status of the test after it" {
+  printf '%s\n' '{"type":"message_read","id":"01a1bda1-6750-7046-807d-dc8104d1bfd9","team":"demo","agent":"bob","msg_id":"01a1bda1-6750-7046-807d-dc8104d1bfd1","at":"2026-11-09T00:07:16Z"}' > "$BATS_TEST_TMPDIR/read.jsonl"
+  run env AGMSG_STORAGE_DRIVER=sqlite AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store-imp" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; storage_init demo >/dev/null
+    agmsg_sqlite() { return 13; }
+    storage_import demo "$2"' _ "$SCRIPTS" "$BATS_TEST_TMPDIR/read.jsonl"
+  [ "$status" -eq 13 ]
+}
