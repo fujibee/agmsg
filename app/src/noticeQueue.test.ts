@@ -32,11 +32,17 @@ describe("noticeQueue", () => {
       expect(heldCount(r.rest, "p1")).toBe(0);
     }
   });
-  it("once released, notices go out at once whatever the state", () => {
+  it("once released, notices go out at once unless the pane is working", () => {
     const q = hold({}, "p1", "n1", 0);
-    for (const st of ["working", "blocked", "unknown", undefined] as const) {
+    for (const st of ["idle", "blocked", "unknown", undefined] as const) {
       expect(takeReady(q, "p1", true, st, 1).send.map((s) => s.late)).toEqual([false]);
     }
+  });
+  it("a released pane that is working holds the notice, types it at idle, or at the startup cap with the note", () => {
+    const q = hold({}, "p1", "n1", 0);
+    expect(takeReady(q, "p1", true, "working", STARTUP_WAIT_MS - 1).send).toEqual([]);
+    expect(takeReady(q, "p1", true, "idle", 1000).send.map((x) => x.late)).toEqual([false]);
+    expect(takeReady(q, "p1", true, "working", STARTUP_WAIT_MS).send.map((x) => x.late)).toEqual([true]);
   });
   it("panes are independent", () => {
     const q = hold(hold({}, "a", "x", 0), "b", "y", 0);
@@ -60,6 +66,6 @@ describe("noticeQueue", () => {
     const later = hold(r.rest, "p1", "n3", 3);
     const back = restore(later, "p1", r.send);
     expect(back.p1.map((h) => h.text)).toEqual(["n1", "n2", "n3"]);
-    expect(takeReady(back, "p1", true, "working", 4).send).toHaveLength(3);
+    expect(takeReady(back, "p1", true, "idle", 4).send).toHaveLength(3);
   });
 });

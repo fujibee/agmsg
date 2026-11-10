@@ -94,6 +94,36 @@ describe("noticeFlusher", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("a released pane that starts working holds the next notice and types it once it is idle", async () => {
+    const { f, calls } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    calls[0].settle(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toHaveLength(1);
+    f.state("p1", "working");
+    f.notice("p1", "n2");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(calls).toHaveLength(1);
+    f.state("p1", "idle");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].text).toContain("n2");
+  });
+
+  it("a released pane that stays working is still typed at the startup cap", async () => {
+    const { f, calls } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    calls[0].settle(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    f.state("p1", "working");
+    f.notice("p1", "n2");
+    await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS - 1000);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(calls).toHaveLength(2);
+  });
+
   it("notices for a pane that has closed are dropped", async () => {
     const live = ["p1"];
     const { f, calls, held } = setup(live);

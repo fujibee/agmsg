@@ -100,7 +100,7 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     notice(paneId: string, text: string, id?: string) {
       deps.log(`notice for ${paneId} held (released=${released.has(paneId)}, state=${states[paneId] ?? "none"})`);
       setQueues(hold(queues, paneId, text, deps.now(), id));
-      if (!released.has(paneId)) {
+      if (!released.has(paneId) || states[paneId] === "working") {
         deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);
         deps.setTimer(flush, STARTUP_WAIT_MS + 100);
       }
