@@ -89,6 +89,19 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   TEAM_DIR="$(dirname "$TEAM_CONFIG")"
   TEAM_NAME="$(basename "$TEAM_DIR")"
 
+  # Peek without the lock: a worker-down reset walks every team, and a stale
+  # .config.lock on a team that does not even list TARGET_AGENT used to abort
+  # the whole reset (LOCK_FAILED) after other teams had already been cleared.
+  # Atomic writers mean this unlocked read is not a torn file. Re-check under
+  # the lock below — a concurrent join can add the agent between peek and
+  # acquire.
+  CONFIG_ESCAPED=$(LC_ALL=C sed "s/'/''/g" "$TEAM_CONFIG")
+  AGENT_JSON=$(agmsg_sqlite_mem \
+    "SELECT json_extract('$CONFIG_ESCAPED', '\$.agents.' || '$TARGET_AGENT_SQL');")
+  if [ -z "$AGENT_JSON" ] || [ "$AGENT_JSON" = "null" ]; then
+    continue
+  fi
+
   # Serialize this team's read-modify-write so a concurrent join/leave/rename on
   # the same team can't be clobbered (#141). Per team, released before moving on.
   # A lock timeout is NOT silently skipped: flag it and fail at the end, so a
