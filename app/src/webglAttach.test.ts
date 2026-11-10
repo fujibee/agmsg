@@ -102,4 +102,25 @@ describe("attachWebglAddon", () => {
     expect(addon.dispose).not.toHaveBeenCalled();
     expect(otherAddon.dispose).not.toHaveBeenCalled();
   });
+  it("tells the caller when the context is lost on its own, after the addon is disposed and the ref cleared", () => {
+    let onLoss: () => void = () => {};
+    const addon = makeAddon({ onContextLoss: vi.fn((cb: () => void) => { onLoss = cb; }) });
+    const ref: { current: MinimalWebglAddon | null } = { current: null };
+    const order: string[] = [];
+    (addon.dispose as ReturnType<typeof vi.fn>).mockImplementation(() => order.push("dispose"));
+    attachWebglAddon({ loadAddon: vi.fn() }, () => addon, ref, () => order.push(ref.current === null ? "lost(ref cleared)" : "lost(ref still set)"));
+
+    onLoss();
+
+    expect(order).toEqual(["dispose", "lost(ref cleared)"]);
+  });
+
+  it("does not call the lost callback for the caller's own cleanup", () => {
+    const onLost = vi.fn();
+    const addon = makeAddon();
+    const ref: { current: MinimalWebglAddon | null } = { current: null };
+    const cleanup = attachWebglAddon({ loadAddon: vi.fn() }, () => addon, ref, onLost);
+    cleanup!();
+    expect(onLost).not.toHaveBeenCalled();
+  });
 });

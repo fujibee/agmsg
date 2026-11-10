@@ -29,6 +29,8 @@ export function attachWebglAddon(
   term: MinimalTerminal,
   createAddon: () => MinimalWebglAddon,
   ref: { current: MinimalWebglAddon | null },
+  // Called when the context is lost on its own, after the addon is disposed: the caller gives its slot back.
+  onLost?: () => void,
 ): (() => void) | undefined {
   const webgl = createAddon();
   // Real GPU/driver context loss (as opposed to this function's own
@@ -37,6 +39,7 @@ export function attachWebglAddon(
   webgl.onContextLoss(() => {
     webgl.dispose();
     if (ref.current === webgl) ref.current = null;
+    onLost?.();
   });
   try {
     term.loadAddon(webgl);
