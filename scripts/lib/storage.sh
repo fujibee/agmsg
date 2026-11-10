@@ -484,7 +484,7 @@ agmsg_sqlite() {
       _agmsg_sqlite_err=$(
         set -o pipefail
         # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-        { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | LC_ALL=C sed $'s/\r$//'; } 2>&1 1>&3 3>&-
+        { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-30000}" "$@" | LC_ALL=C sed $'s/\r$//'; } 2>&1 1>&3 3>&-
       )
     } 3>&1 || _agmsg_sqlite_rc=$?
   else
@@ -492,7 +492,7 @@ agmsg_sqlite() {
     {
       _agmsg_sqlite_err=$(
         # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-        { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"; } 2>&1 1>&3 3>&-
+        { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-30000}" "$@"; } 2>&1 1>&3 3>&-
       )
     } 3>&1 || _agmsg_sqlite_rc=$?
   fi
@@ -517,7 +517,7 @@ agmsg_sqlite() {
   # "waited and gave up", names the likely writer, and costs nothing when
   # there is no contention.
   if [ "$_agmsg_sqlite_rc" -eq 5 ]; then
-    echo "agmsg: the message store is busy: this call waited ${AGMSG_BUSY_TIMEOUT:-5000}ms behind another writer (a sync engine cycle may be running) and gave up (#1001)" >&2
+    echo "agmsg: the message store is busy: this call waited ${AGMSG_BUSY_TIMEOUT:-30000}ms behind another writer (a sync engine cycle may be running) and gave up (#1001)" >&2
   fi
   return "$_agmsg_sqlite_rc"
 }
@@ -590,12 +590,12 @@ _agmsg_sqlite_recording() {
   errfile=$(mktemp "${TMPDIR:-/tmp}/agmsg-sqlite-recording-err.XXXXXX" 2>/dev/null) || errfile=/dev/null
   # shellcheck disable=SC2086  # same intentional split as above
   if [ "$_AGMSG_SQLITE_CRLF" = 1 ]; then
-    if sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>"$errfile" | LC_ALL=C sed $'s/\r$//'; then
+    if sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-30000}" "$@" 2>"$errfile" | LC_ALL=C sed $'s/\r$//'; then
       rc=${PIPESTATUS[0]}
     else
       rc=${PIPESTATUS[0]}
     fi
-  elif sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>"$errfile"; then
+  elif sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-30000}" "$@" 2>"$errfile"; then
     rc=0
   else
     rc=$?

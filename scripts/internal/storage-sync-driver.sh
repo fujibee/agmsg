@@ -71,7 +71,7 @@ esac || rc=$?
 # and exit 11 so the caller can tell this from a check that failed.
 if [ "$rc" -ne 0 ] && [ "$(cat "$AGMSG_SQLITE_OUTCOME_FILE" 2>/dev/null)" = busy ]; then
   printf 'agmsg: sqlite-sync: %s: the store is busy -- another writer held it past the %sms busy timeout (SQLITE_BUSY); this is not a failed check, the same call succeeds once that writer is done\n' \
-    "$op" "${AGMSG_BUSY_TIMEOUT:-5000}" >&2
+    "$op" "${AGMSG_BUSY_TIMEOUT:-30000}" >&2
   rm -f "$AGMSG_SQLITE_OUTCOME_FILE"
   exit 11
 fi
