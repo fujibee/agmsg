@@ -35,6 +35,8 @@ export function createNoticeFlusher(deps: FlusherDeps) {
   const released = new Set<string>();
   const busy = new Set<string>();
   const failures: Record<string, number> = {};
+  // The oldest held notice each pane's cap timers were armed for, so a held queue always has a wake-up at its caps.
+  const armed: Record<string, number> = {};
 
   const setQueues = (q: Queues) => {
     if (q === queues) return;
@@ -59,6 +61,15 @@ export function createNoticeFlusher(deps: FlusherDeps) {
       if (send.length > 0) toType.push({ id, sent: send });
       q = rest;
     }
+    for (const id of Object.keys(q)) {
+      const at = q[id][0].at;
+      if (armed[id] === at) continue;
+      armed[id] = at;
+      const age = deps.now() - at;
+      deps.setTimer(flush, Math.max(UNKNOWN_WAIT_MS - age, 0) + 100);
+      deps.setTimer(flush, Math.max(STARTUP_WAIT_MS - age, 0) + 100);
+    }
+    for (const id of Object.keys(armed)) if (!q[id]) delete armed[id];
     setQueues(q);
     for (const { id, sent } of toType) {
       busy.add(id);
@@ -100,10 +111,6 @@ export function createNoticeFlusher(deps: FlusherDeps) {
     notice(paneId: string, text: string, id?: string) {
       deps.log(`notice for ${paneId} held (released=${released.has(paneId)}, state=${states[paneId] ?? "none"})`);
       setQueues(hold(queues, paneId, text, deps.now(), id));
-      if (!released.has(paneId) || states[paneId] === "working") {
-        deps.setTimer(flush, UNKNOWN_WAIT_MS + 100);
-        deps.setTimer(flush, STARTUP_WAIT_MS + 100);
-      }
       flush();
     },
     // The pane's agent-state changed; read synchronously by the next flush.

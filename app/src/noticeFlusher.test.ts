@@ -124,6 +124,49 @@ describe("noticeFlusher", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("a notice queued behind an in-flight write is still typed at the cap when the pane then works", async () => {
+    const { f, calls } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    f.notice("p1", "n2"); // queued behind the write in flight
+    f.state("p1", "working");
+    calls[0].settle(true);
+    await vi.advanceTimersByTimeAsync(INJECT_SETTLE_MS + 1000);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS + 1000);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].text).toContain("n2");
+  });
+
+  it("notices restored after a rejected write are still typed at the cap while the pane works", async () => {
+    const { f, calls } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    f.state("p1", "working");
+    calls[0].settle(false);
+    await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS + 60_000);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[calls.length - 1].text).toContain("n1");
+  });
+
+  it("a notice held while the pane was unknown and then worked is typed at the cap", async () => {
+    const { f, calls } = setup();
+    f.state("p1", "idle");
+    f.notice("p1", "n1");
+    calls[0].settle(true);
+    await vi.advanceTimersByTimeAsync(INJECT_SETTLE_MS + 100);
+    f.state("p1", "unknown");
+    f.notice("p1", "n2");
+    expect(calls).toHaveLength(2);
+    calls[1].settle(true);
+    await vi.advanceTimersByTimeAsync(INJECT_SETTLE_MS + 100);
+    f.state("p1", "working");
+    f.notice("p1", "n3");
+    await vi.advanceTimersByTimeAsync(STARTUP_WAIT_MS + 1000);
+    expect(calls).toHaveLength(3);
+    expect(calls[2].text).toContain("n3");
+  });
+
   it("notices for a pane that has closed are dropped", async () => {
     const live = ["p1"];
     const { f, calls, held } = setup(live);
