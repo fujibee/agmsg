@@ -102,6 +102,16 @@ await_barrier_reached() {
   [ "$(unread_count alice)" -eq 0 ]
 }
 
+@test "inbox: mark-read chunk=1 still marks every displayed id" {
+  bash "$SCRIPTS/send.sh" testteam bob alice "c1"
+  bash "$SCRIPTS/send.sh" testteam bob alice "c2"
+  bash "$SCRIPTS/send.sh" testteam bob alice "c3"
+  AGMSG_MARK_READ_CHUNK=1 run bash "$SCRIPTS/inbox.sh" testteam alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"3 new message(s):"* ]]
+  [ "$(unread_count alice)" -eq 0 ]
+}
+
 @test "inbox: --quiet is silent when there is nothing unread" {
   run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
   [ "$status" -eq 0 ]
@@ -515,9 +525,9 @@ _codex_proj() {
   run bash "$SCRIPTS/inbox.sh" testteam alice
   [ "$status" -eq 0 ]
   grep -q "${count} new message(s):" <<<"$output"
-  # the first and last actually came through -- not a truncated or empty head
   grep -q "MSG1-" <<<"$output"
-  grep -q "END${last}" <<<"$output"
+  grep -q "more not shown; marking all ${count} from this snapshot" <<<"$output"
+  [ "$(unread_count alice)" -eq 0 ]
 }
 
 # --- argv-length regression (#777) ---------------------------------------
