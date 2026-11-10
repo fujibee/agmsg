@@ -4,6 +4,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-11-10
+
+### Added
+- Add a shared record for a component that is down or degraded (#1893)
+
+### Fixed
+- CR strip only where sqlite3 emits CRLF (config/roster readers); keep and show a body with a NUL byte (#1944)
+- Make an enabled intent recoverable beyond the installer's one restart attempt (#1904)
+- Fix #774 sync-autostart (and down_notice) going dead under agmsgd/Codex (#1946)
+- One row the wire cannot carry no longer stops the rest of the push (#1943)
+- Carry a message body to the other machine as the same bytes (#1940)
+- Delivery paths: a message body with invalid UTF-8 no longer stops anything; CR strip only on Windows (#1938)
+- JSON-escape backslash and double quote instead of rewriting them (#1929)
+- Codex bridge launcher: stop starting a bridge that only ever ends at once, and say so (#1924)
+- Keep delivering when an update leaves the watcher on older code (#1901)
+- Stop agmsgd's restart burst cap from giving up permanently (#1896)
+- Keep the watcher up when a store read fails or a cursor is stuck (#1895)
+- An unreadable pid check is unknown, not an ended Claude Code session (#1931)
+- Never publish a bare unix:// app-server address; stop a bridge launch that cannot work (#1920)
+- Codex SessionStart: do not start the direct bridge while agmsgd delivers (#1927)
+- Find a live Claude Code seat again when its recorded socket is gone (#1916)
+- Do not report a never-bound local team as connected but not syncing (#1914)
+- Install --update: stop a running agmsgd and confirm it is gone before replacing any script (#1878)
+
+### Changed
+- Keep an install's runtime state outside the directory Codex watches (#1928)
+- Keep seat state in memory, not in install.db (#1911)
+- Codex bridge: date every log record, stop copying the agent's reply into it, keep the log to about a megabyte (#1925)
+
+[1.7.2]: https://github.com/fujibee/agmsg/compare/v1.7.1...v1.7.2
+
 ## [1.7.1] - 2026-11-03
 
 This release keeps agmsgd running through changes it used to stop for. A file added, edited or removed under the installed `scripts/` no longer stops agmsgd or the remote sync engine; they leave only when an update replaces the install record, and `agmsg daemon status` shows what differs while they keep running. On Linux, agmsgd identifies the boot by the kernel's boot id, so a clock step (WSL2 after the host sleeps) no longer makes a running agmsgd read as stopped. Update to get both; nothing else is needed.
