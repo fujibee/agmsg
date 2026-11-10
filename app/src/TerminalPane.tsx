@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createWriteBatcher } from "./writeBatcher";
 import { attachWebglAddon } from "./webglAttach";
+import { measureCell } from "./cellMeasure";
 
 type Props = {
   /** Stable session id; also the key the backend stores the PTY under. */
@@ -42,6 +43,13 @@ function b64ToBytes(b64: string): Uint8Array {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
+}
+
+// Tells the window the size of one cell of this terminal (see cellMeasure.ts for why it is not pane width / columns).
+function reportCell(term: Terminal, el: HTMLElement, onCellSize?: (widthPx: number, heightPx: number) => void) {
+  const screen = el.querySelector<HTMLElement>(".xterm-screen");
+  const cell = measureCell(screen ? screen.getBoundingClientRect() : null, term.cols, term.rows);
+  if (cell) onCellSize?.(cell.w, cell.h);
 }
 
 /**
@@ -117,7 +125,7 @@ export function TerminalPane({
       // Every pane uses the same fixed font today, so any one of them
       // reporting its cell size is representative of them all — a divider
       // drag doesn't need to know which specific panes it's between.
-      onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
+      reportCell(term, el, onCellSize);
     };
 
     // Coalesce PTY output into at most one term.write() per animation frame
@@ -246,7 +254,7 @@ export function TerminalPane({
     // the main effect above never fires for it — re-report cell size here,
     // or divider snap/gap sizing (see onCellSize's doc comment) silently
     // stays pinned to whatever font was active on last container resize.
-    onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
+    reportCell(term, el, onCellSize);
   }, [fontSize, onCellSize]);
 
   // WebGL-accelerated rendering, attached only while this pane is the
