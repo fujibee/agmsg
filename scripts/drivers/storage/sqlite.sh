@@ -402,66 +402,46 @@ storage_read_cursor_get() {
     WHERE team='$(_sqlite_lit "$team")' AND agent='$(_sqlite_lit "$agent")'),0);"
 }
 
-# Advance one recipient's local read frontier after a successful driver scan.
-# Exact IDs are recorded first; the frontier is then capped immediately before
-# the first still-unread addressed message, so a stale/malformed caller cannot
-# skip an unseen row merely by presenting a later cursor.
-storage_read_cursor_consume() {
-  local team="$1" agent="$2" target="$3"; shift 3
-  case "$target" in ''|*[!0-9]*) echo runtime_error; return 13 ;; esac
-  storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
-  local db tl al at id sql=""
-  db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
-  at="$(_sqlite_now)"
-  for id in "$@"; do
-    sql="$sql
-      INSERT INTO events(type,id,team,agent,msg_id,at)
-      SELECT 'message_read','$(_sqlite_lit "$(compat_uuid7)")','$tl','$al',
-             '$(_sqlite_lit "$id")','$(_sqlite_lit "$at")'
-       WHERE NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
-         AND r.team='$tl' AND r.agent='$al' AND r.msg_id='$(_sqlite_lit "$id")');
-      -- Mirror the read into the legacy table, through the correspondence
-      -- rather than by guessing an id. Without this an external viewer shows
-      -- every message unread forever, which is a worse thing to hand someone
-      -- than the disagreement it costs (#689).
-      UPDATE messages SET read_at='$(_sqlite_lit "$at")'
-       WHERE read_at IS NULL
-         AND id = (SELECT e.legacy_id FROM events e
-                    WHERE e.type='message_sent' AND e.team='$tl'
-                      AND e.id='$(_sqlite_lit "$id")' AND e.legacy_id IS NOT NULL);"
-  done
-  # #777 ("Not measured" section): $sql gains one INSERT/UPDATE block per
-  # delivered id, and the whole "BEGIN IMMEDIATE; ...; COMMIT;" statement
-  # used to be handed to `agmsg_sqlite` as ONE argv element. Measured on
-  # Windows: 97 ids built a 38,897-byte statement and CreateProcess refused
-  # it outright (that ceiling is 32,767 characters -- well under Linux's own
-  # MAX_ARG_STRLEN=131,072 bytes) -- and the failure was masked further,
-  # surfacing only as this function's ordinary runtime_error/13 return, never
-  # as a visible "Argument list too long". Same fix as history.sh /
-  # inbox.sh / check-inbox.sh / watch.sh / watch-once.sh, and
-  # drivers/storage/sqlite-sync.sh's own #882 fix: write the statement to a
-  # temp file with printf (a bash builtin, so it never execs) and feed
-  # `agmsg_sqlite` the statement on stdin instead.
-  #
-  # No trap here, on purpose: this is a SHARED LIBRARY FUNCTION, called every
-  # poll from watch.sh's long-lived loop, which installs its own permanent
-  # `trap cleanup EXIT` / `trap 'exit 0' INT TERM HUP` once near the top of
-  # that process. A trap set and then cleared in here (bash traps do not
-  # stack) would replace watch.sh's for the rest of its life the first time
-  # this function ever ran -- the exact mistake this same #777 pass caught
-  # and avoided in watch.sh's own ROWS-fetch fix a few lines above this one
-  # in the call chain. The temp file is removed explicitly on every path
-  # instead; the one path that leaks it (a signal landing mid-call) is left
-  # for the OS's own temp-directory cleanup, same trade-off already accepted
-  # there.
-  local sql_file
-  sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-cursor-consume.XXXXXX" 2>/dev/null) || { echo runtime_error; return 13; }
+# One BEGIN IMMEDIATE/COMMIT for up to AGMSG_MARK_READ_CHUNK ids (default
+# 500). A 22k inbox used to hold the shared store's write lock for minutes
+# inside a single transaction; a kill now rolls back only the in-flight
+# chunk. SQL still goes on sqlite3 stdin (#777 / #882): a 500-id batch must
+# not become one argv element.
+#
+# No trap here, on purpose: this is a SHARED LIBRARY FUNCTION, called every
+# poll from watch.sh's long-lived loop, which installs its own permanent
+# `trap cleanup EXIT` / `trap 'exit 0' INT TERM HUP` once near the top of
+# that process. A trap set and then cleared in here (bash traps do not
+# stack) would replace watch.sh's for the rest of its life the first time
+# this function ever ran. The temp file is removed explicitly on every path;
+# the one path that leaks it (a signal landing mid-call) is left for the
+# OS's own temp-directory cleanup.
+# AGMSG_MARK_READ_LOCKLOG, when set, appends one "n=… sec=…" line per txn.
+_sqlite_mark_read_apply() {
+  local db="$1" tl="$2" al="$3" at="$4" target="$5"
+  shift 5
+  local id sql_file _t0 _t1
+  sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-cursor-consume.XXXXXX" 2>/dev/null) || {
+    echo runtime_error
+    return 13
+  }
   {
     printf '%s\n' "BEGIN IMMEDIATE;"
-    printf '%s\n' "$sql"
-    printf '%s\n' "    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
-      VALUES('$tl','$al',0);
-    UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
+    for id in "$@"; do
+      printf '%s\n' "INSERT INTO events(type,id,team,agent,msg_id,at)
+        SELECT 'message_read','$(_sqlite_lit "$(compat_uuid7)")','$tl','$al',
+               '$(_sqlite_lit "$id")','$(_sqlite_lit "$at")'
+         WHERE NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+           AND r.team='$tl' AND r.agent='$al' AND r.msg_id='$(_sqlite_lit "$id")');
+        UPDATE messages SET read_at='$(_sqlite_lit "$at")'
+         WHERE read_at IS NULL
+           AND id = (SELECT e.legacy_id FROM events e
+                      WHERE e.type='message_sent' AND e.team='$tl'
+                        AND e.id='$(_sqlite_lit "$id")' AND e.legacy_id IS NOT NULL);"
+    done
+    printf '%s\n' "INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
+      VALUES('$tl','$al',0);"
+    printf '%s\n' "UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
       SELECT MIN(e.seq)-1 FROM events e
        WHERE e.type='message_sent' AND e.team='$tl' AND e.to_agent='$al'
          AND e.seq>read_cursors.local_position
@@ -472,11 +452,56 @@ storage_read_cursor_consume() {
     WHERE team='$tl' AND agent='$al';"
     printf '%s\n' "COMMIT;"
   } > "$sql_file"
+  if [ -n "${AGMSG_MARK_READ_LOCKLOG:-}" ]; then
+    _t0=$(python3 -c 'import time; print("%.6f" % time.time())')
+  fi
   if ! agmsg_sqlite "$db" < "$sql_file" >/dev/null 2>&1; then
     rm -f "$sql_file"
-    echo runtime_error; return 13
+    echo runtime_error
+    return 13
   fi
   rm -f "$sql_file"
+  if [ -n "${AGMSG_MARK_READ_LOCKLOG:-}" ]; then
+    _t1=$(python3 -c 'import time; print("%.6f" % time.time())')
+    python3 -c 'import sys; t0=float(sys.argv[1]); t1=float(sys.argv[2]); n=int(sys.argv[3]); open(sys.argv[4],"a").write("n=%d sec=%.6f\n"%(n,t1-t0))' \
+      "$_t0" "$_t1" "$#" "$AGMSG_MARK_READ_LOCKLOG"
+  fi
+  return 0
+}
+
+# Advance one recipient's local read frontier after a successful driver scan.
+# Exact IDs are recorded first; the frontier is then capped immediately before
+# the first still-unread addressed message, so a stale/malformed caller cannot
+# skip an unseen row merely by presenting a later cursor.
+storage_read_cursor_consume() {
+  local team="$1" agent="$2" target="$3"; shift 3
+  case "$target" in ''|*[!0-9]*) echo runtime_error; return 13 ;; esac
+  storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
+  local db tl al at chunk n id
+  local -a batch
+  db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
+  at="$(_sqlite_now)"
+  chunk="${AGMSG_MARK_READ_CHUNK:-500}"
+  case "$chunk" in ''|*[!0-9]*|0) chunk=500 ;; esac
+  if [ $# -eq 0 ]; then
+    _sqlite_mark_read_apply "$db" "$tl" "$al" "$at" "$target" || return
+    echo ok
+    return 0
+  fi
+  n=0
+  batch=()
+  for id in "$@"; do
+    batch+=("$id")
+    n=$((n + 1))
+    if [ "$n" -ge "$chunk" ]; then
+      _sqlite_mark_read_apply "$db" "$tl" "$al" "$at" "$target" "${batch[@]}" || return
+      batch=()
+      n=0
+    fi
+  done
+  if [ "$n" -gt 0 ]; then
+    _sqlite_mark_read_apply "$db" "$tl" "$al" "$at" "$target" "${batch[@]}" || return
+  fi
   echo ok
 }
 

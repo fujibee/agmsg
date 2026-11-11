@@ -493,6 +493,17 @@ EOF
   [ -f "$TEST_SKILL_DIR/teams/myteam/roster.jsonl" ]
 }
 
+@test "reset: a stale lock on a team without TARGET_AGENT does not fail the reset" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" otherteam bob claude-code /tmp/proj-b
+  mkdir "$TEST_SKILL_DIR/teams/otherteam/.config.lock"
+  run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code alice
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Reset incomplete"* ]]
+  [[ "$output" =~ "removed 1 registration" ]]
+  [ -d "$TEST_SKILL_DIR/teams/otherteam/.config.lock" ]
+}
+
 @test "reset: rejects an explicit agent_id containing path-hazard characters" {
   run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code "al.ice"
   [ "$status" -ne 0 ]
