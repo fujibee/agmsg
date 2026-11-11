@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROLE_REMOVED_EXIT=75
+ROLE_REMOVAL_CONFIRMED=0
+normalize_launcher_exit_status() {
+  # Install this before startup probes too: an incidental dependency status
+  # must never impersonate a positive registration-removal result.
+  if [ "$1" -eq "$ROLE_REMOVED_EXIT" ] && [ "$ROLE_REMOVAL_CONFIRMED" != 1 ]; then exit 1; fi
+}
+exit_for_removed_role() {
+  ROLE_REMOVAL_CONFIRMED=1
+  exit "$ROLE_REMOVED_EXIT"
+}
+trap 'normalize_launcher_exit_status "$?"' EXIT
+
 # The launcher is detached from codex-monitor.sh and may outlive the shell that
 # invoked it. Never retain test-harness result/trace descriptors through the
 # dispatcher -> role child -> bridge process chain.
@@ -105,9 +118,12 @@ LIFETIME_PID="$PARENT_PID"
 HELD_LOCK_RESOURCE=""
 
 release_held_lock() {
-  rm -f "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
-  [ -n "$HELD_LOCK_RESOURCE" ] || return 0
-  agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$"
+  local child_exit_status=$?
+  rm -f "$IDENTITY_CACHE_MARKER" "${OWNED_ROLE_JOBS_FILE:-$IDENTITY_CACHE_MARKER}" 2>/dev/null || true
+  if [ -n "$HELD_LOCK_RESOURCE" ]; then
+    agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$" || true
+  fi
+  normalize_launcher_exit_status "$child_exit_status"
 }
 
 # Acquire <resource>, reclaiming it only from a provably dead owner. Returns 1
@@ -160,11 +176,88 @@ acquire_runtime_lock() {
   return 1
 }
 
+# A failed observation is never evidence that a role was removed.
+# Keep the launcher armed and publish the recovery state via the shared notice.
+if ! declare -F down_notice_set >/dev/null 2>&1; then
+  source "$SCRIPT_DIR/../../../lib/down-notice.sh"
+fi
+NOTICE_PROJECT_HASH="$(printf '%s' "$PROJECT_PHYS" | agmsg_sha1)"
+NOTICE_COMPONENT="codex-identity.$NOTICE_PROJECT_HASH.$(printf '%s\n%s' "$SEAT_KEY" "$ROLE_PAIR" | agmsg_sha1)"
+NOTICE_REASON="unobserved"
+IDENTITY_PROJECT_SQL_IN="$(agmsg_project_sql_in_list "$PROJECT")"
+identity_ready() {
+  [ -n "$NOTICE_REASON" ] || return 0
+  if down_notice_clear "$NOTICE_COMPONENT"; then NOTICE_REASON=""; fi
+  return 0
+}
+identity_pending() {
+  [ "$NOTICE_REASON" != "$1" ] || return 0
+  if down_notice_set "$NOTICE_COMPONENT" degraded "$1" "agmsg doctor"; then NOTICE_REASON="$1"; fi
+  return 0
+}
+
+# Positive removal proof: a valid local config explicitly lacks this role.
+# Missing/unreadable/partial files remain unknown and must be retried.
+role_removed() {
+  local team name config answer
+  IFS="$TAB" read -r team name <<< "$ROLE_PAIR"
+  config="$TEAMS_DIR/$team/config.json"
+  [ -f "$config" ] || return 1
+  local config_sql name_sql
+  [ -n "$IDENTITY_PROJECT_SQL_IN" ] || return 1
+  config_sql="$(printf '%s' "$config" | sed "s/'/''/g")"
+  name_sql="$(printf '%s' "$name" | sed "s/'/''/g")"
+  answer="$(sqlite3 :memory: "
+    WITH raw(j) AS (SELECT CAST(readfile('$config_sql') AS TEXT)),
+    valid(j) AS (SELECT j FROM raw WHERE json_valid(j)),
+    target(value,kind) AS (
+      SELECT value,type FROM valid, json_each(json_extract(j, '$.agents')) WHERE key='$name_sql'
+    ),
+    registrations(regs) AS (
+      SELECT CASE WHEN kind='object' THEN
+        CASE WHEN json_type(value, '$.registrations')='array'
+          THEN json_extract(value, '$.registrations')
+          WHEN json_type(value, '$.registrations') IS NULL
+          THEN json_array(json_object('type',json_extract(value,'$.type'),'project',json_extract(value,'$.project')))
+        END END FROM target
+    ),
+    entries(value,kind) AS (
+      SELECT value,type FROM registrations, json_each(COALESCE(regs,'[]'))
+    )
+    SELECT CASE
+      WHEN EXISTS(SELECT 1 FROM registrations WHERE regs IS NULL)
+        OR EXISTS(SELECT 1 FROM target WHERE kind!='object')
+        OR EXISTS(SELECT 1 FROM entries WHERE kind!='object'
+          OR COALESCE(json_type(value,'$.type'),'')!='text'
+          OR COALESCE(json_type(value,'$.project'),'')!='text'
+          OR length(trim(COALESCE(json_extract(value,'$.type'),'')))=0
+          OR length(trim(COALESCE(json_extract(value,'$.project'),'')))=0)
+        THEN 'unknown'
+      ELSE count(*) END
+    FROM entries
+    WHERE json_extract(value,'$.type')='codex'
+      AND json_extract(value,'$.project') IN ($IDENTITY_PROJECT_SQL_IN)
+    HAVING (SELECT json_type(j, '$.agents') FROM valid)='object';
+  " 2>/dev/null)" || return 1
+  [ "$answer" = 0 ]
+}
+
 resolve_identity() {  # prints "team<TAB>name" lines for the project's codex roles
   "$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null \
     | awk -v t="$TAB" 'NF >= 2 { print $1 t $2 }' \
     | { if [ -n "$ROLE_PAIR" ]; then grep -Fx "$ROLE_PAIR" || true; else cat; fi; } \
     | sort -u
+}
+
+# A readable row with an empty, one-sided or malformed pair is still an
+# observation failure. Only a validated pair can prove a role switch.
+source "$SCRIPT_DIR/../../../lib/validate.sh"
+parsed_request_pair_valid() {
+  [ "${AGMSG_CODEX_REQUEST_TYPE:-}" = "$TYPE" ] || return 1
+  [ -n "${AGMSG_CODEX_REQUEST_THREAD:-}" ] || return 1
+  [ -n "${AGMSG_CODEX_REQUEST_TEAM:-}" ] && [ -n "${AGMSG_CODEX_REQUEST_NAME:-}" ] || return 1
+  agmsg_validate_team_name "${AGMSG_CODEX_REQUEST_TEAM:-}" >/dev/null 2>&1 || return 1
+  agmsg_validate_agent_name "${AGMSG_CODEX_REQUEST_NAME:-}" >/dev/null 2>&1 || return 1
 }
 
 # Read the seat's own request record. SessionStart writes the already-narrowed
@@ -178,6 +271,7 @@ read_seat_request() {
   [ -f "$REQUEST_FILE" ] || return 1
   IFS= read -r request_line < "$REQUEST_FILE" 2>/dev/null || return 1
   _agmsg_codex_request_parse "$request_line" || return 1
+  parsed_request_pair_valid || return 1
   request_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
   REQUEST_THREAD="${AGMSG_CODEX_REQUEST_THREAD:-}"
   REQUEST_APP_SERVER="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
@@ -225,6 +319,8 @@ IDENTITY_CACHE=""
 IDENTITY_CACHE_COUNT=-1
 IDENTITY_CACHE_MARKER="$RUN_DIR/.identity-cache.$$"
 IDENTITY_CACHE_FRESH=0   # 1 when the last refresh served the cache unchanged
+IDENTITY_CACHE_CHANGED=0
+IDENTITY_OBSERVATION_STATE=unobserved
 
 identity_cache_is_fresh() {
   local f count=0
@@ -239,6 +335,7 @@ identity_cache_is_fresh() {
 }
 
 refresh_identity_cache() {
+  IDENTITY_CACHE_CHANGED=0
   if identity_cache_is_fresh; then
     IDENTITY_CACHE_FRESH=1
     return 0
@@ -251,7 +348,20 @@ refresh_identity_cache() {
     count=$((count + 1))
   done
   IDENTITY_CACHE_COUNT=$count
-  IDENTITY_CACHE="$(resolve_identity || true)"
+  local observed previous="$IDENTITY_CACHE" previous_state="$IDENTITY_OBSERVATION_STATE"
+  if observed="$(resolve_identity)" && [ -n "$observed" ]; then
+    IDENTITY_CACHE="$observed"
+    IDENTITY_OBSERVATION_STATE=ready
+  else
+    # Do not cache an empty/error result: retry even if config mtimes stay put.
+    rm -f "$IDENTITY_CACHE_MARKER"
+    IDENTITY_CACHE=""
+    IDENTITY_OBSERVATION_STATE=pending
+    identity_pending "Codex identity discovery is unavailable; launcher is retrying"
+  fi
+  if [ "$previous" != "$IDENTITY_CACHE" ] || [ "$previous_state" != "$IDENTITY_OBSERVATION_STATE" ]; then
+    IDENTITY_CACHE_CHANGED=1
+  fi
 }
 
 # Poll fast while something is happening, then stand down. The startup race the
@@ -299,9 +409,67 @@ build_safety_state() {
   SAFETY_STATE="request=$request"
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
-    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || return 1
+    [ -n "${AGMSG_ROLE_SESSION_UUID:-}" ] && [ -n "${AGMSG_ROLE_SESSION_PROJECT:-}" ] || return 1
     SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
   done <<< "$identity"
+}
+
+# Exit 75 is private to owned role children: positive registration-removal
+# proof, not a crash, give-up, signal, or failed observation. Consume it once
+# through wait on the exact direct child this dispatcher started. Job-table
+# membership includes stopped children, so an uncertain/live child is never
+# waited on synchronously or replaced. No PID probe authorizes a restart.
+owned_role_children=""
+OWNED_ROLE_JOBS_FILE="$RUN_DIR/.codex-role-jobs.$SEAT_KEY.$$"
+forget_known_pair() {
+  local retired="$1" pair kept=""
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    [ "$pair" = "$retired" ] && continue
+    kept="${kept:+$kept$'\n'}$pair"
+  done <<< "$known_pairs"
+  known_pairs="$kept"
+}
+owned_role_child_completed() {
+  local wanted="$1" rows_file="$2" job_mark job_pid state rest
+  [ -r "$rows_file" ] || return 1
+  while read -r job_mark job_pid state rest; do
+    [ "$job_pid" = "$wanted" ] || continue
+    # C-locale Bash job state is an observation about our direct child,
+    # independent of PID reuse. Stopped/running/unrecognised rows stay pending.
+    case "$state" in Done|Exit|Killed*|Terminated*) return 0 ;; esac
+    return 1
+  done < "$rows_file"
+  return 1
+}
+reap_owned_role_children() {
+  local kept="" team name pid pair result
+  [ -n "$owned_role_children" ] || return 0
+  # Direct builtin output/read avoids a fork on every dispatcher tick. Never
+  # parse an old snapshot after a failed write; lack of evidence stays pending.
+  if ! LC_ALL=C jobs -l > "$OWNED_ROLE_JOBS_FILE"; then return 0; fi
+  while IFS="$TAB" read -r team name pid; do
+    [ -n "$pid" ] || continue
+    pair="$team$TAB$name"
+    if owned_role_child_completed "$pid" "$OWNED_ROLE_JOBS_FILE"; then
+      result=0
+      wait "$pid" 2>/dev/null || result=$?
+      if [ "$result" -eq "$ROLE_REMOVED_EXIT" ]; then forget_known_pair "$pair"; fi
+    else
+      kept="${kept:+$kept$'\n'}$pair$TAB$pid"
+    fi
+  done <<< "$owned_role_children"
+  owned_role_children="$kept"
+}
+
+owned_role_child_pending() {
+  local pair="$1" team name pid
+  while IFS="$TAB" read -r team name pid; do
+    [ -n "$pid" ] || continue
+    [ "$team$TAB$name" = "$pair" ] && return 0
+  done <<< "$owned_role_children"
+  return 1
 }
 
 # The role is claimed a moment after launch, so retry while the parent
@@ -314,6 +482,7 @@ if [ -z "$ROLE_PAIR" ]; then
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
+    reap_owned_role_children
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
     seat_pairs=""
@@ -321,15 +490,18 @@ if [ -z "$ROLE_PAIR" ]; then
       && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
       seat_pairs="$REQUEST_PAIR"
     fi
-    [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+    [ "$IDENTITY_CACHE_CHANGED" != "1" ] || poll_reset
     if [ -z "$seat_pairs" ]; then
-      echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
+      if [ "$IDENTITY_OBSERVATION_STATE" != pending ]; then
+        identity_pending "Codex destination is missing or unproven; launcher is waiting for this seat's request"
+      fi
       # No owned pair is authoritative: forget any children this seat used to
       # own so a later re-registration can be dispatched again.
       known_pairs=""
       poll_sleep
       continue
     fi
+    identity_ready
     # Forget pairs that are no longer registered. A child now exits by itself
     # once its own registration is gone, so a stale known_pairs entry would
     # suppress the respawn if that same pair were registered again later.
@@ -344,9 +516,16 @@ if [ -z "$ROLE_PAIR" ]; then
       [ -n "$child_team" ] || continue
       child_pair="$child_team"$'\t'"$child_name"
       pair_registered "$child_pair" "$known_pairs" && continue
+      # A request may have been temporarily unproven while its existing child
+      # stayed alive. Reuse that owned generation instead of starting a duplicate.
+      if owned_role_child_pending "$child_pair"; then
+        known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
+        continue
+      fi
       # Close bats' result fd when present; a detached child must not keep the
       # test harness pipe open after its test has completed.
       nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- 4>&- &
+      owned_role_children="${owned_role_children:+$owned_role_children$'\n'}$child_pair$TAB$!"
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
       poll_reset
     done <<< "$seat_pairs"
@@ -371,24 +550,19 @@ fi
 CHILD_LOCK_RESOURCE="codex-child:$SEAT_KEY:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
 acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
 
-# Bounded, not open-ended. The dispatcher only spawns a child for a pair it has
-# already seen registered, so an empty list here is either the brief actas write
-# lag or a role that has genuinely gone away — and the latter arrives via the
-# re-exec below, which would otherwise park the child in this loop for as long as
-# the app-server lives. Giving up is safe: the dispatcher now forgets a pair when
-# its registration disappears, so a re-registered role gets a fresh child.
+# Keep discovering while this seat is alive. An observation budget must not
+# strand an unchanged registration after the dispatcher has remembered it.
 ids=""
-startup_attempts=0
-while _agmsg_pid_alive_local "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
-  ids="$(resolve_identity || true)"
-  [ -n "$ids" ] && break
-  startup_attempts=$((startup_attempts + 1))
-  sleep 0.3
+while _agmsg_pid_alive_local "$PARENT_PID"; do
+  if ids="$(resolve_identity)" && [ -n "$ids" ]; then
+    identity_ready
+    break
+  fi
+  role_removed && { identity_ready; exit_for_removed_role; }
+  identity_pending "Codex identity discovery is unavailable; launcher is retrying"
+  poll_sleep
 done
 [ -n "$ids" ] || exit 0
-build_safety_state "$ids"
-safety_state="$SAFETY_STATE"
-
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
 # without a record may share the current project TUI. If the hook could not
@@ -406,38 +580,50 @@ if [ -f "$REQUEST_FILE" ]; then
   _hint_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
   [ -n "${_hint_thread:-}" ] && thread_hint="$_hint_thread"
 fi
+# Wait in this process for a readable, matching role record. Re-exec on every
+# empty observation would reset backoff and repeatedly rebuild all helpers.
 safe_ids=""
-raw_identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
-while IFS="$TAB" read -r candidate_team candidate_name; do
-  [ -n "$candidate_team" ] || continue
-  # This loop runs in the launcher's own shell (herestring, not a pipeline), so
-  # it is also what warms the record-path memo for the rest of the process.
-  agmsg_role_session_load "$candidate_team" "$candidate_name" 2>/dev/null || true
-  candidate_thread="$AGMSG_ROLE_SESSION_UUID"
-  if [ -n "$candidate_thread" ]; then
-    candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
-    candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
-    # A record for another project proves this role's current seat is elsewhere:
-    # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
-    # before a concrete request thread is available; multiplexed roles require
-    # proof and are excluded while the hint is only `loaded`.
-    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
+while _agmsg_pid_alive_local "$PARENT_PID"; do
+  safe_ids=""
+  raw_identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
+  while IFS="$TAB" read -r candidate_team candidate_name; do
+    [ -n "$candidate_team" ] || continue
+    # This loop runs in the launcher's own shell (herestring, not a pipeline), so
+    # it is also what warms the record-path memo for the rest of the process.
+    agmsg_role_session_load "$candidate_team" "$candidate_name" 2>/dev/null || true
+    candidate_thread="$AGMSG_ROLE_SESSION_UUID"
+    if [ -n "$candidate_thread" ]; then
+      candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
+      candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
+      # A record for another project proves this role's current seat is elsewhere:
+      # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
+      # before a concrete request thread is available; multiplexed roles require
+      # proof and are excluded while the hint is only `loaded`.
+      if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
+        continue
+      fi
+    else
+      # A role without a recorded seat has no live TUI to receive its turn.
       continue
     fi
-  else
-    # A role without a recorded seat has no live TUI to receive its turn.
-    continue
-  fi
-  safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
-done <<< "$ids"
+    safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
+  done <<< "$ids"
+  if [ -n "$safe_ids" ]; then break; fi
+  role_removed && { identity_ready; exit_for_removed_role; }
+  identity_pending "Codex role has no matching thread record; launcher is retrying"
+  poll_sleep
+done
 ids="$safe_ids"
-# A role record may be written by actas later in this same first turn. An empty
-# safe set is therefore transient, not terminal: retry while the parent lives.
-if [ -z "$ids" ]; then
-  _agmsg_pid_alive_local "$PARENT_PID" || exit 0
-  sleep 0.3
-  exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
-fi
+[ -n "$ids" ] || { identity_ready; exit 0; }
+SAFETY_STATE=""
+while _agmsg_pid_alive_local "$PARENT_PID"; do
+  if build_safety_state "$ids"; then break; fi
+  role_removed && { identity_ready; exit_for_removed_role; }
+  identity_pending "Codex role record cannot be read; launcher is retrying"
+  poll_sleep
+done
+[ -n "$SAFETY_STATE" ] || { identity_ready; exit 0; }
+safety_state="$SAFETY_STATE"
 
 identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
 if [ "$identity_count" = "1" ]; then
@@ -902,7 +1088,6 @@ bridge_note_stable() {
   bridge_spell_start=""
 }
 
-deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
   bridge_note_stable
   bridge_notice_flush
@@ -911,24 +1096,17 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # the resolve is served from the mtime-guarded cache.
   refresh_identity_cache
   current_ids="$IDENTITY_CACHE"
-  [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
-  # This child is scoped to one role (`resolve_identity` filters on ROLE_PAIR),
-  # so an empty list means the role itself is gone. Nothing upstream retires a
-  # child: losing the registration only sends it back through the re-exec, whose
-  # pre-loop then spins for as long as the parent lives. Verified: the child was
-  # still running 10 s after its role was removed. Two consecutive empties are
-  # required because identities.sh also reports empty on a transient read
-  # failure, and exiting on one of those would drop a healthy role's delivery.
+  [ "$IDENTITY_CACHE_CHANGED" != "1" ] || poll_reset
   if [ -z "$current_ids" ]; then
-    deregistered_ticks=$((deregistered_ticks + 1))
-    if [ "$deregistered_ticks" -ge 2 ]; then
+    if role_removed; then
       retire_recorded_bridge
-      exit 0
+      identity_ready
+      exit_for_removed_role
     fi
-    sleep 0.3
+    # Failed or empty observation cannot retire a live bridge or its owner.
+    poll_sleep
     continue
   fi
-  deregistered_ticks=0
 
   # Check the seat request before refreshing role-record safety state. Actas
   # publishes role changes here; retire this child immediately when its pair is
@@ -937,24 +1115,43 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
   if [ -f "$REQUEST_FILE" ]; then
     _request_line=""
-    IFS= read -r _request_line < "$REQUEST_FILE" 2>/dev/null || true
-    _agmsg_codex_request_parse "$_request_line" || true
+    if ! IFS= read -r _request_line < "$REQUEST_FILE" 2>/dev/null \
+      || ! _agmsg_codex_request_parse "$_request_line" \
+      || ! parsed_request_pair_valid; then
+      identity_pending "Codex seat request has no proven pair; launcher is retrying"
+      poll_sleep
+      continue
+    fi
     _rtype="${AGMSG_CODEX_REQUEST_TYPE:-}"; _rthread="${AGMSG_CODEX_REQUEST_THREAD:-}"
     _rapp="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"; _rteam="${AGMSG_CODEX_REQUEST_TEAM:-}"
     _rname="${AGMSG_CODEX_REQUEST_NAME:-}"
+    if [ "$_rtype" != "$TYPE" ] || [ -z "$_rthread" ]; then
+      identity_pending "Codex seat request has no valid thread; launcher is retrying"
+      poll_sleep
+      continue
+    fi
     if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
       request_pair="$_rteam$TAB$_rname"
     fi
+  else
+    identity_pending "Codex seat request is missing; launcher is retrying"
+    poll_sleep
+    continue
   fi
   if [ "$request_pair" != "$ROLE_PAIR" ]; then
     retire_recorded_bridge
+    identity_ready
     exit 0
   fi
 
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  build_safety_state "$current_ids"
+  if ! build_safety_state "$current_ids"; then
+    identity_pending "Codex role record cannot be read; launcher is retrying"
+    poll_sleep
+    continue
+  fi
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
     retire_recorded_bridge
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
@@ -987,12 +1184,13 @@ EOF
   if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] \
     || [ "$rec_thread" != "${_rthread:-}" ]; then
     # A role with no record (or one seated in another project) stays
-    # deliberately unsubscribed (#150) and waits for a record to appear. That
-    # wait is open-ended, so it has to be the cheapest path in the file.
+    # deliberately unsubscribed (#150) and waits for a record to appear.
+    identity_pending "Codex role has no matching thread record; launcher is retrying"
     poll_sleep
     continue
   fi
   thread_id="$rec_thread"
+  identity_ready
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
@@ -1118,8 +1316,13 @@ EOF
       _bridge_request_pair=""
       if [ -f "$REQUEST_FILE" ]; then
         _bridge_request_line=""
-        IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null || true
-        _agmsg_codex_request_parse "$_bridge_request_line" || true
+        if ! IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null \
+          || ! _agmsg_codex_request_parse "$_bridge_request_line" \
+          || ! parsed_request_pair_valid; then
+          identity_pending "Codex seat request has no proven pair; launcher is retrying"
+          poll_sleep
+          continue
+        fi
         _bridge_req_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
         _bridge_req_thread="${AGMSG_CODEX_REQUEST_THREAD:-}"
         _bridge_req_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
@@ -1128,10 +1331,15 @@ EOF
         if [ -n "${_bridge_req_team:-}" ] && [ -n "${_bridge_req_name:-}" ]; then
           _bridge_request_pair="$_bridge_req_team$TAB$_bridge_req_name"
         fi
+      else
+        identity_pending "Codex seat request is missing; launcher is retrying"
+        poll_sleep
+        continue
       fi
       if [ "$_bridge_request_pair" != "$ROLE_PAIR" ]; then
         retire_recorded_bridge
       fi
+      identity_ready
       sleep 0.2
     done
     wait "$launched_pid" 2>/dev/null || true

@@ -3513,7 +3513,7 @@ EOF
   printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"rollout-thread-999\",\"cwd\":\"$TEST_PROJECT\"}}" \
     > "$rollout_dir/rollout-2026-06-17T00-00-00-rollout-thread-999.jsonl"
 
-  HOME="$TEST_SKILL_DIR/home" \
+  CODEX_HOME="$TEST_SKILL_DIR/home/.codex" \
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
@@ -3554,7 +3554,7 @@ EOF
   sleep 1
   touch "$rollout_dir/rollout-2020-01-01T00-00-00-stale-by-name-uuid.jsonl"
 
-  HOME="$TEST_SKILL_DIR/home" \
+  CODEX_HOME="$TEST_SKILL_DIR/home/.codex" \
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
@@ -4694,4 +4694,29 @@ SH
   _codex_direct_bridge_run on turn
   [ -f "$GATE_LOG" ]
   refute grep -q 'agmsgd delivers notices' <<<"$GATE_OUT"
+}
+
+@test "codex discovery: a missing thread leaves a durable degraded notice visible in status" {
+  local project="$TEST_SKILL_DIR/discovery-project"
+  mkdir -p "$project" "$TEST_SKILL_DIR/codex-empty" "$TEST_SKILL_DIR/run"
+  run env CODEX_HOME="$TEST_SKILL_DIR/codex-empty" SKILL_DIR="$TEST_SKILL_DIR" \
+    PROJECT="$project" RUN_DIR="$TEST_SKILL_DIR/run" TYPE=codex SESSION_ID=unresolved \
+    bash -c '
+      source "$SKILL_DIR/scripts/lib/hash.sh"
+      source "$SKILL_DIR/scripts/lib/resolve-project.sh"
+      source "$SKILL_DIR/scripts/drivers/types/codex/_session-start.sh"
+      agmsg_codex_writable_roots_notice() { :; }
+      agmsg_session_start
+    '
+  [ "$status" -eq 0 ]
+  grep -Fq 'not connected to a seat' <<<"$output"
+  run bash "$SCRIPTS/delivery.sh" status codex "$project"
+  [ "$status" -eq 0 ]
+  grep -Fq 'Codex delivery: degraded: Codex thread destination is missing' <<<"$output"
+  grep -Fq 'In Codex: $agmsg actas <name>' <<<"$output"
+  local other="$TEST_SKILL_DIR/other-discovery-project"
+  mkdir -p "$other"
+  run bash "$SCRIPTS/delivery.sh" status codex "$other"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'Codex thread destination is missing' <<<"$output"
 }
