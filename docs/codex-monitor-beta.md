@@ -187,6 +187,10 @@ flowchart TD
   ended --> watch
 ```
 
+### Delayed monitor startup
+
+A slow app-server remains alive while the monitor waits for its listening banner and a reachable loopback port. Exhausting the initial observation budget reports a degraded notice instead of launching plain Codex. A confirmed exited child is retried after five seconds; `agmsg delivery status` shows the pending reason and log path. A successful connection clears that notice. If notice cleanup fails, Codex still starts immediately and the existing dispatcher retries cleanup at most once every five seconds. Cancel the pending launch to stop its owned startup child.
+
 ## Worker Guardrails
 
 > ⚠️ **Never poll agmsg by launching a full Codex/Claude session on a short
