@@ -34,6 +34,32 @@ json_field() {
   [ "$(json_field "$output" teams)" = "[]" ]
 }
 
+@test "team list: converts paths embedded in entries for native Python once per listing" {
+  mkdir -p "$TEST_SKILL_DIR/teams/native" "$BATS_TEST_TMPDIR/native teams/native" "$BATS_TEST_TMPDIR/bin"
+  printf '{}\n' > "$TEST_SKILL_DIR/teams/native/config.json"
+  printf '{"remote_binding":{"connected_at":"now","remote_team_id":"native-path"}}\n' > "$BATS_TEST_TMPDIR/native teams/native/config.json"
+  export TEAM_LIST_POSIX_ROOT="$TEST_SKILL_DIR/teams"
+  export TEAM_LIST_NATIVE_ROOT="$BATS_TEST_TMPDIR/native teams"
+  if command -v cygpath >/dev/null 2>&1; then
+    TEAM_LIST_NATIVE_ROOT="$(cygpath -m "$TEAM_LIST_NATIVE_ROOT")"
+  fi
+  export TEAM_LIST_CONVERSIONS="$BATS_TEST_TMPDIR/conversions"
+  cat > "$BATS_TEST_TMPDIR/bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = -m ] && [ "$2" = "$TEAM_LIST_POSIX_ROOT" ]; then
+  printf 'conversion\n' >> "$TEAM_LIST_CONVERSIONS"
+  printf '%s\n' "$TEAM_LIST_NATIVE_ROOT"
+else
+  printf '%s\n' "${@: -1}"
+fi
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/cygpath"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$SCRIPTS/team-list.sh" --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"remote_team_id": "native-path"'* ]]
+  [ "$(wc -l < "$TEAM_LIST_CONVERSIONS" | tr -d ' ')" = 1 ]
+}
+
 @test "team list --json: reports every locally known team, canonically sorted by name" {
   bash "$SCRIPTS/join.sh" zteam alice claude-code /tmp/project-a
   bash "$SCRIPTS/join.sh" ateam bob claude-code /tmp/project-b

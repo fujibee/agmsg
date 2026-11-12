@@ -169,6 +169,13 @@ chmod 600 "$work_file"
 trap 'rm -f "$work_file"' EXIT INT TERM
 
 truncated=0
+# Paths inside the entries file never cross MSYS's native argv conversion.
+# Convert their shared prefix once so native Windows Python can open every
+# config, without starting cygpath once per team. Shell checks keep POSIX paths.
+entries_teams_dir="$TEAMS_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+  entries_teams_dir="$(cygpath -m "$TEAMS_DIR")"
+fi
 if [ -d "$TEAMS_DIR" ]; then
   count=0
   for d in "$TEAMS_DIR"/*/; do
@@ -182,7 +189,7 @@ if [ -d "$TEAMS_DIR" ]; then
       break
     fi
     name="$(basename "$d")"
-    printf '%s\t%s\n' "$name" "$cfg" >> "$work_file"
+    printf '%s\t%s/%s/config.json\n' "$name" "$entries_teams_dir" "$name" >> "$work_file"
   done
 fi
 

@@ -73,6 +73,28 @@ _agmsg_state_dev() {
 # Says why the state cannot be moved, naming the install; changes nothing that
 # outlives the call.
 AGMSG_STATE_REASON=""
+AGMSG_STATE_LINK_KIND=symlink
+
+_agmsg_state_directory_link() {   # <link> <target>
+  if [ "$AGMSG_STATE_LINK_KIND" = junction ]; then
+    AGMSG_JUNCTION_LINK="$(cygpath -w "$1")" \
+    AGMSG_JUNCTION_TARGET="$(cygpath -w "$2")" \
+      powershell.exe -NoProfile -NonInteractive -Command \
+      'try { New-Item -ItemType Junction -Path $env:AGMSG_JUNCTION_LINK -Target $env:AGMSG_JUNCTION_TARGET -ErrorAction Stop | Out-Null } catch { exit 1 }' \
+      >/dev/null 2>&1
+  else
+    ln -s "$2" "$1" 2>/dev/null
+  fi
+}
+
+_agmsg_state_link_matches() {   # <link> <target>
+  [ -L "$1" ] && [ "$(readlink "$1" 2>/dev/null)" = "$2" ]
+}
+
+_agmsg_state_probe_unlink() {
+  if [ -L "$1" ]; then command rm -f "$1"; else rmdir "$1" 2>/dev/null || true; fi
+}
+
 _agmsg_state_refuse() {   # <name> <skill dir> <reason>
   AGMSG_STATE_REASON="$3"
   echo "agmsg: state of '$1' stays in $2: $3" >&2
@@ -80,6 +102,16 @@ _agmsg_state_refuse() {   # <name> <skill dir> <reason>
 }
 
 agmsg_state_preflight() {   # <skill dir> <state root>
+  local root="${2%/}" existed=0 rc=0
+  if [ -e "$root" ] || [ -L "$root" ]; then existed=1; fi
+  _agmsg_state_preflight "$@" || rc=$?
+  # Only remove the empty directory this attempt created. Existing roots and
+  # roots with any content belong to their owner, even when preflight fails.
+  if [ "$rc" != 0 ] && [ "$existed" = 0 ]; then rmdir "$root" 2>/dev/null || true; fi
+  return "$rc"
+}
+
+_agmsg_state_preflight() {   # <skill dir> <state root>
   local skill="${1%/}" root="${2%/}" name part probe owner
   name="${skill##*/}"
   AGMSG_STATE_REASON=""
@@ -91,20 +123,30 @@ agmsg_state_preflight() {   # <skill dir> <state root>
   if ! mkdir -p "$root" 2>/dev/null || [ ! -w "$root" ]; then
     _agmsg_state_refuse "$name" "$skill" "cannot create or write $root"; return 1
   fi
-  # A directory made here by mktemp, holding one file and a link to it: nothing
-  # that already exists is touched, and only what this call made is removed (a
-  # Windows ln that copies leaves a plain file in place of the link, so no
-  # recursive removal is needed).
+  # Probe a directory link, which can also be a Windows junction without
+  # symlink privileges. Only accept a link Git Bash recognizes with the same
+  # -L/readlink contract used by update, doctor and uninstall.
   probe="$(mktemp -d "$root/.link-probe.XXXXXX" 2>/dev/null)" || {
     _agmsg_state_refuse "$name" "$skill" "cannot create or write $root"; return 1
   }
-  : > "$probe/target"
-  if ! ln -s target "$probe/link" 2>/dev/null || [ ! -L "$probe/link" ]; then
-    command rm -f "$probe/target" "$probe/link"
-    rmdir "$probe" 2>/dev/null
-    _agmsg_state_refuse "$name" "$skill" "symbolic links cannot be created in $root"; return 1
+  mkdir "$probe/target"
+  AGMSG_STATE_LINK_KIND=symlink
+  _agmsg_state_directory_link "$probe/link" "$probe/target" || true
+  if ! _agmsg_state_link_matches "$probe/link" "$probe/target"; then
+    _agmsg_state_probe_unlink "$probe/link"
+    if command -v cygpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
+      AGMSG_STATE_LINK_KIND=junction
+      _agmsg_state_directory_link "$probe/link" "$probe/target" || true
+    fi
   fi
-  command rm -f "$probe/target" "$probe/link"
+  if ! _agmsg_state_link_matches "$probe/link" "$probe/target"; then
+    _agmsg_state_probe_unlink "$probe/link"
+    rmdir "$probe/target" 2>/dev/null
+    rmdir "$probe" 2>/dev/null
+    _agmsg_state_refuse "$name" "$skill" "symbolic links or compatible directory junctions cannot be created in $root"; return 1
+  fi
+  _agmsg_state_probe_unlink "$probe/link"
+  rmdir "$probe/target" 2>/dev/null
   rmdir "$probe" 2>/dev/null
   if [ "$(_agmsg_state_dev "$skill")" != "$(_agmsg_state_dev "$root")" ]; then
     _agmsg_state_refuse "$name" "$skill" "$root is on another filesystem, so the move would not be a rename"; return 1
@@ -142,12 +184,12 @@ _agmsg_state_fold() {   # <src> <dest>
 _agmsg_state_publish() {   # <src> <dest>
   local src="$1" dest="$2" inner
   if [ -d "$src" ] && [ ! -L "$src" ]; then _agmsg_state_fold "$src" "$dest"; fi
-  if [ ! -e "$src" ] && [ ! -L "$src" ]; then ln -s "$dest" "$src" 2>/dev/null; fi
+  if [ ! -e "$src" ] && [ ! -L "$src" ]; then _agmsg_state_directory_link "$src" "$dest"; fi
   if [ -d "$src" ] && [ ! -L "$src" ]; then
     inner="$src/${src##*/}"
     if [ -L "$inner" ] && [ "$(readlink "$inner")" = "$dest" ]; then command rm -f "$inner"; fi
     _agmsg_state_fold "$src" "$dest"
-    if [ ! -e "$src" ] && [ ! -L "$src" ]; then ln -s "$dest" "$src" 2>/dev/null; fi
+    if [ ! -e "$src" ] && [ ! -L "$src" ]; then _agmsg_state_directory_link "$src" "$dest"; fi
   fi
   [ "$(readlink "$src" 2>/dev/null)" = "$dest" ]
 }
