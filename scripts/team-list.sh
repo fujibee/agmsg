@@ -168,13 +168,25 @@ work_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-team-list-work.XXXXXX")"
 chmod 600 "$work_file"
 trap 'rm -f "$work_file"' EXIT INT TERM
 
+variants_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-team-list-variants.XXXXXX")"
+chmod 600 "$variants_file"
+trap 'rm -f "$work_file" "$variants_file"' EXIT INT TERM
+agmsg_project_path_variants "$project_path" > "$variants_file"
+
 truncated=0
 # Paths inside the entries file never cross MSYS's native argv conversion.
 # Convert their shared prefix once so native Windows Python can open every
 # config, without starting cygpath once per team. Shell checks keep POSIX paths.
 entries_teams_dir="$TEAMS_DIR"
+python_work_file="$work_file"
+python_variants_file="$variants_file"
 if command -v cygpath >/dev/null 2>&1; then
-  entries_teams_dir="$(cygpath -m "$TEAMS_DIR")"
+  native_paths="$(cygpath -m "$TEAMS_DIR" "$work_file" "$variants_file")"
+  {
+    IFS= read -r entries_teams_dir
+    IFS= read -r python_work_file
+    IFS= read -r python_variants_file
+  } <<< "$native_paths"
 fi
 if [ -d "$TEAMS_DIR" ]; then
   count=0
@@ -193,21 +205,16 @@ if [ -d "$TEAMS_DIR" ]; then
   done
 fi
 
-variants_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-team-list-variants.XXXXXX")"
-chmod 600 "$variants_file"
-trap 'rm -f "$work_file" "$variants_file"' EXIT INT TERM
-agmsg_project_path_variants "$project_path" > "$variants_file"
-
 format="human"
 [ "$json" -eq 1 ] && format="json"
 
 if [ "$truncated" -eq 1 ]; then
   python3 "$SCRIPT_DIR/internal/team-list.py" \
-    --entries "$work_file" --variants "$variants_file" \
+    --entries "$python_work_file" --variants "$python_variants_file" \
     --scope "$scope" --max-config-bytes "$MAX_CONFIG_BYTES" --format "$format" \
     --truncated
 else
   python3 "$SCRIPT_DIR/internal/team-list.py" \
-    --entries "$work_file" --variants "$variants_file" \
+    --entries "$python_work_file" --variants "$python_variants_file" \
     --scope "$scope" --max-config-bytes "$MAX_CONFIG_BYTES" --format "$format"
 fi

@@ -60,7 +60,7 @@ demote() {
   ' _ "$REPO_ROOT" "$SK" "$ST"
   [ "$status" -eq 1 ]
   [ ! -e "$ST" ]
-  [[ "$output" == *"stays in"* ]]
+  printf '%s\n' "$output" | grep -qF 'stays in'
 }
 
 @test "failed preflight preserves a preexisting empty state root" {
@@ -117,7 +117,7 @@ demote() {
   powershell.exe() { return 1; }
   run agmsg_state_preflight "$SK" "$ST"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"compatible directory junctions cannot be created"* ]]
+  printf '%s\n' "$output" | grep -qF 'compatible directory junctions cannot be created'
   [ ! -e "$ST" ]
   [ "$(cat "$SK/teams/marker")" = kept ]
   [ ! -L "$SK/teams" ]

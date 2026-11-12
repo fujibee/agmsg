@@ -44,19 +44,44 @@ json_field() {
     TEAM_LIST_NATIVE_ROOT="$(cygpath -m "$TEAM_LIST_NATIVE_ROOT")"
   fi
   export TEAM_LIST_CONVERSIONS="$BATS_TEST_TMPDIR/conversions"
+  export TEAM_LIST_REAL_CYGPATH="$(command -v cygpath || true)"
+  export TEAM_LIST_PYTHON="$MOCK_PYTHON3"
   cat > "$BATS_TEST_TMPDIR/bin/cygpath" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" = -m ] && [ "$2" = "$TEAM_LIST_POSIX_ROOT" ]; then
-  printf 'conversion\n' >> "$TEAM_LIST_CONVERSIONS"
-  printf '%s\n' "$TEAM_LIST_NATIVE_ROOT"
-else
-  printf '%s\n' "${@: -1}"
-fi
+mode="$1"; shift
+for path in "$@"; do
+  if [ "$mode" = -m ] && [ "$path" = "$TEAM_LIST_POSIX_ROOT" ]; then
+    printf 'conversion\n' >> "$TEAM_LIST_CONVERSIONS"
+    printf '%s\n' "$TEAM_LIST_NATIVE_ROOT"
+  elif [ "$mode" = -m ] && [[ "$path" == *agmsg-team-list-work.* || "$path" == *agmsg-team-list-variants.* ]]; then
+    if [ -n "$TEAM_LIST_REAL_CYGPATH" ]; then path="$("$TEAM_LIST_REAL_CYGPATH" -m "$path")"; fi
+    printf 'native:%s\n' "$path"
+  elif [ -n "$TEAM_LIST_REAL_CYGPATH" ]; then
+    "$TEAM_LIST_REAL_CYGPATH" "$mode" "$path"
+  else
+    printf '%s\n' "$path"
+  fi
+done
+SH
+  cat > "$BATS_TEST_TMPDIR/bin/python3" <<'SH'
+#!/usr/bin/env bash
+args=()
+converted=0
+for arg in "$@"; do
+  case "$arg" in
+    native:*) args+=("${arg#native:}"); converted=$((converted + 1));;
+    *) args+=("$arg");;
+  esac
+done
+# Both temporary paths must use the converter's result, not the shell path.
+[ "$converted" -eq 2 ] || exit 77
+exec "$TEAM_LIST_PYTHON" "${args[@]}"
 SH
   chmod +x "$BATS_TEST_TMPDIR/bin/cygpath"
+  chmod +x "$BATS_TEST_TMPDIR/bin/python3"
   run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" bash "$SCRIPTS/team-list.sh" --json
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"remote_team_id": "native-path"'* ]]
+  printf '%s\n' "$output" | grep -qF '"remote_team_id": "native-path"'
   [ "$(wc -l < "$TEAM_LIST_CONVERSIONS" | tr -d ' ')" = 1 ]
 }
 
