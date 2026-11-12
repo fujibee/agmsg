@@ -23,7 +23,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isAlive } from "./executor.mjs";
+import { isAlive, pidNamespace } from "./executor.mjs";
 import { readCompletionState, scriptsMismatches } from "./lifecycle.mjs";
 import { openInstallDb } from "./db.mjs";
 import { PROTOCOL_VERSION } from "./control.mjs";
@@ -32,8 +32,19 @@ import { listCodexRegistrations } from "./channels/codex-queue-store.mjs";
 const STARTING_STOPPING_GRACE_MS = 30_000;
 
 // The pure decision. `now` is injectable for tests.
-export function classify({ owner, intent, alive, reachable, lastAttempt }, now = Date.now()) {
+export function classify({ owner, intent, alive, reachable, lastAttempt, otherPidNamespace = false }, now = Date.now()) {
   const desired = intent?.desired ?? null;
+
+  // Asked from another pid namespace than the executor's (a sandbox such as
+  // Codex's): it cannot be seen from here, and stopping or starting it from
+  // here would take down a daemon that may well be running.
+  if (desired === "on" && owner.state === "ready" && alive === null && otherPidNamespace) {
+    return {
+      text: "agmsgd cannot be checked from here: it runs in another pid namespace than this command (a sandbox). Run agmsg daemon status outside the sandbox to check it; do not stop or start it from here. Unread messages are preserved.",
+      exitCode: 1,
+      gen: owner.gen,
+    };
+  }
 
   if (desired === "on" && owner.state === "ready" && alive === null) {
     return {
@@ -238,7 +249,9 @@ async function main() {
     process.exit(1);
   }
   const reachable = owner.state === "ready" && owner.socket ? await probeSocket(owner.socket) : false;
-  const result = classify({ owner, intent, alive, reachable, lastAttempt });
+  const ownPidNamespace = pidNamespace();
+  const otherPidNamespace = Boolean(owner.executor_pid_ns && ownPidNamespace && owner.executor_pid_ns !== ownPidNamespace);
+  const result = classify({ owner, intent, alive, reachable, lastAttempt, otherPidNamespace });
   const seatState = reachable
     ? await readSeatsFromDaemon(owner, alive)
     : { state: owner.state !== "ready" || alive === false ? "daemon_not_running" : alive === null ? "liveness_unconfirmed" : "no_answer" };
