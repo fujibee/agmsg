@@ -616,14 +616,59 @@ agmsg_scripts_rel_is_safe() {
 # untouched by this step -- that contract is only about the prune below.
 # Identical content is skipped so an ordinary upgrade doesn't fill .trash/
 # with copies of files nobody touched.
+#
+# Content equality used to be one `cmp` process per file present in both
+# trees. On Windows a process spawn costs far more than the comparison
+# itself, and scripts/ has hundreds of files, so an update there spent most
+# of its wall time just starting `cmp` over and over (#1928 area; see this
+# change's PR body for the measured before/after). This instead hashes each
+# whole tree in ONE batched invocation (`find -exec ... +`, not one call per
+# file) and diffs the two hash lists once with `comm`, so the file count no
+# longer sets the process count. `shasum -a 256` / `sha256sum` is the same
+# macOS-vs-Git-Bash fallback order scripts/lib/hash.sh already uses; neither
+# existing is the one case this still falls back to the old per-file `cmp`,
+# so correctness never depends on one of those two tools being present.
 agmsg_stage_overwrite_backups() {
   local src="$1" dest="$2" trash_root="$3"
-  local entry rel
+  local entry rel hash_tool changed
+
+  if command -v shasum >/dev/null 2>&1; then
+    hash_tool="shasum -a 256"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash_tool="sha256sum"
+  else
+    hash_tool=""
+  fi
+
+  changed=""
+  if [ -n "$hash_tool" ]; then
+    # `comm -23 dest src` keeps every "<hash>  <path>" line that is in dest's
+    # list but NOT in src's -- i.e. every path whose content differs between
+    # the trees (or exists only on the dest side). The digest is a fixed 64
+    # hex characters for both tools, followed by exactly two spaces, so
+    # `cut -c 67-` reaches the path without field-splitting on a path that
+    # contains a space. This is a change-detection hash, not a security one,
+    # same distinction scripts/lib/hash.sh draws between agmsg_sha1 and
+    # agmsg_sha256.
+    changed="$(LC_ALL=C comm -23 \
+      <(cd "$dest" && find . -type f -exec $hash_tool {} + 2>/dev/null | LC_ALL=C sort) \
+      <(cd "$src" && find . -type f -exec $hash_tool {} + 2>/dev/null | LC_ALL=C sort) \
+      | cut -c 67- | sed 's|^\./||')"
+    changed=$'\n'"$changed"$'\n'
+  fi
+
   while IFS= read -r -d '' entry; do
     rel="${entry#./}"
     agmsg_scripts_rel_is_safe "$rel" || continue
     [ -f "$dest/$rel" ] || continue
-    cmp -s "$src/$rel" "$dest/$rel" && continue
+    if [ -n "$hash_tool" ]; then
+      case "$changed" in
+        *$'\n'"$rel"$'\n'*) ;;
+        *) continue ;;
+      esac
+    else
+      cmp -s "$src/$rel" "$dest/$rel" && continue
+    fi
     agmsg_install_op_require || return 1
     mkdir -p "$(dirname "$trash_root/$rel")"
     agmsg_install_op_require || return 1

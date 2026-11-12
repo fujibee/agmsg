@@ -2553,6 +2553,59 @@ EOF
   [ "$(cat "$trash/hook-on.sh")" = "gen-2 leftover" ]
 }
 
+@test "install --update: backs up only the files whose content actually changed" {
+  _restore_install
+  local trash="$SK/.trash"
+
+  # One file edited, the rest left alone: only the edited one should be
+  # staged into .trash/, confirming the batched-hash comparison still tells
+  # "content changed" apart from "content identical" exactly like the
+  # per-file `cmp` it replaces -- not just "some files get backed up".
+  local edited="$SK/scripts/send.sh"
+  local untouched_before untouched_after
+  untouched_before="$(cat "$SK/scripts/history.sh")"
+  printf '\n# local edit\n' >> "$edited"
+
+  HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  [ -f "$trash/send.sh" ]
+  [ ! -e "$trash/history.sh" ]
+  untouched_after="$(cat "$SK/scripts/history.sh")"
+  [ "$untouched_after" = "$untouched_before" ]
+}
+
+@test "install --update: spawns a handful of hash-tool processes, not one cmp per file" {
+  _restore_install
+  printf '\n# local edit\n' >> "$SK/scripts/send.sh"
+
+  # A standalone shasum/sha256sum shim that counts its own invocations proves
+  # the fix directly: the file-count-sized process count (#1928's Windows
+  # slowdown) is gone, replaced by a per-tree, not per-file, hash call.
+  local call_log="$FAKE_HOME/hash-calls.log"
+  local shim_dir="$FAKE_HOME/hash-shim"
+  mkdir -p "$shim_dir"
+  local real_tool
+  if command -v shasum >/dev/null 2>&1; then
+    real_tool="$(command -v shasum)"
+    printf '#!/usr/bin/env bash\necho call >> %q\nexec %q "$@"\n' "$call_log" "$real_tool" > "$shim_dir/shasum"
+    chmod +x "$shim_dir/shasum"
+  else
+    real_tool="$(command -v sha256sum)"
+    printf '#!/usr/bin/env bash\necho call >> %q\nexec %q "$@"\n' "$call_log" "$real_tool" > "$shim_dir/sha256sum"
+    chmod +x "$shim_dir/sha256sum"
+  fi
+
+  PATH="$shim_dir:$PATH" HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+  [ -f "$call_log" ]
+  # Two hash-tool invocations for this change (one per tree, batched over
+  # every file by `find -exec ... +`) -- not one per changed/compared file.
+  local calls
+  calls="$(wc -l < "$call_log" | tr -d ' ')"
+  [ "$calls" -le 3 ]
+}
+
 @test "uninstall: removes the Antigravity skill" {
   _restore_install --marker .gemini/config
   [ -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
