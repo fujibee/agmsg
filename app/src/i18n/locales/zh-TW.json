@@ -472,6 +472,10 @@
       "readFailed": "無法讀取開啟請求：{{message}}",
       "actionFailed": "無法處理該請求：{{message}}",
       "truncated": "較舊的請求不再顯示。",
+      "notice": {
+        "no_app_user": "此團隊沒有 app-user，因此無法接收開啟請求。",
+        "several_app_users": "此團隊有多個 app-user，因此不顯示請求。"
+      },
       "close": "Close"
     },
     "menu": {

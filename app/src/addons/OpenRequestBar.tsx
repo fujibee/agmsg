@@ -104,11 +104,13 @@ export const NOTICE_MS = 6000;
 type Line = { key: string; text: string; sticky: boolean };
 
 /** The lines to show: a dismissed one is hidden until its condition has gone away and come back. */
-export function messageLines(props: { t: Translate; error: string | null; actionError: { code: string; message: string } | null; notice?: string; truncated?: boolean }): Line[] {
+export function messageLines(props: { t: Translate; error: string | null; actionError: { code: string; message: string } | null; notice?: string; noticeCode?: string; truncated?: boolean }): Line[] {
   const { t } = props;
   const lines: Line[] = [];
   if (props.error) lines.push({ key: "readFailed", text: t("addons.request.readFailed", { message: props.error }), sticky: true });
-  if (props.notice) lines.push({ key: "notice", text: props.notice, sticky: true });
+  // A notice with a known code is said in the UI language; an unknown one shows Rust's own words.
+  const known = props.noticeCode === "no_app_user" || props.noticeCode === "several_app_users";
+  if (props.notice) lines.push({ key: "notice", text: known ? t(`addons.request.notice.${props.noticeCode}`) : props.notice, sticky: true });
   if (props.truncated) lines.push({ key: "truncated", text: t("addons.request.truncated"), sticky: true });
   if (props.actionError) lines.push({ key: "actionFailed", text: t("addons.request.actionFailed", { message: props.actionError.message }), sticky: false });
   return lines;
@@ -129,6 +131,7 @@ export function OpenRequestMessages(props: {
   /** Clears the refused-click message (it goes after NOTICE_MS, or on ×). */
   onClearAction?: () => void;
   notice?: string;
+  noticeCode?: string;
   truncated?: boolean;
 }) {
   const { t } = props;

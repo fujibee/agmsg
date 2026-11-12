@@ -30,6 +30,7 @@ export type OpenScanRaw = {
   rows: OpenRowRaw[];
   truncated: boolean;
   notice?: string;
+  noticeCode?: string;
 };
 
 export type OpenedRequest = {
@@ -43,6 +44,7 @@ export type OpenedRequest = {
 export type OpenScanView = RequestScan & {
   /** Why there is nothing to show, in Rust's words (no app-user, several app-users). */
   notice?: string;
+  noticeCode?: string;
   /** Older requests were left out. */
   truncated: boolean;
 };
@@ -79,7 +81,7 @@ export function toOpenView(raw: OpenScanRaw): OpenScanView {
       installTarget: row.installTarget,
     });
   }
-  return { items, notes, notice: raw.notice, truncated: raw.truncated };
+  return { items, notes, notice: raw.notice, noticeCode: raw.noticeCode, truncated: raw.truncated };
 }
 
 /** Where a copied instruction cannot be built, and why (said to the person at the Copy button). */

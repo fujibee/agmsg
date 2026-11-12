@@ -472,6 +472,10 @@
       "readFailed": "无法读取打开请求：{{message}}",
       "actionFailed": "无法处理该请求：{{message}}",
       "truncated": "较早的请求不再显示。",
+      "notice": {
+        "no_app_user": "该团队没有 app-user，因此无法接收打开请求。",
+        "several_app_users": "该团队有多个 app-user，因此不显示请求。"
+      },
       "close": "Close"
     },
     "menu": {

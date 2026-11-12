@@ -476,6 +476,10 @@
       "readFailed": "オープン要求を読めませんでした: {{message}}",
       "actionFailed": "要求を処理できませんでした: {{message}}",
       "truncated": "古い要求は表示していません。",
+      "notice": {
+        "no_app_user": "このチームには app-user がいないため、オープン要求を受け取れません。",
+        "several_app_users": "このチームには app-user が複数いるため、要求は表示しません。"
+      },
       "close": "閉じる"
     },
     "menu": {
