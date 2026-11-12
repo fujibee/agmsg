@@ -50,6 +50,79 @@ demote() {
   command rm -f "$SK/.agmsg" && : > "$SK/.agmsg"
 }
 
+@test "failed preflight removes only its newly created empty state root" {
+  mkdir -p "$SK"
+  run bash -c '
+    source "$1/scripts/lib/state-root.sh"
+    ln() { return 1; }
+    powershell.exe() { return 1; }
+    agmsg_state_preflight "$2" "$3"
+  ' _ "$REPO_ROOT" "$SK" "$ST"
+  [ "$status" -eq 1 ]
+  [ ! -e "$ST" ]
+  printf '%s\n' "$output" | grep -qF 'stays in'
+}
+
+@test "failed preflight preserves a preexisting empty state root" {
+  mkdir -p "$SK" "$ST"
+  run bash -c '
+    source "$1/scripts/lib/state-root.sh"
+    ln() { return 1; }
+    powershell.exe() { return 1; }
+    agmsg_state_preflight "$2" "$3"
+  ' _ "$REPO_ROOT" "$SK" "$ST"
+  [ "$status" -eq 1 ]
+  [ -d "$ST" ]
+}
+
+@test "failed preflight preserves content created in its new state root" {
+  mkdir -p "$SK"
+  run bash -c '
+    source "$1/scripts/lib/state-root.sh"
+    ln() { : > "${3%/*}/../keep"; return 1; }
+    powershell.exe() { return 1; }
+    agmsg_state_preflight "$2" "$3"
+  ' _ "$REPO_ROOT" "$SK" "$ST"
+  [ "$status" -eq 1 ]
+  [ -f "$ST/keep" ]
+}
+
+@test "directory junction fallback moves all state only after a compatible probe" {
+  mkdir -p "$SK/teams"
+  printf 'kept\n' > "$SK/teams/marker"
+  source "$REPO_ROOT/scripts/lib/state-root.sh"
+  ln() { return 1; }
+  cygpath() { printf '%s\n' "$2"; }
+  # Model the shell-visible junction contract without requiring Windows.
+  powershell.exe() { command ln -s "$AGMSG_JUNCTION_TARGET" "$AGMSG_JUNCTION_LINK"; }
+  agmsg_state_preflight "$SK" "$ST"
+  [ "$AGMSG_STATE_LINK_KIND" = junction ]
+  agmsg_state_link "$SK" "$ST"
+  local part
+  for part in $AGMSG_STATE_PARTS; do
+    [ -L "$SK/$part" ]
+    [ "$(readlink "$SK/$part")" = "$ST/$part" ]
+  done
+  [ "$(cat "$ST/teams/marker")" = kept ]
+  agmsg_state_marker_write "$SK"
+  [ "$(agmsg_state_marker_get "$SK" state)" = "$ST" ]
+}
+
+@test "failed directory junction probe keeps state and removes its empty root" {
+  mkdir -p "$SK/teams"
+  printf 'kept\n' > "$SK/teams/marker"
+  source "$REPO_ROOT/scripts/lib/state-root.sh"
+  ln() { return 1; }
+  cygpath() { printf '%s\n' "$2"; }
+  powershell.exe() { return 1; }
+  run agmsg_state_preflight "$SK" "$ST"
+  [ "$status" -eq 1 ]
+  printf '%s\n' "$output" | grep -qF 'compatible directory junctions cannot be created'
+  [ ! -e "$ST" ]
+  [ "$(cat "$SK/teams/marker")" = kept ]
+  [ ! -L "$SK/teams" ]
+}
+
 @test "a fresh install keeps run, db, teams, ext-tools and .trash in the state root, linked from the skills directory" {
   inst
   local p
