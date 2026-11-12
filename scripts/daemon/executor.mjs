@@ -8,7 +8,7 @@
 // install-baseline.mjs is shared by the startup verifier and daemon.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readlinkSync } from "node:fs";
 import { platform, uptime } from "node:os";
 
 // A boot-scoped id: the same value for every process on this machine
@@ -94,10 +94,23 @@ export function sameBoot(recorded, plat = platform(), current = bootId()) {
   return current === recorded;
 }
 
+// The pid namespace this process runs in: on linux the target of
+// /proc/self/ns/pid (for example "pid:[4026531836]"), null on other platforms
+// or when it cannot be read. A pid number is meaningful only inside the
+// namespace it was taken in, so the executor records it next to its pid.
+export function pidNamespace(plat = platform()) {
+  if (plat !== "linux") return null;
+  try {
+    return readlinkSync("/proc/self/ns/pid") || null;
+  } catch {
+    return null;
+  }
+}
+
 // This process's own executor triple, as of the call. `role` and `pid` are
-// the caller's own; `bootId` is captured fresh (see above).
+// the caller's own; `bootId` and `pidNs` are captured fresh (see above).
 export function currentExecutor() {
-  return { pid: process.pid, bootId: bootId() };
+  return { pid: process.pid, bootId: bootId(), pidNs: pidNamespace() };
 }
 
 // True/false/null for "living" / "confirmed dead" / "cannot tell", given a
@@ -111,9 +124,19 @@ export function currentExecutor() {
 // (confirmed dead) without even checking the pid -- this is the one case
 // where a stale boot id is itself the proof, not a reason to say "cannot
 // tell".
-export function isAlive({ pid, bootId: capturedBootId }, { plat = platform(), current = bootId() } = {}) {
+export function isAlive(
+  { pid, bootId: capturedBootId, pidNs: capturedPidNs },
+  { plat = platform(), current = bootId(), currentPidNs = pidNamespace(plat) } = {},
+) {
   const sameBootId = sameBoot(capturedBootId, plat, current);
   if (sameBootId === false) return false;
+  // A caller in another pid namespace than the executor's -- a sandbox that
+  // gives each command its own, as Codex's codex-linux-sandbox does -- cannot
+  // see the executor at all: kill() answers ESRCH and /proc has no entry for a
+  // process that is running. Its pid evidence proves nothing either way, so
+  // this is "cannot tell", never "dead". A record without a namespace (written
+  // before it was recorded) keeps the pid check below.
+  if (capturedPidNs && currentPidNs && capturedPidNs !== currentPidNs) return null;
   try {
     process.kill(pid, 0);
   } catch (error) {

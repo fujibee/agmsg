@@ -5,6 +5,9 @@
 _AGMSG_DAEMON_STATE_SH=1
 # Where the Linux boot id is read from; a test points it at a file it can remove.
 _AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
+# The link naming this process's pid namespace on Linux; a test points it at a
+# symlink of its own.
+_AGMSG_PID_NS_LINK=/proc/self/ns/pid
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
@@ -112,6 +115,23 @@ agmsg_daemon_read_state() {
   if [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
     return 0
+  fi
+  # A caller in another pid namespace than the executor's -- a sandbox that
+  # gives each command its own, as Codex's codex-linux-sandbox does -- sees no
+  # /proc entry, no start time and "no such process" for an executor that is
+  # running, and cannot reach its control socket either. None of that is
+  # evidence: say the check is unavailable, never stopped, so warn_if_stopped
+  # neither reports nor restarts a daemon that is running. A record without a
+  # namespace (written before it was recorded) keeps the checks below.
+  if [ "$(uname -s)" = Linux ]; then
+    local recorded_pid_ns="" own_pid_ns=""
+    recorded_pid_ns="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT executor_pid_ns FROM daemon_owner;' 2>/dev/null)" || recorded_pid_ns=""
+    own_pid_ns="$(readlink "$_AGMSG_PID_NS_LINK" 2>/dev/null)" || own_pid_ns=""
+    if [ -n "$recorded_pid_ns" ] && [ -n "$own_pid_ns" ] && [ "$recorded_pid_ns" != "$own_pid_ns" ]; then
+      AGMSGD_HEALTH=unchecked
+      AGMSGD_REASON="the executor runs in another pid namespace (a sandbox); its liveness cannot be read from here"
+      return 0
+    fi
   fi
   # Likewise a readable start time later than the owner's claim: a reused pid.
   local claim_epoch

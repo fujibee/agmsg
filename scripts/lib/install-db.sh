@@ -88,5 +88,10 @@ agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
     [ "$present" = 1 ] && continue
     sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>/dev/null || return 1
   done
-  sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>/dev/null
+  sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>/dev/null || return 1
+  # daemon_owner exists now (the schema creates it with every column); an older
+  # one lacks the executor's pid namespace (scripts/daemon/executor.mjs).
+  present="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name = 'executor_pid_ns';")" || return 1
+  [ "$present" = 1 ] && return 0
+  sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE daemon_owner ADD COLUMN executor_pid_ns TEXT;" 2>/dev/null
 }
