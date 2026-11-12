@@ -19,7 +19,35 @@ set -euo pipefail
 #   - Running: ~/.agents/skills/<cmd>/scripts/join.sh <team> <name> <type> <project>
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENTS_DIR="$HOME/.agents"
+# Relocates the command/skill destinations this installer writes outside
+# $SCRIPT_DIR: .agents/skills/<cmd> and its Windows/sqlite3/agy-tui helpers,
+# .claude/commands, and the Copilot/OpenCode/Hermes/Grok Build/Antigravity
+# skill directories (plus each one's own existence gate -- see each use
+# below). Unset, this is $HOME -- byte-for-byte the prior behavior for THOSE
+# destinations. scripts/ itself locates SKILL_DIR from its own path (see each
+# script's own SCRIPT_DIR), never from this. CLAUDE_CONFIG_DIR is deliberately
+# not consulted here: a live Claude Code seat can run with CLAUDE_CONFIG_DIR
+# pointed at a different profile than the one install.sh should write its
+# command file for, and this override is about relocating where install.sh
+# writes, not about matching a running seat's own profile. CODEX_HOME already
+# has its own override, untouched here. This does NOT move the install's
+# runtime state root (state-root.sh's agmsg_state_base, $AGMSG_HOME or
+# ~/.agmsg by default) -- that is a separate override with its own existing
+# env var, outside what this change touches.
+INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
+AGENTS_DIR="$INSTALL_HOME/.agents"
+# agmsg-launcher.sh's own default (~/.local/bin, or ~/bin on native Windows)
+# is $HOME-rooted directly, not $AGENTS_DIR -- it already has its own
+# override, AGMSG_BIN_DIR, so default THAT from INSTALL_HOME here rather than
+# teach the launcher lib about this variable. A caller's own AGMSG_BIN_DIR
+# (set before running this installer) always wins.
+if [ -z "${AGMSG_BIN_DIR:-}" ]; then
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) AGMSG_BIN_DIR="$INSTALL_HOME/bin" ;;
+    *)                    AGMSG_BIN_DIR="$INSTALL_HOME/.local/bin" ;;
+  esac
+  export AGMSG_BIN_DIR
+fi
 
 # Operation lock, install.db's meta row, and the completion manifest
 # (agmsgd beta) -- the same lock uninstall.sh takes, and the record both a
@@ -1265,10 +1293,10 @@ install_antigravity_skill() {
   # cross-vendor ~/.agents/skills tree. Treat either of the installed agy
   # markers as evidence that this destination is available; the config tree
   # itself may not exist yet on a fresh CLI install.
-  if [ ! -d "$HOME/.gemini/antigravity-cli" ] && [ ! -d "$HOME/.gemini/config" ]; then
+  if [ ! -d "$INSTALL_HOME/.gemini/antigravity-cli" ] && [ ! -d "$INSTALL_HOME/.gemini/config" ]; then
     return 0
   fi
-  local skill_dir="$HOME/.gemini/config/skills/$CMD_NAME"
+  local skill_dir="$INSTALL_HOME/.gemini/config/skills/$CMD_NAME"
   agmsg_install_op_require || return 1
   mkdir -p "$skill_dir" 2>/dev/null || return 2
   agmsg_install_op_require || return 1
@@ -1531,7 +1559,7 @@ $_agmsg_running_team"
   agmsg_install_op_phase_end || exit 1
   # Refresh the Claude Code slash command file (was missed in earlier --update flows).
   agmsg_install_op_phase_begin || exit 1
-  CC_COMMANDS_DIR="$HOME/.claude/commands"
+  CC_COMMANDS_DIR="$INSTALL_HOME/.claude/commands"
   if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
     agmsg_render_skill claude-code "$SKILL_NAME" "$CC_COMMANDS_DIR/$SKILL_NAME.md" || exit 1
   fi
@@ -1540,26 +1568,26 @@ $_agmsg_running_team"
   # Codex-typed and would mis-identify the agent as codex when invoked from
   # Copilot). Same condition as the fresh-install path so users upgrading
   # from a pre-Copilot release via --update also gain the skill.
-  COPILOT_SKILL_DIR="$HOME/.copilot/skills/$SKILL_NAME"
-  if [ -d "$HOME/.copilot" ]; then
+  COPILOT_SKILL_DIR="$INSTALL_HOME/.copilot/skills/$SKILL_NAME"
+  if [ -d "$INSTALL_HOME/.copilot" ]; then
     mkdir -p "$COPILOT_SKILL_DIR" || exit 1
     agmsg_render_skill copilot "$SKILL_NAME" "$COPILOT_SKILL_DIR/SKILL.md" || exit 1
   fi
   # Refresh / install the OpenCode skill (same reasoning as Copilot above).
-  OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$SKILL_NAME"
-  if [ -d "$HOME/.config/opencode" ]; then
+  OPENCODE_SKILL_DIR="$INSTALL_HOME/.config/opencode/skills/$SKILL_NAME"
+  if [ -d "$INSTALL_HOME/.config/opencode" ]; then
     mkdir -p "$OPENCODE_SKILL_DIR" || exit 1
     agmsg_render_skill opencode "$SKILL_NAME" "$OPENCODE_SKILL_DIR/SKILL.md" || exit 1
   fi
   # Refresh / install the Hermes Agent skill (same reasoning as Copilot above).
-  HERMES_SKILL_DIR="$HOME/.hermes/skills/$SKILL_NAME"
-  if [ -d "$HOME/.hermes" ]; then
+  HERMES_SKILL_DIR="$INSTALL_HOME/.hermes/skills/$SKILL_NAME"
+  if [ -d "$INSTALL_HOME/.hermes" ]; then
     mkdir -p "$HERMES_SKILL_DIR" || exit 1
     agmsg_render_skill hermes "$SKILL_NAME" "$HERMES_SKILL_DIR/SKILL.md" || exit 1
   fi
   # Refresh / install the Grok Build skill (same reasoning as Copilot above).
-  GROK_SKILL_DIR="$HOME/.grok/skills/$SKILL_NAME"
-  if [ -d "$HOME/.grok" ]; then
+  GROK_SKILL_DIR="$INSTALL_HOME/.grok/skills/$SKILL_NAME"
+  if [ -d "$INSTALL_HOME/.grok" ]; then
     mkdir -p "$GROK_SKILL_DIR" || exit 1
     agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
   fi
@@ -1873,8 +1901,8 @@ fi
 
 # --- Install Claude Code global command ---
 agmsg_install_op_phase_begin || exit 1
-CC_COMMANDS_DIR="$HOME/.claude/commands"
-if [ -d "$HOME/.claude" ]; then
+CC_COMMANDS_DIR="$INSTALL_HOME/.claude/commands"
+if [ -d "$INSTALL_HOME/.claude" ]; then
   mkdir -p "$CC_COMMANDS_DIR" || exit 1
   agmsg_render_skill claude-code "$CMD_NAME" "$CC_COMMANDS_DIR/$CMD_NAME.md" || exit 1
   echo "  + installed /$CMD_NAME command to ~/.claude/commands/"
@@ -1884,8 +1912,8 @@ fi
 # Copilot loads SKILL.md from ~/.copilot/skills/<name>/. The shared
 # ~/.agents/skills/<name>/SKILL.md is Codex-typed (whoami ... codex) and
 # would mis-identify a Copilot session — keep the Copilot copy separate.
-COPILOT_SKILL_DIR="$HOME/.copilot/skills/$CMD_NAME"
-if [ -d "$HOME/.copilot" ]; then
+COPILOT_SKILL_DIR="$INSTALL_HOME/.copilot/skills/$CMD_NAME"
+if [ -d "$INSTALL_HOME/.copilot" ]; then
   mkdir -p "$COPILOT_SKILL_DIR" || exit 1
   agmsg_render_skill copilot "$CMD_NAME" "$COPILOT_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
@@ -1896,8 +1924,8 @@ fi
 # global config path. The shared ~/.agents/skills/<name>/SKILL.md is
 # Codex-typed and would mis-identify an OpenCode session — keep the OpenCode
 # copy separate, same pattern as Copilot.
-OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$CMD_NAME"
-if [ -d "$HOME/.config/opencode" ]; then
+OPENCODE_SKILL_DIR="$INSTALL_HOME/.config/opencode/skills/$CMD_NAME"
+if [ -d "$INSTALL_HOME/.config/opencode" ]; then
   mkdir -p "$OPENCODE_SKILL_DIR" || exit 1
   agmsg_render_skill opencode "$CMD_NAME" "$OPENCODE_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed \$$CMD_NAME skill to ~/.config/opencode/skills/"
@@ -1908,8 +1936,8 @@ fi
 # the shared SQLite store stay in ~/.agents/skills/<name>/ so Hermes shares the
 # same message floor as the other agents. Hermes has no automatic delivery hook
 # (manual inbox checks only), but the skill itself installs the same way.
-HERMES_SKILL_DIR="$HOME/.hermes/skills/$CMD_NAME"
-if [ -d "$HOME/.hermes" ]; then
+HERMES_SKILL_DIR="$INSTALL_HOME/.hermes/skills/$CMD_NAME"
+if [ -d "$INSTALL_HOME/.hermes" ]; then
   mkdir -p "$HERMES_SKILL_DIR" || exit 1
   agmsg_render_skill hermes "$CMD_NAME" "$HERMES_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed /$CMD_NAME skill to ~/.hermes/skills/"
@@ -1923,8 +1951,8 @@ fi
 # project-relative rule file, <project>/.grok/rules/agmsg.md, via
 # `delivery.sh set` per project (scripts/drivers/types/grok-build/type.conf's
 # hooks_file; see grok-build/_delivery.sh).
-GROK_SKILL_DIR="$HOME/.grok/skills/$CMD_NAME"
-if [ -d "$HOME/.grok" ]; then
+GROK_SKILL_DIR="$INSTALL_HOME/.grok/skills/$CMD_NAME"
+if [ -d "$INSTALL_HOME/.grok" ]; then
   mkdir -p "$GROK_SKILL_DIR" || exit 1
   agmsg_render_skill grok-build "$CMD_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"

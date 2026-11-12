@@ -3632,3 +3632,80 @@ CYG
   [ -d "$SK/db" ]
   grep -Fq 'preserved team data' "$SK/teams/fixture-team/kept"
 }
+
+@test "install.sh: AGMSG_INSTALL_HOME redirects every per-agent command/skill write" {
+  local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home"
+  # The existence check that gates each per-agent write (install.sh's own
+  # "only write the Copilot/OpenCode/... skill if that ecosystem's dir is
+  # already there") moves with the destination too -- these markers go under
+  # $dest, not $real.
+  mkdir -p "$dest/.claude" "$dest/.copilot" "$dest/.config/opencode" "$dest/.hermes" "$dest/.grok" "$dest/.gemini/config"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  # None of the command/skill destinations this change moves landed under the
+  # real HOME.
+  [ ! -e "$real/.agents" ]
+  [ ! -e "$real/.claude/commands/agmsg.md" ]
+  [ ! -e "$real/.copilot/skills/agmsg" ]
+  [ ! -e "$real/.config/opencode/skills/agmsg" ]
+  [ ! -e "$real/.hermes/skills/agmsg" ]
+  [ ! -e "$real/.grok/skills/agmsg" ]
+  [ ! -e "$real/.gemini/config/skills/agmsg" ]
+
+  # Everything landed under the override instead.
+  [ -f "$dest/.agents/skills/agmsg/SKILL.md" ]
+  [ -f "$dest/.claude/commands/agmsg.md" ]
+  [ -f "$dest/.copilot/skills/agmsg/SKILL.md" ]
+  [ -f "$dest/.config/opencode/skills/agmsg/SKILL.md" ]
+  [ -f "$dest/.hermes/skills/agmsg/SKILL.md" ]
+  [ -f "$dest/.grok/skills/agmsg/SKILL.md" ]
+  [ -f "$dest/.gemini/config/skills/agmsg/SKILL.md" ]
+
+  # AGMSG_INSTALL_HOME does NOT move the install's runtime state root
+  # (state-root.sh's agmsg_state_base, $AGMSG_HOME or ~/.agmsg by default) --
+  # that stays under the real HOME here, same as before this change. Not a
+  # regression to fix in this PR; documented so the test above cannot be
+  # misread as proving full HOME isolation.
+  [ -d "$real/.agmsg/agmsg" ]
+}
+
+@test "uninstall.sh: AGMSG_INSTALL_HOME removes the command/skill destinations from the override location (#1950)" {
+  local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home"
+  mkdir -p "$dest/.claude" "$dest/.copilot" "$dest/.config/opencode" "$dest/.hermes" "$dest/.grok" "$dest/.gemini/config"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$dest/.agents/skills/agmsg/SKILL.md" ]
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$dest/.agents/skills/agmsg/uninstall.sh" --yes
+
+  [ ! -e "$dest/.claude/commands/agmsg.md" ]
+  [ ! -e "$dest/.copilot/skills/agmsg" ]
+  [ ! -e "$dest/.config/opencode/skills/agmsg" ]
+  [ ! -e "$dest/.hermes/skills/agmsg" ]
+  [ ! -e "$dest/.grok/skills/agmsg" ]
+  [ ! -e "$dest/.gemini/config/skills/agmsg" ]
+  # Neither the install nor the uninstall wrote any of these command/skill
+  # destinations under the real HOME.
+  [ ! -e "$real/.agents" ]
+  [ ! -e "$real/.claude/commands/agmsg.md" ]
+}
+
+@test "install.sh / uninstall.sh: AGMSG_INSTALL_HOME unset behaves exactly like before (writes to HOME)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$SK/SKILL.md" ]
+  [ -f "$FAKE_HOME/.agents/skills/agmsg/SKILL.md" ]
+  HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg/SKILL.md" ]
+}
+
+@test "install.sh / uninstall.sh: no bare \$HOME write remains outside the AGMSG_INSTALL_HOME override (#1950)" {
+  # Every non-comment line that still names $HOME directly would bypass the
+  # override silently -- this is the regression check for that, not a style
+  # rule. The only live (non-comment) $HOME reference either script may have
+  # left is the INSTALL_HOME assignment itself.
+  run bash -c "grep -vE '^[[:space:]]*#' '$REPO_ROOT/install.sh' | grep -n '\\\$HOME' | grep -v 'INSTALL_HOME=\"\\\${AGMSG_INSTALL_HOME:-\\\$HOME}\"'"
+  [ "$status" -eq 1 ]
+  run bash -c "grep -vE '^[[:space:]]*#' '$REPO_ROOT/uninstall.sh' | grep -n '\\\$HOME' | grep -v 'INSTALL_HOME=\"\\\${AGMSG_INSTALL_HOME:-\\\$HOME}\"'"
+  [ "$status" -eq 1 ]
+}
