@@ -1099,6 +1099,49 @@ _capability_endpoint() {
   [ -n "$output" ]
 }
 
+@test "sync engine outlives the process group of the command that started it (#1941)" {
+  # Native Windows process groups/signals do not map onto POSIX the way this
+  # test needs (same reason skip_on_windows exists elsewhere); the fix's
+  # Git-Bash fallback is deliberately the unchanged prior behavior there, so
+  # there is nothing to prove on that platform anyway.
+  skip_on_windows "#1941: no setsid/perl fallback claimed on native Windows"
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  local pidfile="$SCRIPTS/../run/remote-sync.testteam.pid"
+  wait_for_file "$pidfile"
+  bash "$SCRIPTS/remote.sh" sync stop testteam
+  wait_for_missing "$pidfile"
+
+  # Stand in for a command (a Codex shell tool call, #1941's own trigger)
+  # that runs in its own process group and is reaped as a whole group when
+  # it ends. `set -m` inside this subshell is bash's own job control, not
+  # the fix under test (scripts/remote.sh's setsid/perl use): it is only
+  # how this TEST gives the launcher below a process group of its own,
+  # portably, without depending on a setsid binary existing on this machine
+  # (it does not on macOS).
+  (
+    set -m
+    bash "$SCRIPTS/remote.sh" sync start testteam &
+    echo "$!" > "$TEST_SKILL_DIR/launcher.pid"
+    wait
+  )
+  local launcher_pid
+  launcher_pid="$(cat "$TEST_SKILL_DIR/launcher.pid")"
+  wait_for_file "$pidfile"
+  local engine_pid
+  engine_pid="$(cat "$pidfile")"
+
+  # The launcher process itself is already gone (sync start returns once the
+  # engine is backgrounded) -- its pgid is what matters: on unfixed code the
+  # engine still carries it (this is #1941's own repro), so sending the
+  # group this signal is exactly what Codex ending the command would do. On
+  # fixed code nothing is left in that group to catch it.
+  kill -TERM -- "-$launcher_pid" 2>/dev/null || true
+  sleep 0.3
+  kill -0 "$engine_pid" 2>/dev/null
+  [ "$(cat "$pidfile")" = "$engine_pid" ]
+  bash "$SCRIPTS/remote.sh" sync stop testteam
+}
+
 @test "connect: starts a background sync engine that disconnect stops (Done-when 4)" {
   bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   local pidfile="$SCRIPTS/../run/remote-sync.testteam.pid"
