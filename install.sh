@@ -1,6 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# MEASUREMENT-ONLY instrumentation (not for merge): prints 'PHASE <name>
+# start|end <t>' and 'WAIT <place> <count> <seconds>' lines to stderr when
+# AGMSG_PHASE_TRACE is set, to find where --update actually spends time
+# (#1928 area; a measured 27-minute Windows update predates #1928, and its
+# sys time is not broken down, so cmp alone may not be the whole story).
+# <t> is $EPOCHREALTIME when the running bash has it, else
+# `date +%s` (whole seconds). No effect on stdout, exit codes, or any
+# decision the script makes -- this only ever prints to stderr.
+_agmsg_phase_trace_on() { [ -n "${AGMSG_PHASE_TRACE:-}" ]; }
+_agmsg_phase_now() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    printf '%s' "$EPOCHREALTIME"
+  else
+    date +%s
+  fi
+}
+_agmsg_phase() {   # start|end <name>
+  _agmsg_phase_trace_on || return 0
+  printf 'PHASE %s %s %s\n' "$2" "$1" "$(_agmsg_phase_now)" >&2
+}
+_agmsg_wait_log() {   # <place> <count> <start_t_from_agmsg_phase_now>
+  _agmsg_phase_trace_on || return 0
+  local elapsed
+  elapsed="$(awk -v a="$3" -v b="$(_agmsg_phase_now)" 'BEGIN{printf "%.3f", b-a}' 2>/dev/null || echo 0)"
+  printf 'WAIT %s %s %s\n' "$1" "$2" "$elapsed" >&2
+}
+
 # agmsg — Agent Messaging installer
 # Installs cross-agent messaging to ~/.agents/skills/<cmd>/
 #
@@ -208,9 +235,10 @@ agmsg_install_pid_gone() {   # <pid>
 # script.
 agmsg_install_stop_daemon() {   # <skill_dir>
   local skill="$1" db="$1/run/install.db" state socket node pid bound deadline
-  [ -f "$db" ] || return 0
+  _agmsg_phase start stop_daemon_send
+  [ -f "$db" ] || { _agmsg_phase end stop_daemon_send; return 0; }
   state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
-  case "${state%$'\r'}" in ready|starting|stopping) ;; *) return 0 ;; esac
+  case "${state%$'\r'}" in ready|starting|stopping) ;; *) _agmsg_phase end stop_daemon_send; return 0 ;; esac
   # Tells the "stopped while enabled" warning that this gap is the update's own;
   # it expires by age, so a killed update cannot silence it for good.
   date +%s > "$skill/run/agmsgd-updating" 2>/dev/null || true
@@ -235,6 +263,10 @@ agmsg_install_stop_daemon() {   # <skill_dir>
       s.on("error", done);
     ' "$socket" >/dev/null 2>&1 || true
   fi
+  _agmsg_phase end stop_daemon_send
+  _agmsg_phase start stop_daemon_wait
+  local _agmsg_wait_iters=0 _agmsg_wait_t0
+  _agmsg_wait_t0="$(_agmsg_phase_now)"
   while :; do
     state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "${state%$'\r'}" = none ] && break
@@ -246,8 +278,11 @@ agmsg_install_stop_daemon() {   # <skill_dir>
       *) case "$pid" in ''|*[!0-9]*|0|1) ;; *) if agmsg_install_pid_gone "$pid"; then state=none; break; fi ;; esac ;;
     esac
     [ "$SECONDS" -lt "$deadline" ] || break
+    _agmsg_wait_iters=$((_agmsg_wait_iters + 1))
     sleep 0.2
   done
+  _agmsg_wait_log stop_daemon_wait "$_agmsg_wait_iters" "$_agmsg_wait_t0"
+  _agmsg_phase end stop_daemon_wait
   if [ "${state%$'\r'}" = none ]; then
     echo "  ~ agmsgd stopped before the update (exit confirmed)"
   else
@@ -259,20 +294,24 @@ agmsg_install_stop_daemon() {   # <skill_dir>
 
 agmsg_install_restart_daemon() {   # <skill_dir>
   local skill="$1" db="$1/run/install.db" intent op_gen state waited=0
-  [ -f "$db" ] || return 0
+  _agmsg_phase start agmsgd_restart
+  [ -f "$db" ] || { _agmsg_phase end agmsgd_restart; return 0; }
   # The intent as the update saw it; the start below only goes ahead if it is
   # still this one, so a stop or disable during the wait is not undone.
   intent="$(sqlite3 "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null || true)"
-  case "$intent" in on\|[0-9]*) op_gen="${intent#on|}" ;; *) return 0 ;; esac
+  case "$intent" in on\|[0-9]*) op_gen="${intent#on|}" ;; *) _agmsg_phase end agmsgd_restart; return 0 ;; esac
   # Tells the "stopped while enabled" warning that this gap is the update's own
   # restart. It expires by age, so a killed update cannot silence it for good.
   date +%s > "$skill/run/agmsgd-updating" 2>/dev/null || true
+  local _agmsg_restart_wait_t0
+  _agmsg_restart_wait_t0="$(_agmsg_phase_now)"
   while [ "$waited" -lt 25 ]; do
     state="$(sqlite3 "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "$state" = ready ] || break
     waited=$((waited + 1))
     sleep 1
   done
+  _agmsg_wait_log agmsgd_restart_ready_wait "$waited" "$_agmsg_restart_wait_t0"
   echo "  ~ agmsgd is turned on; starting the updated version"
   # A transient lock contention (another agmsg command or install holds
   # the install operation lock right now) is worth one more try after a
@@ -288,12 +327,14 @@ agmsg_install_restart_daemon() {   # <skill_dir>
       *"could not acquire the install operation lock"*)
         printf '%s\n' "$start_output" >&2
         echo "  ~ the install operation lock was busy; trying once more" >&2
+        _agmsg_wait_log agmsgd_restart_lock_retry 1 "$(_agmsg_phase_now)"
         sleep 2
         start_rc=0
         start_output="$(bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen" 2>&1)" || start_rc=$?
         ;;
     esac
   fi
+  _agmsg_phase end agmsgd_restart
   printf '%s\n' "$start_output"
   # `start --only-if-op-gen` exits 0 both when it actually starts agmsgd
   # AND when it skips because the intent changed while it waited (the
@@ -840,10 +881,13 @@ agmsg_install_operation_begin() {
     echo "  ! could not read or create install.db's meta row" >&2
     return 1
   fi
+  _agmsg_phase start install_db_schema
   if ! agmsg_install_db_apply_schema "$install_db" "$SCRIPT_DIR/scripts/daemon/schema.sql"; then
     echo "  ! could not apply the daemon schema to install.db" >&2
+    _agmsg_phase end install_db_schema
     return 1
   fi
+  _agmsg_phase end install_db_schema
   agmsg_install_op_require || return 1
   if ! agmsg_install_manifest_rotate_prev "$manifest"; then
     echo "  ! could not move the previous completion record aside" >&2
@@ -926,31 +970,40 @@ agmsg_install_copy_scripts() {
   # unrelated context. Measured directly: a trap set this way fired a
   # second time after an unrelated `source` command completed, well after
   # this function had already returned.
-  stage_dir="$(mktemp -d)" || return 1
+  _agmsg_phase start copy_stage
+  stage_dir="$(mktemp -d)" || { _agmsg_phase end copy_stage; return 1; }
 
   if ! cp -R "$SCRIPT_DIR/scripts/." "$stage_dir/"; then
     rm -rf "$stage_dir" 2>/dev/null
     echo "  ! could not stage scripts/ for copying; the previous install stays in place (see .prev)" >&2
+    _agmsg_phase end copy_stage
     return 1
   fi
   for f in $daemon_files; do
     rm -f "$stage_dir/daemon/$f"
   done
+  _agmsg_phase end copy_stage
 
   local copy_rc=0
   # Backups and the staged copy are one scripts-copy phase. The following
   # prune phase rechecks the lock before it can remove anything from the target.
   agmsg_install_op_phase_begin || copy_rc=1
   if [ "$copy_rc" -eq 0 ]; then
+    _agmsg_phase start backup_compare
     agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
+    _agmsg_phase end backup_compare
   fi
   if [ "$copy_rc" -eq 0 ]; then
+    _agmsg_phase start copy_final
     agmsg_install_op_run_writer cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
+    _agmsg_phase end copy_final
   fi
   agmsg_install_op_phase_end
   if [ "$copy_rc" -eq 0 ]; then
+    _agmsg_phase start prune_removed
     agmsg_install_op_run_phase agmsg_prune_removed_scripts \
       "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
+    _agmsg_phase end prune_removed
   fi
   rm -rf "$stage_dir" 2>/dev/null
 
@@ -1338,6 +1391,7 @@ echo ""
 
 # --- Update mode ---
 if [ "$UPDATE_ONLY" = true ]; then
+  _agmsg_phase start args_and_lock
   # Find existing install. If --cmd was passed, update exactly that skill.
   # Otherwise, scan for installs and require exactly one: a glob expands in
   # collation order, not installation order, and nothing records which
@@ -1429,6 +1483,7 @@ $_agmsg_running_team"
   # instead of working on the old tree.
   agmsg_install_operation_begin || exit 1
   agmsg_install_move_state "$SKILL_DIR" "$AGMSG_RUNNING_TEAMS"
+  _agmsg_phase end args_and_lock
   agmsg_install_stop_daemon "$SKILL_DIR"
   agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
   # Captured before the auto-detect below can fill AGENT_TYPE in for other
@@ -1484,6 +1539,7 @@ $_agmsg_running_team"
   # only after the remaining install updates below are complete.
   AGMSG_BUILTINS_BEFORE="$(agmsg_builtin_driver_names "$SKILL_DIR")"
   agmsg_install_copy_scripts || exit 1
+  _agmsg_phase start post_copy_misc
   agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   agmsg_plugin_shadow_warn "$SKILL_DIR" "$AGMSG_BUILTINS_BEFORE"
@@ -1500,6 +1556,7 @@ $_agmsg_running_team"
   # agmsg's own three); a glob there would delete a file this install
   # does not own (#1249 review).
   agmsg_install_op_run_phase agmsg_remove_retired_terminal_skills || exit 1
+  _agmsg_phase end post_copy_misc
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.
@@ -1512,6 +1569,7 @@ $_agmsg_running_team"
   # `git clone` checkout would). See the README's Uninstall section.
   agmsg_install_optional_uninstaller_copy
   agmsg_install_op_phase_end || exit 1
+  _agmsg_phase start skill_placement
   # Refresh the Claude Code slash command file (was missed in earlier --update flows).
   agmsg_install_op_phase_begin || exit 1
   CC_COMMANDS_DIR="$INSTALL_HOME/.claude/commands"
@@ -1548,6 +1606,8 @@ $_agmsg_running_team"
   fi
   install_antigravity_step "skill (~/.gemini/config/skills/)" install_antigravity_skill
   agmsg_install_op_phase_end || exit 1
+  _agmsg_phase end skill_placement
+  _agmsg_phase start codex_config
   agmsg_install_op_phase_begin || exit 1
   agmsg_install_optional_copy "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml"
   # A team config written by an older release can be group- or world-writable,
@@ -1673,8 +1733,11 @@ $_agmsg_running_team"
   fi
   install_windows_helpers || exit 1
   agmsg_install_op_phase_end || exit 1
+  _agmsg_phase end codex_config
+  _agmsg_phase start launcher_install
   agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" "$CMD_NAME" || exit 1
   agmsg_install_op_run_phase agmsg_install_write_version || exit 1
+  _agmsg_phase end launcher_install
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
   # #1572 fixed the leak; this sweeps up whatever an install made before
@@ -1687,7 +1750,10 @@ $_agmsg_running_team"
   if [ "${AGMSG_STALE_OUTCOME_REMOVED:-0}" -gt 0 ]; then
     echo "  + removed $AGMSG_STALE_OUTCOME_REMOVED leaked sync outcome file(s) from before #1572"
   fi
+  _agmsg_phase start codex_sandbox_config
   agmsg_install_op_run_phase configure_codex_sandbox || exit 1
+  _agmsg_phase end codex_sandbox_config
+  _agmsg_phase start final_output
   echo ""
   agmsg_install_restart_guidance
   agmsg_install_daemon_hint "$SKILL_DIR"
@@ -1702,13 +1768,17 @@ $_agmsg_running_team"
   echo "    a project's settings, silently stopping delivery until it is re-registered."
   echo "    Check with 'delivery.sh status <type> <project>'. (#133)"
   echo ""
+  _agmsg_phase end final_output
+  _agmsg_phase start operation_finish
   agmsg_install_operation_finish || exit 1
+  _agmsg_phase end operation_finish
   # After the completion record is written and the lock is let go: an engine
   # started earlier takes the old record as its baseline, sees the new one appear
   # and stands down again a few seconds later. A stood-down engine's own restart
   # helper waits for the install lock, so exactly one of the two starts it.
   # #963: a sync engine has no equivalent self-detection, so this update
   # restarts one itself for every team the snapshot above found running.
+  _agmsg_phase start sync_restart
   if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
     while IFS= read -r _agmsg_team; do
       [ -n "$_agmsg_team" ] || continue
@@ -1721,6 +1791,7 @@ $_agmsg_running_team"
   else
     echo "  ~ no sync engine was running before this update; nothing to restart"
   fi
+  _agmsg_phase end sync_restart
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""
