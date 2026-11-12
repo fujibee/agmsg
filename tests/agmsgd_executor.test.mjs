@@ -4,7 +4,29 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { bootId, currentExecutor, isAlive, sameBoot } from "../scripts/daemon/executor.mjs";
+import { bootId, currentExecutor, isAlive, pidNamespace, sameBoot } from "../scripts/daemon/executor.mjs";
+
+test("isAlive cannot tell from another pid namespace, where a running executor looks gone", () => {
+  const self = currentExecutor();
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  if (process.platform === "linux") {
+    assert.match(pidNamespace(), /^pid:\[\d+\]$/, "linux names the pid namespace from /proc/self/ns/pid");
+    assert.equal(self.pidNs, pidNamespace(), "the executor records its own namespace");
+  } else {
+    assert.equal(pidNamespace(), null);
+  }
+  // A caller in a sandbox with its own pid namespace gets ESRCH for an executor
+  // that is running: that is no proof of exit.
+  const otherNs = { currentPidNs: "pid:[4026500001]" };
+  const recorded = { pid: dead.pid, bootId: self.bootId, pidNs: "pid:[4026500000]" };
+  assert.equal(isAlive(recorded, otherNs), null, "another namespace is cannot tell, never dead");
+  assert.equal(isAlive({ ...recorded, pid: self.pid }, otherNs), null);
+  // The same namespace keeps the pid check; another boot is still proof.
+  assert.equal(isAlive(recorded, { currentPidNs: recorded.pidNs }), false);
+  assert.equal(isAlive({ ...recorded, bootId: "another-boot" }, otherNs), false, "another boot stays confirmed dead");
+  // A record written before the namespace was recorded keeps the pid check.
+  assert.equal(isAlive({ pid: dead.pid, bootId: self.bootId }, otherNs), false);
+});
 
 test("bootId is stable across calls and isAlive tells living/dead/wrong-boot apart", () => {
   assert.equal(bootId(), bootId(), "bootId must not change within the same boot");

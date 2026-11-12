@@ -422,6 +422,55 @@ WRAPPER
   [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
 }
 
+@test "a caller in another pid namespace than the executor cannot check it, and never reports or restarts it" {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
+  local boot gone
+  boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id)"
+  # A pid with no process: what a sandbox with its own pid namespace sees for an
+  # executor that is running outside it (Codex's codex-linux-sandbox).
+  gone="$(bash -c 'echo $$')"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$gone, executor_boot_id='$boot', executor_pid_ns='pid:[4026500000]', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  ln -s 'pid:[4026500001]' "$BATS_TEST_TMPDIR/other-ns"
+  ln -s 'pid:[4026500000]' "$BATS_TEST_TMPDIR/same-ns"
+  local gen_before
+  gen_before="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "unchecked|the executor runs in another pid namespace (a sandbox); its liveness cannot be read from here" ]
+  # Neither the ordinary path (which would self-heal a stopped daemon) nor the
+  # always path reports it or starts another daemon.
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_warn_if_stopped 2>&1; agmsg_daemon_warn_if_stopped always 2>&1'
+  [ "$status" -eq 0 ]
+  assert_lacks 'agmsg daemon start'
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$gen_before" ]
+  # From the executor's own namespace the missing pid is a stopped daemon.
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/same-ns"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
+  # Another boot stays proof whatever the namespace.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='previous-boot';"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
+  # A record written before the namespace was recorded keeps the pid check.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='$boot', executor_pid_ns=NULL;"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
+}
+
+@test "the daemon schema adds the executor's pid namespace to an older daemon_owner" {
+  # The schema as it was before the column: the same file without its line.
+  grep -v 'executor_pid_ns' "$SCRIPTS/daemon/schema.sql" | sqlite3 "$TEST_SKILL_DIR/run/older.db"
+  sqlite3 "$TEST_SKILL_DIR/run/older.db" "UPDATE daemon_owner SET gen=3;"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/older.db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name='executor_pid_ns';")" = 0 ]
+  run bash -c 'source "$SCRIPTS/lib/install-db.sh"; agmsg_install_db_apply_schema "$TEST_SKILL_DIR/run/older.db" "$SCRIPTS/daemon/schema.sql"'
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/older.db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name='executor_pid_ns';")" = 1 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/older.db" 'SELECT gen FROM daemon_owner;')" = 3 ]
+  # Applying it again is a no-op.
+  run bash -c 'source "$SCRIPTS/lib/install-db.sh"; agmsg_install_db_apply_schema "$TEST_SKILL_DIR/run/older.db" "$SCRIPTS/daemon/schema.sql"'
+  [ "$status" -eq 0 ]
+}
+
 @test "warn_if_stopped never erases an existing down_notice on an UNOBSERVED (install.db missing) check (review round 1 NEEDS FIX)" {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'

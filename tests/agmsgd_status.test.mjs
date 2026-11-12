@@ -30,6 +30,19 @@ test("ready + reachable -> running, exit 0", () => {
   assert.match(r.text, /running/);
 });
 
+test("asked from another pid namespace, an unconfirmed executor is not called old or told to restart", () => {
+  const owner = { ...baseOwner, state: "ready" };
+  const sandboxed = classify({ owner, intent: { desired: "on" }, alive: null, reachable: false, otherPidNamespace: true });
+  assert.equal(sandboxed.exitCode, 1);
+  assert.match(sandboxed.text, /another pid namespace/);
+  assert.match(sandboxed.text, /outside the sandbox/);
+  assert.doesNotMatch(sandboxed.text, /older version/);
+  assert.doesNotMatch(sandboxed.text, /agmsg daemon stop and then agmsg daemon start/);
+  // The same unconfirmed record seen from the executor's own namespace keeps its advice.
+  const same = classify({ owner, intent: { desired: "on" }, alive: null, reachable: false });
+  assert.match(same.text, /older version/);
+});
+
 test("ready + NOT reachable -> exit 1, names the mismatch", () => {
   const r = classify({ owner: { ...baseOwner, state: "ready" }, intent: { desired: "on" }, alive: true, reachable: false });
   assert.equal(r.exitCode, 1);
