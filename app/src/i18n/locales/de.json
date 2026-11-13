@@ -474,6 +474,10 @@
       "readFailed": "Öffnen-Anfragen konnten nicht gelesen werden: {{message}}",
       "actionFailed": "Die Anfrage konnte nicht bearbeitet werden: {{message}}",
       "truncated": "Ältere Anfragen werden nicht angezeigt.",
+      "notice": {
+        "no_app_user": "Dieses Team hat keinen App-Nutzer und kann daher keine Öffnungsanfragen empfangen.",
+        "several_app_users": "Dieses Team hat mehr als einen App-Nutzer, daher werden Anfragen nicht angezeigt."
+      },
       "close": "Close"
     },
     "menu": {

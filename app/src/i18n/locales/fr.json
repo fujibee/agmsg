@@ -476,6 +476,10 @@
       "readFailed": "Impossible de lire les demandes d'ouverture : {{message}}",
       "actionFailed": "La demande n'a pas pu être traitée : {{message}}",
       "truncated": "Les demandes plus anciennes ne sont pas affichées.",
+      "notice": {
+        "no_app_user": "Cette équipe n'a pas d'app-user, elle ne peut donc pas recevoir de demandes d'ouverture.",
+        "several_app_users": "Cette équipe a plus d'un app-user, les demandes ne sont donc pas affichées."
+      },
       "close": "Close"
     },
     "menu": {

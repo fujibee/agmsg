@@ -478,6 +478,10 @@
       "readFailed": "Open requests could not be read: {{message}}",
       "actionFailed": "The request could not be handled: {{message}}",
       "truncated": "Older requests are not shown.",
+      "notice": {
+        "no_app_user": "This team has no app-user, so it cannot receive open requests.",
+        "several_app_users": "This team has more than one app-user, so requests are not shown."
+      },
       "close": "Close"
     },
     "menu": {

@@ -2914,6 +2914,7 @@ export default function App() {
               actionError={openRequests.actionError}
               onClearAction={openRequests.clearActionError}
               notice={openRequests.view?.notice}
+              noticeCode={openRequests.view?.noticeCode}
               truncated={openRequests.view?.truncated}
             />
           )}

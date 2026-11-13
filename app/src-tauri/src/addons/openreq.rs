@@ -517,6 +517,9 @@ pub struct OpenScan {
     /// Why there is nothing to show, when that is not "nothing was sent".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Which notice it is, so the window can say it in the person's language (the text above is English only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice_code: Option<&'static str>,
 }
 
 /// One request line found again from the store by its request id.
@@ -683,7 +686,7 @@ fn scan_with(host: &AddonHost, team: &str, app_user: &str) -> Result<(OpenScan, 
     let handled = handled_set(host, team)?;
     let env = HostEnv::new(host);
     let (rows, found) = assemble(&cands, &handled, &env);
-    Ok((OpenScan { app_user: Some(app_user.to_string()), rows, truncated, notice: None }, found))
+    Ok((OpenScan { app_user: Some(app_user.to_string()), rows, truncated, notice: None, notice_code: None }, found))
 }
 
 /// The team's open requests, checked. Call it when the tab opens and when a message to the app-user arrives.
@@ -691,8 +694,8 @@ fn scan_with(host: &AddonHost, team: &str, app_user: &str) -> Result<(OpenScan, 
 pub fn addon_open_requests(host: State<'_, Arc<AddonHost>>, team: String) -> Result<OpenScan, OpenError> {
     match app_user_of(&team) {
         Ok(Some(user)) => scan_with(&host, &team, &user).map(|(s, _)| s),
-        Ok(None) => Ok(OpenScan { app_user: None, rows: Vec::new(), truncated: false, notice: Some("This team has no app-user, so it cannot receive open requests.".into()) }),
-        Err(e) if e.code == "several_app_users" => Ok(OpenScan { app_user: None, rows: Vec::new(), truncated: false, notice: Some(e.message) }),
+        Ok(None) => Ok(OpenScan { app_user: None, rows: Vec::new(), truncated: false, notice: Some("This team has no app-user, so it cannot receive open requests.".into()), notice_code: Some("no_app_user") }),
+        Err(e) if e.code == "several_app_users" => Ok(OpenScan { app_user: None, rows: Vec::new(), truncated: false, notice: Some(e.message), notice_code: Some("several_app_users") }),
         Err(e) => Err(e),
     }
 }
