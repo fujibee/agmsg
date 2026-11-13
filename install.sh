@@ -1208,9 +1208,17 @@ install_windows_helpers() {
   fi
 }
 
+# Antigravity counts as present when either of its CLI markers exists; the
+# config tree itself may not exist yet on a fresh CLI install.
+install_antigravity_present() {
+  [ -d "$INSTALL_HOME/.gemini/antigravity-cli" ] || [ -d "$INSTALL_HOME/.gemini/config" ]
+}
+
 install_antigravity_tui_shim() {
   local source target target_dir owner expected_owner tmp quoted_source
   source="$1"
+  # Nothing to launch without Antigravity: no shim, and no output.
+  install_antigravity_present || return 0
   target="$AGENTS_DIR/bin/agy-tui"
   target_dir="$(dirname "$target")"
   owner="# agmsg-shim-owner: $source"
@@ -1242,15 +1250,30 @@ install_antigravity_tui_shim() {
   agmsg_install_op_require || return 1
 }
 
+# An update on a machine without Antigravity takes back a shim an earlier
+# release placed there. Only this install's own shim goes, judged by its
+# content: a symlink, another file, or another install's shim stays.
+remove_antigravity_tui_shim() {
+  local source target owner
+  source="$1"
+  target="$AGENTS_DIR/bin/agy-tui"
+  owner="# agmsg-shim-owner: $source"
+  install_antigravity_present && return 0
+  agmsg_install_op_require || return 1
+  [ -f "$target" ] && [ ! -L "$target" ] || return 0
+  grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null || return 0
+  [ "$(grep '^# agmsg-shim-owner: ' "$target" 2>/dev/null || true)" = "$owner" ] || return 0
+  rm -f "$target" 2>/dev/null || return 2
+  agmsg_install_op_require || return 1
+}
+
 install_antigravity_skill() {
   agmsg_install_op_require || return 1
   # Antigravity looks for global skills under ~/.gemini/config/skills, not the
   # cross-vendor ~/.agents/skills tree. Treat either of the installed agy
   # markers as evidence that this destination is available; the config tree
   # itself may not exist yet on a fresh CLI install.
-  if [ ! -d "$INSTALL_HOME/.gemini/antigravity-cli" ] && [ ! -d "$INSTALL_HOME/.gemini/config" ]; then
-    return 0
-  fi
+  install_antigravity_present || return 0
   local skill_dir="$INSTALL_HOME/.gemini/config/skills/$CMD_NAME"
   agmsg_install_op_require || return 1
   mkdir -p "$skill_dir" 2>/dev/null || return 2
@@ -1625,6 +1648,7 @@ $_agmsg_running_team"
   chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
   agmsg_install_optional_codex_chmod
   install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
+  install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" remove_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
   # cp's the new codex-shim-install.sh but does not re-run it, so a shim from an
   # older install keeps its stale baked exec path after the

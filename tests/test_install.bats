@@ -199,7 +199,23 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
   [[ "$output" =~ "hello from install" ]]
 }
 
+# Antigravity is a machine property: the shim is only installed where one of
+# its CLI markers exists. Tests of the shim itself start from such a machine.
+_with_antigravity() {
+  mkdir -p "$FAKE_HOME/.gemini/antigravity-cli"
+}
+
+# The restored install predates the Antigravity marker, so it has no shim; an
+# update on the machine that now has Antigravity places it.
+_restore_install_with_shim() {
+  _restore_install
+  _with_antigravity
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update >/dev/null
+  [ -f "$FAKE_HOME/.agents/bin/agy-tui" ]
+}
+
 @test "install: a fresh install places the Antigravity TUI shim but prints no line about it (#1815)" {
+  _with_antigravity
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ "$status" -eq 0 ]
   refute grep -qF "Antigravity TUI shim" <(printf '%s' "$output")
@@ -207,7 +223,7 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
 }
 
 @test "install: --update refreshes an owned Antigravity TUI shim but prints no line about it (#1815)" {
-  _restore_install
+  _restore_install_with_shim
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   local before; before="$(cat "$shim")"
 
@@ -216,6 +232,45 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
   refute grep -qF "Antigravity TUI shim" <(printf '%s' "$output")
   local after; after="$(cat "$shim")"
   [ "$before" = "$after" ]
+}
+
+@test "install: without Antigravity no TUI shim is placed and nothing is printed about it" {
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  refute grep -qiE "agy-tui|TUI (launcher )?shim" <(printf '%s' "$output")
+  [ ! -e "$FAKE_HOME/.agents/bin/agy-tui" ]
+}
+
+@test "install --update: without Antigravity, this install's own TUI shim is taken back, silently" {
+  _restore_install_with_shim
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  _fake_home_is_scratch
+  rm -r "$FAKE_HOME/.gemini"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  refute grep -qiE "agy-tui|TUI (launcher )?shim" <(printf '%s' "$output")
+  [ ! -e "$shim" ]
+}
+
+@test "install --update: without Antigravity, a TUI shim that is not this install's stays" {
+  _restore_install
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  mkdir -p "$FAKE_HOME/.agents/bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
+  local before; before="$(cat "$shim")"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ "$(cat "$shim")" = "$before" ]
+
+  # A symlink is left alone even when its target is one of our shims.
+  _fake_home_is_scratch
+  rm "$shim"
+  printf '%s\n' '#!/usr/bin/env bash' '# agmsg Antigravity TUI launcher shim' \
+    "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" > "$FAKE_HOME/linked-agy-tui"
+  ln -s "$FAKE_HOME/linked-agy-tui" "$shim"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ -L "$shim" ]
 }
 
 # The Antigravity steps are run as extracted functions with their own
@@ -229,8 +284,9 @@ _agy_step_harness() {   # <what> <function> [args...]; prints "after" when the r
     'case "$last" in */agy-tui) exit 1 ;; esac' \
     'exec /bin/mv "$@"' > "$dir/mv"
   chmod +x "$dir/mv"
-  fn="$(sed -n '/^install_antigravity_tui_shim() {/,/^}/p;/^install_antigravity_step() {/,/^}/p' "$REPO_ROOT/install.sh")"
-  PATH="$dir:$PATH" AGENTS_DIR="$BATS_TEST_TMPDIR/agents" FN="$fn" \
+  fn="$(sed -n '/^install_antigravity_present() {/,/^}/p;/^install_antigravity_tui_shim() {/,/^}/p;/^install_antigravity_step() {/,/^}/p' "$REPO_ROOT/install.sh")"
+  mkdir -p "$BATS_TEST_TMPDIR/home/.gemini/antigravity-cli"
+  PATH="$dir:$PATH" AGENTS_DIR="$BATS_TEST_TMPDIR/agents" INSTALL_HOME="$BATS_TEST_TMPDIR/home" FN="$fn" \
     bash -c 'agmsg_install_op_require() { return "${LOCK_RC:-0}"; }; eval "$FN"; install_antigravity_step "$@"; echo after' _ "$@"
 }
 
@@ -278,6 +334,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: a failing Antigravity shim step warns once and the install finishes" {
+  _with_antigravity
   local fake_bin; fake_bin="$(_agy_failing_mv_fixture)"
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ "$status" -eq 0 ]
@@ -292,6 +349,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install --update: a failing Antigravity shim step warns once, and the Codex shim is still refreshed" {
+  _with_antigravity
   _restore_install
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex" tmp; tmp="$BATS_TEST_TMPDIR/codex-shim.stale"
@@ -481,6 +539,7 @@ _pid_gone_harness() {   # <kill message>
 }
 
 @test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
+  _with_antigravity
   mkdir -p "$FAKE_HOME/.agents/bin"
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
@@ -509,7 +568,7 @@ _pid_gone_harness() {   # <kill message>
 }
 
 @test "install: a second install's Antigravity TUI shim left owned by the first prints no line about it (#1815)" {
-  _restore_install
+  _restore_install_with_shim
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   local before; before="$(cat "$shim")"
   grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
@@ -521,7 +580,7 @@ _pid_gone_harness() {   # <kill message>
 }
 
 @test "install: Antigravity TUI shim replaces its symlink without writing through it" {
-  _restore_install
+  _restore_install_with_shim
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   local linked="$FAKE_HOME/linked-agy-tui"
   cp "$shim" "$linked"
@@ -551,7 +610,7 @@ _pid_gone_harness() {   # <kill message>
 }
 
 @test "uninstall: removes only the owned Antigravity TUI shim" {
-  _restore_install
+  _restore_install_with_shim
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -f "$shim" ]
 
