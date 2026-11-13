@@ -113,20 +113,27 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c 'hello there' || true)" -eq 0 ]
 }
 
-@test "terminal-nudge: a live permission-confirmation screen refuses as box_not_found, never typed over (terminal-poke real-machine round, 2026-11-13)" {
+@test "terminal-nudge: a live permission-confirmation screen on herdr (mismatched short/long rules) refuses as box_not_found, never typed over (terminal-poke real-machine round, 2026-11-13)" {
   # herdr's own agent_status stays idle during a confirmation screen (a
   # separate real-machine finding, same date): readiness ALONE cannot catch
   # this case, so this test deliberately answers idle here too -- it is the
-  # input-box check (agmsg_input_box_locate failing to find '>' between the
-  # confirmation screen's own last rule-line pair, which only wraps a "File
-  # access" header) that must be the thing refusing, not readiness.
-  local rule
-  rule="$(printf '─%.0s' $(seq 1 60))"
+  # input-box check that must be the thing refusing, not readiness.
+  #
+  # Reproduces the REAL screen structure measured live (2026-11-13), not a
+  # simplified one: herdr mixes a short ~60-char rule (separates scrollback
+  # TURNS) with a long ~120-char rule (bounds the live input box) on the
+  # SAME screen. A fixture using one consistent rule length throughout would
+  # not have caught the actual bug -- the short/long pair below, with a
+  # prior turn's own "> ..." line sitting between them, is exactly the
+  # shape that made the original rule-matching logic pick the wrong pair.
+  local short long
+  short="$(printf '─%.0s' $(seq 1 60))"
+  long="$(printf '─%.0s' $(seq 1 120))"
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 if [ "\$1" = pane ] && [ "\$2" = read ]; then
-  printf '%s\nFile access\n%s\nRead: /tmp/x/harmless.txt\n\nAllow access to this file?\n> 1. Yes, allow access\n  2. No, deny access\n' '$rule' '$rule'
+  printf '%s\n> Read the file /tmp/x/harmless.txt and tell me its first word.\n\nFile access\n%s\n\nRead: /tmp/x/harmless.txt\n\nAllow access to this file?\n> 1. Yes, allow access\n  2. No, deny access\n' '$short' '$long'
   exit 0
 fi
 if [ "\$1" = agent ] && [ "\$2" = get ]; then

@@ -159,11 +159,35 @@ agmsg_input_box_locate() {
   fi
 }
 
+# The length (in repeats of the single rule character) of <plain>'s LEADING
+# run of "─", bounded so a corrupted/huge line cannot loop unboundedly.
+# Herdr mixes two different rule widths on one screen (measured live,
+# 2026-11-13): a short ~60-char rule separates scrollback TURNS, a long
+# ~120-char (full pane width) rule bounds the live input box. Both satisfy
+# "starts with 20+ dashes", so matching on "the rule prefix is present" alone
+# -- the ORIGINAL version of this function -- paired a short turn-separator
+# with an unrelated long rule further down and bracketed a PRIOR turn's own
+# "> ..." line as if it were the live box (antigravity's confirmation
+# screen, where that prior-turn line happened to start with the marker too).
+_agmsg_input_box_rule_run_len() {
+  local s="$1" unit="─" count=0
+  while [ "$count" -lt 300 ]; do
+    case "$s" in
+      "$unit"*) s="${s#"$unit"}"; count=$((count + 1)) ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$count"
+}
+
 # Boxed style (Claude Code): the input sits between the LAST two lines whose
-# STYLE-STRIPPED content starts with a run of 20+ "─" — the top rule also
-# carries the pane's own label after its run, the bottom rule is unbroken.
-# Echoes every line strictly between that pair, styling intact (the box's
-# full content, marker line included, multi-line drafts and all).
+# STYLE-STRIPPED content starts with a run of 20+ "─" AND whose leading runs
+# are the SAME length — the top rule may carry the pane's own label after
+# its run (Claude Code), the bottom rule is unbroken, but the RUN itself
+# must match: a top and bottom from two visually different rule widths (see
+# above) are never a real pair, however late in the screen either sits.
+# Echoes every line strictly between the matched pair, styling intact (the
+# box's full content, marker line included, multi-line drafts and all).
 _agmsg_input_box_raw_boxed() {
   local marker="$1" screen="$2" rule="$_AGMSG_INPUT_BOX_RULE20"
   local -a lines=() plain=()
@@ -174,15 +198,27 @@ _agmsg_input_box_raw_boxed() {
     n=$((n + 1))
   done <<<"$screen"
 
-  local top=-1 bottom=-1 i=0
-  while [ "$i" -lt "$n" ]; do
+  local top=-1 bottom=-1 bottom_run=0 i run
+  i=$((n - 1))
+  while [ "$i" -ge 0 ]; do
     case "${plain[$i]}" in
-      "$rule"*) top="$bottom"; bottom="$i" ;;
+      "$rule"*) bottom="$i"; bottom_run="$(_agmsg_input_box_rule_run_len "${plain[$i]}")"; break ;;
     esac
-    i=$((i + 1))
+    i=$((i - 1))
+  done
+  [ "$bottom" -ge 0 ] || return 1
+
+  i=$((bottom - 1))
+  while [ "$i" -ge 0 ]; do
+    case "${plain[$i]}" in
+      "$rule"*)
+        run="$(_agmsg_input_box_rule_run_len "${plain[$i]}")"
+        if [ "$run" -eq "$bottom_run" ]; then top="$i"; break; fi
+        ;;
+    esac
+    i=$((i - 1))
   done
   [ "$top" -ge 0 ] || return 1
-  [ "$bottom" -gt "$top" ] || return 1
 
   local marker_seen=0
   i=$((top + 1))

@@ -41,6 +41,31 @@ RULE="────────────────────"
   [ "$status" -eq 1 ]
 }
 
+@test "antigravity confirmation screen on herdr: mismatched short (scrollback) / long (box-width) rules must NOT pair, even when a prior turn's own '> ...' line sits between them" {
+  # Reproduces the real herdr screen structure (measured live, 2026-11-13):
+  # a short ~60-char rule separates scrollback TURNS, a long ~120-char rule
+  # bounds the live input box -- both satisfy "starts with 20+ dashes", so
+  # the ORIGINAL version of this check (matching on "last two rule-looking
+  # lines", regardless of their own length) paired the short turn-separator
+  # above a prior "> Read the file ..." request with the unrelated long
+  # rule further down, and read that prior turn's own line as the live box.
+  local short long screen
+  short="$(printf '─%.0s' $(seq 1 60))"
+  long="$(printf '─%.0s' $(seq 1 120))"
+  screen="$(printf '%s\n> Read the file /tmp/x/harmless.txt and tell me its first word.\n\nFile access\n%s\n\nRead: /tmp/x/harmless.txt\n\nAllow access to this file?\n> 1. Yes, allow access\n  2. No, deny access\n' \
+    "$short" "$long")"
+  run agmsg_input_box_locate '>' yes "$screen"
+  [ "$status" -eq 1 ]
+}
+
+@test "antigravity idle box on herdr: two SAME-length long rules still locate correctly (the mismatched-rule fix does not break the ordinary case)" {
+  local long screen
+  long="$(printf '─%.0s' $(seq 1 120))"
+  screen="$(printf '%s\n> \n%s\n? for shortcuts\n' "$long" "$long")"
+  run agmsg_input_box_locate '>' yes "$screen"
+  [ "$status" -eq 0 ]
+}
+
 @test "antigravity idle prompt with styling intact still locates (style-stripped match, styled echo)" {
   local esc screen
   esc="$(printf '\033')"
