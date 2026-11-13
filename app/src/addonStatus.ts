@@ -75,11 +75,16 @@ export async function syncAgentStatus(
   send: (r: StatusReport) => Promise<unknown>,
   log: (line: string) => void,
 ): Promise<void> {
+  // A pane whose report failed is left alone for the rest of this run: a later report for it (the new team of a pane that
+  // moved) must not overwrite the row of the old team before that team has been told the pane closed.
+  const failed = new Set<string>();
   for (const r of diffAgentStatus(sent, now, at).reports) {
+    if (failed.has(r.pane)) continue;
     try {
       await send(r);
       accepted(sent, r);
     } catch (e) {
+      failed.add(r.pane);
       log(`addon agent status: could not report ${r.state} for ${r.name} (${String(e)}); it is sent again on the next change`);
     }
   }

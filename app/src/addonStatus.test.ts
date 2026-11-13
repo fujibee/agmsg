@@ -108,4 +108,24 @@ describe("syncAgentStatus", () => {
     await syncAgentStatus(sent, [row("a", "working")], 3, host(fail), () => {});
     expect(board.get("a")).toBe("working");
   });
+
+  it("keeps a failed close of the old team until it succeeds when the pane moved to another team", async () => {
+    const teamBoard = new Map<string, string>(); // "team/pane" -> state
+    const call = (fail: { n: number }) => async (r: StatusReport) => {
+      if (fail.n > 0) {
+        fail.n -= 1;
+        throw new Error("invoke failed");
+      }
+      if (r.state === "closed") teamBoard.delete(`${r.team}/${r.pane}`);
+      else teamBoard.set(`${r.team}/${r.pane}`, r.state);
+    };
+    const sent = new Map<string, AgentPaneRow>();
+    const fail = { n: 0 };
+    await syncAgentStatus(sent, [row("a", "idle", "t")], 1, call(fail), () => {});
+    fail.n = 1; // only the close in team t fails
+    await syncAgentStatus(sent, [row("a", "idle", "u")], 2, call(fail), () => {});
+    expect([...teamBoard.keys()]).toEqual(["t/a"]);
+    await syncAgentStatus(sent, [row("a", "working", "u")], 3, call(fail), () => {});
+    expect([...teamBoard]).toEqual([["u/a", "working"]]); // t's snapshot is empty now
+  });
 });
