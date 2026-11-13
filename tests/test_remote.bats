@@ -1118,24 +1118,39 @@ _capability_endpoint() {
   # how this TEST gives the launcher below a process group of its own,
   # portably, without depending on a setsid binary existing on this machine
   # (it does not on macOS).
+  #
+  # The launcher stays alive (it sleeps after `sync start` returns) and carries
+  # a nonce in its arguments, so the group that is signalled below is one this
+  # test can prove is its own. A group id taken from a process that has already
+  # exited can be reused by anybody on a shared machine.
+  local nonce="agmsg-1941-$$-$RANDOM"
   (
     set -m
-    bash "$SCRIPTS/remote.sh" sync start testteam &
+    bash -c 'bash "$1" sync start testteam; sleep 120' launcher "$SCRIPTS/remote.sh" "$nonce" &
     echo "$!" > "$TEST_SKILL_DIR/launcher.pid"
     wait
-  )
+  ) &
+  local control_pid=$!
+  wait_for_file "$TEST_SKILL_DIR/launcher.pid"
   local launcher_pid
   launcher_pid="$(cat "$TEST_SKILL_DIR/launcher.pid")"
   wait_for_file "$pidfile"
   local engine_pid
   engine_pid="$(cat "$pidfile")"
 
-  # The launcher process itself is already gone (sync start returns once the
-  # engine is backgrounded) -- its pgid is what matters: on unfixed code the
-  # engine still carries it (this is #1941's own repro), so sending the
-  # group this signal is exactly what Codex ending the command would do. On
-  # fixed code nothing is left in that group to catch it.
-  kill -TERM -- "-$launcher_pid" 2>/dev/null || true
+  # Signal the launcher's group only after checking, immediately before, that
+  # its leader is still this test's own child: its group id is its own pid, its
+  # parent is the control subshell above, and its arguments carry the nonce.
+  # On unfixed code the engine still carries that group (this is #1941's own
+  # repro), so sending it this signal is exactly what Codex ending the command
+  # would do. On fixed code nothing else is left in the group to catch it.
+  local leader
+  leader="$(ps -o pgid=,ppid=,command= -p "$launcher_pid" 2>/dev/null)"
+  [[ "$leader" == *"$nonce"* ]]
+  [ "$(awk '{print $1}' <<<"$leader")" = "$launcher_pid" ]
+  [ "$(awk '{print $2}' <<<"$leader")" = "$control_pid" ]
+  kill -TERM -- "-$launcher_pid"
+  wait "$control_pid" 2>/dev/null || true
   sleep 0.3
   kill -0 "$engine_pid" 2>/dev/null
   [ "$(cat "$pidfile")" = "$engine_pid" ]
