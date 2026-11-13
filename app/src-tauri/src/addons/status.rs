@@ -15,8 +15,6 @@ const STATES: [&str; 4] = ["idle", "working", "blocked", "unknown"];
 pub const CLOSED: &str = "closed";
 /// Longest member name or type the window may report; the window sends real names, never these.
 const MAX_TEXT_LEN: usize = 100;
-/// Most agent panes kept per team. A window never has this many; the cap bounds a misbehaving report.
-const MAX_ROWS_PER_TEAM: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
@@ -57,10 +55,8 @@ impl StatusBoard {
             return None;
         }
         let rows = self.teams.entry(team.to_string()).or_default();
-        match rows.get(pane) {
-            Some(row) if row.state == state => return None,
-            None if rows.len() >= MAX_ROWS_PER_TEAM => return None,
-            _ => {}
+        if rows.get(pane).is_some_and(|row| row.state == state) {
+            return None;
         }
         rows.insert(pane.to_string(), Row { name: name.to_string(), kind: kind.to_string(), state: state.to_string(), since: at });
         Some(event(name, state, at))
@@ -181,16 +177,6 @@ mod tests {
         assert!(b.report("t", "p", &"x".repeat(MAX_TEXT_LEN + 1), "claude-code", "idle", 1).is_none());
         assert!(b.report("t", "p", "white", "claude-code", "sleeping", 1).is_none(), "a state the app does not have");
         assert_eq!(b.snapshot("t"), json!({ "agents": [] }));
-    }
-
-    #[test]
-    fn the_rows_of_one_team_are_capped() {
-        let mut b = StatusBoard::default();
-        for i in 0..MAX_ROWS_PER_TEAM {
-            assert!(b.report("t", &format!("p{i}"), &format!("a{i}"), "codex", "idle", 1).is_some());
-        }
-        assert!(b.report("t", "extra", "extra", "codex", "idle", 1).is_none());
-        assert!(b.report("t", "p0", "a0", "codex", "working", 2).is_some(), "a pane already held can still change");
     }
 
     #[test]

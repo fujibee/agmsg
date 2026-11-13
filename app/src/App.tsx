@@ -27,7 +27,7 @@ import { createLatestOnly } from "./latestOnly";
 import { createNoticeFlusher } from "./noticeFlusher";
 import { heldCount, type Queues } from "./noticeQueue";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
-import { agentPaneRows, diffAgentStatus, type AgentPaneRow } from "./addonStatus";
+import { agentPaneRows, syncAgentStatus, type AgentPaneRow } from "./addonStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
   AgentModal,
@@ -987,7 +987,8 @@ export default function App() {
   // Tell the host when an agent pane appears, changes state or goes away, so it can tell the add-ons that read its team.
   // One call per actual change (the diff is empty otherwise); no polling and no timer.
   const [endedPanes, setEndedPanes] = useState<ReadonlySet<string>>(() => new Set());
-  const statusSentRef = useRef<ReadonlyMap<string, AgentPaneRow>>(new Map());
+  const statusSentRef = useRef<Map<string, AgentPaneRow>>(new Map());
+  const statusChainRef = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     const rows = agentPaneRows(
       windows.map((w) => ({ team: w.team, leafIds: leaves(w.root) })),
@@ -995,9 +996,10 @@ export default function App() {
       paneStatus,
       endedPanes,
     );
-    const { reports, next } = diffAgentStatus(statusSentRef.current, rows, Date.now());
-    statusSentRef.current = next;
-    for (const r of reports) void invoke("addon_agent_status", r).catch(() => {});
+    // One run at a time, each diffed against what the host has accepted, so a failed call is repeated, never dropped.
+    statusChainRef.current = statusChainRef.current.then(() =>
+      syncAgentStatus(statusSentRef.current, rows, Date.now(), (r) => invoke("addon_agent_status", r), appLog),
+    );
   }, [windows, panes, paneStatus, endedPanes]);
 
   // Cell size in CSS px. The ref is for snapping a divider drag to whole

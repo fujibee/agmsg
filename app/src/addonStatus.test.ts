@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentPaneRows, diffAgentStatus, type AgentPaneRow } from "./addonStatus";
+import { agentPaneRows, diffAgentStatus, syncAgentStatus, type AgentPaneRow, type StatusReport } from "./addonStatus";
 
 const panes = [
   { id: "white-1", label: "white", agentType: "claude-code" },
@@ -13,6 +13,8 @@ const windows = [
   { team: "t", leafIds: ["white-1", "black-2", "sh-3", "chess-4", "plain-5"] },
   { team: "u", leafIds: ["gray-6"] },
 ];
+
+const row = (paneId: string, state: AgentPaneRow["state"], team = "t", name = paneId): AgentPaneRow => ({ paneId, team, name, type: "codex", state });
 
 describe("agentPaneRows", () => {
   it("lists only agent panes, with their tab's team, and unknown until a state is reported", () => {
@@ -31,7 +33,6 @@ describe("agentPaneRows", () => {
 });
 
 describe("diffAgentStatus", () => {
-  const row = (paneId: string, state: AgentPaneRow["state"], team = "t", name = paneId): AgentPaneRow => ({ paneId, team, name, type: "codex", state });
 
   it("reports a new pane, and says nothing when nothing changed", () => {
     const first = diffAgentStatus(new Map(), [row("a", "idle")], 10);
@@ -61,5 +62,50 @@ describe("diffAgentStatus", () => {
 
   it("makes no report at all when there are no agent panes", () => {
     expect(diffAgentStatus(new Map(), [], 1).reports).toEqual([]);
+  });
+});
+
+describe("syncAgentStatus", () => {
+  // The host's board as the Rust side keeps it: a row per pane, a closed report removes it.
+  const board = new Map<string, string>();
+  const host = (failNext: { n: number }) => async (r: StatusReport) => {
+    if (failNext.n > 0) {
+      failNext.n -= 1;
+      throw new Error("invoke failed");
+    }
+    if (r.state === "closed") board.delete(r.pane);
+    else board.set(r.pane, r.state);
+  };
+
+  it("repeats a report that failed, so the board converges and no closed pane stays", async () => {
+    board.clear();
+    const sent = new Map<string, AgentPaneRow>();
+    const logs: string[] = [];
+    const fail = { n: 0 };
+    await syncAgentStatus(sent, [row("a", "idle"), row("b", "working")], 1, host(fail), (l) => logs.push(l));
+    expect([...board]).toEqual([["a", "idle"], ["b", "working"]]);
+
+    fail.n = 1; // the closing of "a" fails
+    await syncAgentStatus(sent, [row("b", "working")], 2, host(fail), (l) => logs.push(l));
+    expect(board.get("a")).toBe("idle"); // still on the host's board
+    expect(sent.has("a")).toBe(true); // and still unreported here
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("closed");
+
+    await syncAgentStatus(sent, [row("b", "idle")], 3, host(fail), (l) => logs.push(l)); // the next change resends it
+    expect([...board]).toEqual([["b", "idle"]]);
+    expect(sent.has("a")).toBe(false);
+  });
+
+  it("does not lose a state change whose call failed", async () => {
+    board.clear();
+    const sent = new Map<string, AgentPaneRow>();
+    const fail = { n: 0 };
+    await syncAgentStatus(sent, [row("a", "idle")], 1, host(fail), () => {});
+    fail.n = 1;
+    await syncAgentStatus(sent, [row("a", "working")], 2, host(fail), () => {});
+    expect(board.get("a")).toBe("idle");
+    await syncAgentStatus(sent, [row("a", "working")], 3, host(fail), () => {});
+    expect(board.get("a")).toBe("working");
   });
 });

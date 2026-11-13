@@ -56,3 +56,31 @@ export function diffAgentStatus(sent: ReadonlyMap<string, AgentPaneRow>, now: Ag
   }
   return { reports, next };
 }
+
+/** What `sent` holds after the host accepted `r`: a closed pane is dropped, any other report is the pane's row. */
+function accepted(sent: Map<string, AgentPaneRow>, r: StatusReport): void {
+  if (r.state === "closed") sent.delete(r.pane);
+  else sent.set(r.pane, { paneId: r.pane, team: r.team, name: r.name, type: r.kind, state: r.state });
+}
+
+/**
+ * Sends the reports for the agent panes open now, one after another, and records a report in `sent` only once the host
+ * has accepted it. A report that fails is logged and stays unrecorded, so the next call computes it again and sends it
+ * again: no ended pane stays on the host's board and no change is lost.
+ */
+export async function syncAgentStatus(
+  sent: Map<string, AgentPaneRow>,
+  now: AgentPaneRow[],
+  at: number,
+  send: (r: StatusReport) => Promise<unknown>,
+  log: (line: string) => void,
+): Promise<void> {
+  for (const r of diffAgentStatus(sent, now, at).reports) {
+    try {
+      await send(r);
+      accepted(sent, r);
+    } catch (e) {
+      log(`addon agent status: could not report ${r.state} for ${r.name} (${String(e)}); it is sent again on the next change`);
+    }
+  }
+}
