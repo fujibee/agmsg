@@ -24,6 +24,11 @@ export interface InitEvent {
    * The kit shows it as `app.canReportDelivery`.
    */
   notice?: boolean;
+  /**
+   * The app reports `status` events and answers `agents.status` (below). Absent with an older app: the add-on must then
+   * work without them. The kit shows it as `app.canReportStatus`.
+   */
+  status?: boolean;
 }
 
 /**
@@ -370,4 +375,39 @@ export type SpawnResult = AgentEntry;
 /** agents.list: every agent this add-on started in the granted team. */
 export interface AgentList {
   agents: AgentEntry[];
+}
+
+/** What the app can tell about an agent pane. `unknown` is the app's own word for "not recognized"; `closed` is only an event. */
+export type AgentState = "idle" | "working" | "blocked" | "unknown";
+
+/**
+ * An agent pane in the granted team changed state, or closed. Pushed only to panes that hold `messages:read` for that
+ * team, once per actual change of the state the app itself shows (the moment its own status changes), plus one with
+ * `state: "closed"` when the pane goes away (it closes, or its agent's process ends). A pane that opens is reported with
+ * its first state. Carries no pane id, command, folder or terminal text.
+ *  - name:  the agent's member name
+ *  - state: the new state, or `closed`
+ *  - at:    when it changed (ms since epoch)
+ */
+export interface StatusEvent {
+  name: string;
+  state: AgentState | "closed";
+  at: number;
+}
+
+/** One open agent pane, from `agents.status`. `since` is when it entered `state` (ms since epoch). */
+export interface AgentStatus {
+  name: string;
+  type: string;
+  state: AgentState;
+  since: number;
+}
+
+/**
+ * agents.status: the agent panes open now in the granted team, as the app last saw them. A member with no open pane is not
+ * listed (a shell, an add-on pane and the plain-shell fallback never are). Needs `messages:read` for the team and nothing
+ * more; refused as `not_granted` once it is revoked.
+ */
+export interface AgentStatusList {
+  agents: AgentStatus[];
 }
