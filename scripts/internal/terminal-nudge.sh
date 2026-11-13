@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# terminal-nudge.sh — agmsgd's own entry point for the terminal-poke channel
-# (a type with no native delivery channel, nudged through its pane instead;
-# see memory/design/2026-11-13-agmsgd-terminal-poke-channel.md). Resolves the
-# seat's placement exactly the way poke.sh does, checks the driver's own
-# readiness op first (never type over a seat that is mid-turn or blocked),
-# and only then calls poke.sh itself to do the actual typing -- this script
-# adds the "should we poke right now" gate, poke.sh keeps doing the poke.
+# terminal-nudge.sh — agmsgd's own entry point for the terminal-poke channel:
+# the delivery path for a type with no native channel of its own (nudged
+# through its pane instead). Resolves the seat's placement exactly the way
+# poke.sh does, checks the driver's own readiness op first, and only then
+# calls poke.sh itself to do the actual typing -- this script adds the
+# "should we poke right now" gate, poke.sh keeps doing the poke.
 #
 # Usage:
 #   terminal-nudge.sh <team> <agent> --body-file <path>
@@ -116,13 +115,17 @@ if ! agmsg_terminal_load "$TERMINAL" 2>/dev/null; then
   exit 0
 fi
 
-# Readiness gate: never type into a seat that is mid-turn or blocked. A
-# driver with no readiness op (declare -F finds none) adds no gate here --
-# tmux HAS one, but it answers "is the expected CLI in the foreground",
-# which is a different question (it does not know idle/working/blocked); the
-# real safety net for tmux is the input-box double-snapshot check poke.sh
-# already does via agmsg_safe_poke. Only herdr's readiness op gates on
-# idle|done|working vs blocked as this design means it to.
+# Readiness gate, when the loaded driver has one (same op and calling
+# convention self-write.sh's _sw_cell_session uses). herdr: idle|done|working
+# is ready, blocked (and a few other states) is not. tmux: whether the
+# type's expected CLI is the pane's foreground process is ready/not_ready --
+# a different question from herdr's (it says nothing about idle vs working
+# vs blocked), but either way a not_ready/unknown answer here means nothing
+# is typed. tmux's own "someone is actively typing right now" safety net is
+# the input-box double-snapshot check poke.sh already does via
+# agmsg_safe_poke, not this gate. A driver with no readiness op at all
+# (declare -F finds none) adds no gate here -- poke.sh's own checks are all
+# such a driver gets.
 CLI="$(agmsg_type_get "$TYPE" cli)"
 if declare -F terminal_team_input_ready >/dev/null 2>&1; then
   READY_RC=0

@@ -1,9 +1,7 @@
 // agmsgd fallback delivery for any seat type with no native channel
 // (antigravity, gemini, copilot, opencode, hermes, and any future type):
 // nudges the seat's own pane through scripts/internal/terminal-nudge.sh,
-// which reuses poke.sh unchanged (see
-// memory/design/2026-11-13-agmsgd-terminal-poke-channel.md). Mirrors
-// claude-code-queue.mjs's shape.
+// which reuses poke.sh unchanged. Mirrors claude-code-queue.mjs's shape.
 //
 // One process launch per seat per unread TRANSITION, never per poll cycle:
 // a seat with nothing new since its last notified cursor is never spawned.
