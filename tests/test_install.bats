@@ -517,7 +517,7 @@ _pid_gone_harness() {   # <kill message>
 
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
-  _restore_install
+  _restore_install_with_shim
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -x "$shim" ]
   grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
@@ -595,7 +595,7 @@ _pid_gone_harness() {   # <kill message>
 
 @test "install: Antigravity TUI launcher resolves one registered identity" {
   skip_unless_linux
-  _restore_install
+  _restore_install_with_shim
   local project="$FAKE_HOME/project"
   local fake_agy="$FAKE_HOME/bin/agy"
   mkdir -p "$project" "$(dirname "$fake_agy")"
