@@ -13,16 +13,33 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/down-notice.sh"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shquote.sh"
 
+# The daemon's own liveness judgement for a recorded executor (the one
+# `agmsg daemon status` gives), taken through the node it runs on. Prints alive,
+# dead, unknown, or unavailable when that node cannot be run from here.
+_agmsg_daemon_node_verdict() {   # <pid> <boot-id>
+  local node_path verdict
+  node_path="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null | LC_ALL=C tr -d '\r')" || node_path=""
+  if [ -z "$node_path" ] || [ ! -x "$node_path" ] || [ ! -f "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" ]; then
+    echo unavailable
+    return 0
+  fi
+  verdict="$("$node_path" "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" "$1" "$2" 2>/dev/null | LC_ALL=C tr -d '\r')" || verdict=""
+  case "$verdict" in alive|dead) echo "$verdict" ;; *) echo unknown ;; esac
+}
+
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
   local row state pid boot recorded_start current_boot process_start started_epoch boot_epoch start_unreliable=""
   [ -f "$_AGMSG_DAEMON_ROOT/run/install.db" ] || return 0
-  # One sqlite invocation, read-only, bounded when another writer is busy.
+  # One sqlite invocation, read-only, bounded when another writer is busy. A
+  # start refusal only explains the present state when it is newer than both the
+  # last end and this owner's own claim: a running owner has no last end, so
+  # without the claim bound every refusal ever recorded would qualify.
   row="$(sqlite3 -readonly -cmd '.timeout 100' -separator $'\t' "$_AGMSG_DAEMON_ROOT/run/install.db" "
     SELECT COALESCE(i.desired,'unset'), o.state, COALESCE(o.executor_pid,0),
       COALESCE(o.executor_boot_id,'-'), COALESCE(o.executor_started_at,'-'),
       replace(replace(replace(COALESCE(
-        (SELECT reason FROM daemon_start_attempts WHERE at > COALESCE(o.last_end_at,'') ORDER BY at DESC, rowid DESC LIMIT 1),
+        (SELECT reason FROM daemon_start_attempts WHERE at > MAX(COALESCE(o.last_end_at,''), COALESCE(o.started_at,'')) ORDER BY at DESC, rowid DESC LIMIT 1),
         o.last_end_reason, 'executor unavailable'),char(9),' '),char(10),' '),char(13),' ')
     FROM daemon_owner o CROSS JOIN daemon_intent i;
   " 2>/dev/null)" || return 0
@@ -66,15 +83,10 @@ agmsg_daemon_read_state() {
       # Git Bash has no boot id or process start time to read. Ask the daemon's
       # own judgement (the one `agmsg daemon status` gives) through the node it
       # runs on, instead of repeating that evidence in shell.
-      local node_path verdict
-      node_path="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null | LC_ALL=C tr -d '\r')" || node_path=""
-      if [ -z "$node_path" ] || [ ! -x "$node_path" ] || [ ! -f "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" ]; then
-        AGMSGD_HEALTH=unchecked
-        AGMSGD_REASON="the daemon's node cannot be run from here to check it"
-        return 0
-      fi
-      verdict="$("$node_path" "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" "$pid" "$boot" 2>/dev/null | LC_ALL=C tr -d '\r')" || verdict=""
-      case "$verdict" in
+      case "$(_agmsg_daemon_node_verdict "$pid" "$boot")" in
+        unavailable)
+          AGMSGD_HEALTH=unchecked
+          AGMSGD_REASON="the daemon's node cannot be run from here to check it" ;;
         alive) AGMSGD_HEALTH=ready; AGMSGD_REASON="" ;;
         dead) AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)" ;;
         *) AGMSGD_HEALTH=unchecked; AGMSGD_REASON="the executor's liveness cannot be read from here" ;;
@@ -83,6 +95,10 @@ agmsg_daemon_read_state() {
       ;;
     *) AGMSGD_REASON="platform liveness check unavailable"; return 0 ;;
   esac
+  # What this check could read, next to what the record says, so a verdict that
+  # disagrees with the daemon's own status can be traced to the value that differed.
+  local evidence
+  evidence="pid $pid; boot id recorded ${boot:-none}, read ${current_boot:-unreadable}; process started ${process_start:-${started_epoch:-unreadable}}, claimed ${recorded_start:-none}"
   # A macOS record written before the boot id became kern.bootsessionuuid
   # holds kern.boottime seconds, and a Linux record written before it became
   # boot_id holds btime seconds; the kernel shifts both when the clock is
@@ -110,7 +126,7 @@ agmsg_daemon_read_state() {
   # A boot id that can be read and differs from the record is proof, whatever
   # else cannot be read: that executor is from another boot.
   if [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
-    AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
+    AGMSGD_REASON="executor missing or boot/start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
   # Likewise a readable start time later than the owner's claim: a reused pid.
@@ -124,12 +140,22 @@ agmsg_daemon_read_state() {
     *) claim_epoch="" ;;
   esac
   if [ -z "$start_unreliable" ] && [ -n "$started_epoch" ] && [ -n "$claim_epoch" ] && [ "$started_epoch" -gt "$claim_epoch" ]; then
-    AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
+    AGMSGD_REASON="executor start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
   if [ -z "$current_boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
     case "$(_agmsg_pid_signal_presence "$pid")" in
-      gone) ;;
+      gone)
+        # Neither the boot id nor the start time could be read here and this
+        # shell's own signal says the pid is gone. Before saying the daemon is
+        # not running, take the judgement `agmsg daemon status` gives (one node,
+        # only on this path): a caller whose view of the pid space is cut down
+        # must not contradict it.
+        if [ "$(_agmsg_daemon_node_verdict "$pid" "$boot")" = alive ]; then
+          AGMSGD_HEALTH=ready
+          AGMSGD_REASON=""
+          return 0
+        fi ;;
       *)
         AGMSGD_HEALTH=unchecked
         AGMSGD_REASON="the boot id or process start time cannot be read from here"
@@ -137,11 +163,11 @@ agmsg_daemon_read_state() {
     esac
   fi
   if [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
-    AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
+    AGMSGD_REASON="executor missing or boot/start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
   if [ -z "$start_unreliable" ] && { [ -z "$claim_epoch" ] || [ "$started_epoch" -gt "$claim_epoch" ]; }; then
-    AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
+    AGMSGD_REASON="executor start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
   local process_state
