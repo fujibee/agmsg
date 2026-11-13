@@ -99,7 +99,7 @@ EOF
   _out_has "state=not_ready:agent_status_blocked"
   # Readiness was checked (agent get), but the agent was never poked.
   grep -q '^herdr \[agent\] \[get\]' "$ARGV_LOG"
-  ! grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG" || true)" -eq 0 ]
 }
 
 @test "terminal-nudge: an idle herdr agent is notified via poke.sh" {
@@ -110,10 +110,16 @@ EOF
   _out_has "state=notified"
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello there\]$' "$ARGV_LOG"
   # Never prints the body itself to stdout.
-  ! _out_has "hello there"
+  [ "$(printf '%s\n' "$output" | grep -c 'hello there' || true)" -eq 0 ]
 }
 
 @test "terminal-nudge: a live permission-confirmation screen refuses as box_not_found, never typed over (terminal-poke real-machine round, 2026-11-13)" {
+  # herdr's own agent_status stays idle during a confirmation screen (a
+  # separate real-machine finding, same date): readiness ALONE cannot catch
+  # this case, so this test deliberately answers idle here too -- it is the
+  # input-box check (agmsg_input_box_locate failing to find '>' between the
+  # confirmation screen's own last rule-line pair, which only wraps a "File
+  # access" header) that must be the thing refusing, not readiness.
   local rule
   rule="$(printf '─%.0s' $(seq 1 60))"
   cat > "$FAKEBIN/herdr" <<EOF
@@ -131,6 +137,14 @@ if [ "\$1" = agent ] && [ "\$2" = prompt ]; then
   echo "must never submit into a live confirmation screen" >&2
   exit 1
 fi
+if [ "\$1" = agent ] && [ "\$2" = send-keys ]; then
+  echo "must never clear a live confirmation screen's box (#1384 recovery must not engage on box_not_found)" >&2
+  exit 1
+fi
+if [ "\$1" = pane ] && [ "\$2" = send-text ]; then
+  echo "must never retype into a live confirmation screen" >&2
+  exit 1
+fi
 exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"
@@ -139,7 +153,9 @@ EOF
   run bash "$SCRIPTS/internal/terminal-nudge.sh" testteam agy1 --body-file <(printf 'agmsg: you have new messages.')
   [ "$status" -eq 0 ]
   _out_has "state=box_not_found"
-  ! grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG" || true)" -eq 0 ]
+  [ "$(grep -c '^herdr \[agent\] \[send-keys\]' "$ARGV_LOG" || true)" -eq 0 ]
+  [ "$(grep -c '^herdr \[pane\] \[send-text\]' "$ARGV_LOG" || true)" -eq 0 ]
 }
 
 @test "terminal-nudge: a working herdr agent is still ready (queues, does not wait for idle)" {
