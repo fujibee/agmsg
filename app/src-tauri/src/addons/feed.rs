@@ -60,7 +60,7 @@ impl InitTooLarge {
 /// Returns the JSON event and the ids it contains.
 pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMessage>) -> Result<(Value, HashSet<String>), InitTooLarge> {
     let members_json: Vec<Value> = members.iter().map(|(name, ty)| json!({ "name": name, "type": ty })).collect();
-    let envelope = json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": [], "notice": true });
+    let envelope = json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": [], "notice": true, "status": true });
     let mut bytes = serde_json::to_string(&envelope).map(|s| s.len()).unwrap_or(usize::MAX);
     // Members are never cut silently: if the envelope alone is over the cap the
     // pane fails closed with a named error the failure card can explain.
@@ -80,7 +80,7 @@ pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMe
     }
     kept.reverse();
     let ids: HashSet<String> = kept.iter().map(|m| m.id.clone()).collect();
-    Ok((json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": kept, "notice": true }), ids))
+    Ok((json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": kept, "notice": true, "status": true }), ids))
 }
 
 /// The app typed a turn notice into the pane of an agent this add-on started: the member, when (ms since epoch) and
@@ -169,6 +169,13 @@ mod tests {
 
     fn ids(v: &Value) -> Vec<String> {
         v["messages"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn init_says_the_app_reports_notices_and_status() {
+        let (init, _) = build_init("t", &[("a".into(), "codex".into())], vec![m("1", "t", "x")]).unwrap();
+        assert_eq!(init["notice"], true);
+        assert_eq!(init["status"], true, "an add-on learns from init that status events and agents.status exist");
     }
 
     #[test]
