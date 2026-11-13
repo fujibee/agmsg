@@ -199,7 +199,7 @@ const probeSocket = async (socketPath, timeoutMs = 2000) => (await queryDaemon(s
 export async function readSeatsFromDaemon(owner, alive, timeoutMs = 2000) {
   if (owner?.state !== "ready" || !owner.socket || alive === false) return { state: "daemon_not_running" };
   const response = await queryDaemon(owner.socket, "seats", timeoutMs);
-  if (response !== null) return { state: "ok", codex: response.codex, claude_code: response.claude_code };
+  if (response !== null) return { state: "ok", codex: response.codex, claude_code: response.claude_code, terminal_poke: response.terminal_poke };
   // No answer from a process that is known to be alive is "did not answer"; if
   // even its liveness cannot be confirmed (an old record without a boot id),
   // that is what is reported, not "stopped".
@@ -214,8 +214,9 @@ function formatSeatsNotice(seats) {
   if (seats.state === "daemon_not_running") return "Seats: agmsgd is not running; there is no seat state to show.\n";
   if (seats.state === "no_answer") return "Seats: agmsgd is running but did not answer in time; there is no seat state to show.\n";
   if (seats.state === "liveness_unconfirmed") return "Seats: agmsgd's process could not be confirmed to be running, so its seat state was not fetched.\n";
-  const unpolled = ["codex", "claude_code"].filter((key) => seats[key]?.polled === false);
-  if (unpolled.length === 2) return "Seats: agmsgd has not finished its first poll yet; seat state appears after it.\n";
+  const channelKeys = ["codex", "claude_code", "terminal_poke"];
+  const unpolled = channelKeys.filter((key) => seats[key]?.polled === false);
+  if (unpolled.length === channelKeys.length) return "Seats: agmsgd has not finished its first poll yet; seat state appears after it.\n";
   return "";
 }
 
@@ -244,6 +245,7 @@ async function main() {
     : { state: owner.state !== "ready" || alive === false ? "daemon_not_running" : alive === null ? "liveness_unconfirmed" : "no_answer" };
   const codexSeats = inventoryOf(seatState, "codex");
   const claudeCodeSeats = inventoryOf(seatState, "claude_code");
+  const terminalPokeSeats = inventoryOf(seatState, "terminal_poke");
 
   // The CLI suppresses Node's ExperimentalWarning category for managed SQLite
   // usage. Ordinary warnings and errors are still surfaced.
@@ -263,7 +265,7 @@ async function main() {
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSeatsNotice(seatState)}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, terminal_poke_seats: terminalPokeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSeatsNotice(seatState)}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatSkippedTeams("Terminal poke", terminalPokeSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatTerminalPokeSeats(terminalPokeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
 }
@@ -361,6 +363,67 @@ function formatClaudeSeats(inventory, all) {
     lines.push(`Claude Code ${label}: last daemon observation: ${seat.state}${seat.reason ? ` (${seat.reason})` : ""}`);
   }
   if (omitted) lines.push(`Claude Code seats: ${omitted} unavailable destination records hidden. View them with: agmsg daemon status --all`);
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+// Terminal-poke's own status vocabulary: notified / pending: <reason> /
+// no pane / cannot reach. A seat this channel never reached at all (no
+// native channel AND no pane to poke) is never hidden behind --all, same
+// as the class-D "cannot deliver" rule every other channel follows.
+function terminalPokeReasonText(reason) {
+  if (!reason) return "";
+  const notReady = /^not_ready:(.+)$/.exec(reason);
+  if (notReady) return `seat is not ready (${notReady[1]})`;
+  const unknown = /^unknown:(.+)$/.exec(reason);
+  if (unknown) return `readiness could not be checked (${unknown[1]})`;
+  if (reason === "input_in_progress") return "input in progress (retrying)";
+  if (reason === "input_box_not_found") return "input box not found (#1391)";
+  if (reason === "terminal_unreachable") return "terminal unreachable";
+  if (reason === "pane_cannot_receive") return "pane cannot receive";
+  return reason;
+}
+
+function formatTerminalPokeSeats(inventory, all) {
+  let omitted = 0;
+  const lines = [];
+  for (const seat of inventory?.seats ?? []) {
+    if (/^team_roster_/.test(seat.reason ?? "") && seat.seat.endsWith(',""]')) continue;
+    let label;
+    try { label = JSON.parse(seat.seat).join("/"); } catch { label = "unidentified seat"; }
+    const chosen = /^delivery_chosen_([a-z]+)$/.exec(seat.reason ?? "")?.[1];
+    if (chosen) {
+      lines.push(`Terminal poke ${label}: ${chosen === "monitor" ? "monitor (legacy)" : chosen} chosen; agmsgd does not deliver here`);
+      continue;
+    }
+    if (seat.reason === "poke_delivery_opted_out") {
+      if (!all) { omitted += 1; continue; }
+      lines.push(`Terminal poke ${label}: this type opted out of terminal poke (poke_delivery=no)`);
+      continue;
+    }
+    if (seat.state === "notified") {
+      lines.push(`Terminal poke ${label}: notified via terminal poke`);
+      continue;
+    }
+    if (seat.reason === "no_pane" || seat.reason === "seat_registration_missing") {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat (no native channel, no pane)`);
+      continue;
+    }
+    if (seat.reason === "pane_gone") {
+      lines.push(`Terminal poke ${label}: pane gone`);
+      continue;
+    }
+    if (seat.reason === "driver_unsupported") {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat (its terminal has no poke path)`);
+      continue;
+    }
+    if (seat.state === "pending") {
+      lines.push(`Terminal poke ${label}: pending: ${terminalPokeReasonText(seat.reason)}`);
+      continue;
+    }
+    if (!all && seat.state === "addressable") { omitted += 1; continue; }
+    lines.push(`Terminal poke ${label}: last daemon observation: ${seat.state}${seat.reason ? ` (${seat.reason})` : ""}`);
+  }
+  if (omitted) lines.push(`Terminal poke seats: ${omitted} unavailable destination records hidden. View them with: agmsg daemon status --all`);
   return lines.length ? `${lines.join("\n")}\n` : "";
 }
 

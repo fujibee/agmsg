@@ -25,6 +25,14 @@ import { pokeDeliveryEnabled, pokeNudgeText } from "./terminal-poke-types.mjs";
 import { runTerminalNudge } from "./terminal-poke-io.mjs";
 
 const NUDGE_TIMEOUT_MS = 15_000;
+// A pending notice (the pane was not ready, or the pane could not be
+// reached) is retried with backoff, not every poll cycle (review-criteria
+// §4: a per-cycle process launch for a seat whose state has not changed is
+// exactly the "timer-driven repeat" the gate flags). 30s, 60s, 120s, 240s,
+// capped at 5 minutes; a NEW unread transition for that seat resets it to
+// the first step immediately, same as the design's "未読が変わったら即時".
+const PENDING_BACKOFF_START_MS = 30_000;
+const PENDING_BACKOFF_MAX_MS = 5 * 60_000;
 
 export function seatKey(team, agent) {
   return JSON.stringify([team, agent]);
@@ -121,6 +129,10 @@ export function createTerminalPokeChannel({
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
+  // seat -> { nextAttemptAt, delayMs, upTo }. In-memory only: a daemon
+  // restart just retries once immediately, which is the safe direction (the
+  // alternative, skipping a retry that was already due, is not).
+  const pendingBackoff = new Map();
 
   const seatPoller = createSeatPoller({
     db, book, installRoot, channel: "terminal_poke", log, timeoutMs: seatDeadlineMs,
@@ -182,7 +194,16 @@ export function createTerminalPokeChannel({
     }
 
     if (!snapshot.unread || stopped) {
+      pendingBackoff.delete(key);
       saveSeat(book, { seat: key, state: "addressable", reason: "" });
+      return;
+    }
+
+    const backoff = pendingBackoff.get(key);
+    if (backoff && backoff.upTo === snapshot.upTo && now() < backoff.nextAttemptAt) {
+      // Same unread set as the last refused attempt, and not due yet: no
+      // process launch this cycle. The book keeps whatever reason the last
+      // real attempt set.
       return;
     }
 
@@ -210,6 +231,7 @@ export function createTerminalPokeChannel({
 
     if (result.kind !== "ok") {
       setQueueState(db, id, "expired");
+      bumpBackoff(key, snapshot.upTo);
       saveSeat(book, { seat: key, state: "pending", reason: `nudge_${result.kind}:${result.reason ?? "unknown"}` });
       return;
     }
@@ -217,10 +239,20 @@ export function createTerminalPokeChannel({
     const classified = classifyNudgeState(result.state);
     if (classified.confirm) {
       setQueueState(db, id, "confirmed");
+      pendingBackoff.delete(key);
     } else {
       setQueueState(db, id, "expired");
+      bumpBackoff(key, snapshot.upTo);
     }
     saveSeat(book, { seat: key, state: classified.seatState, reason: classified.reason });
+  }
+
+  function bumpBackoff(key, upTo) {
+    const previous = pendingBackoff.get(key);
+    const delayMs = previous && previous.upTo === upTo
+      ? Math.min(previous.delayMs * 2, PENDING_BACKOFF_MAX_MS)
+      : PENDING_BACKOFF_START_MS;
+    pendingBackoff.set(key, { nextAttemptAt: now() + delayMs, delayMs, upTo });
   }
 
   function recordSkippedTeams(skipped) {
@@ -258,6 +290,7 @@ export function createTerminalPokeChannel({
       for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       for (const key of book.keys()) {
         if (!registeredKeys.has(key)) {
+          pendingBackoff.delete(key);
           saveSeat(book, { seat: key, state: "unaddressable", reason: "seat_registration_missing" });
         }
       }

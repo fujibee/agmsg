@@ -93,8 +93,10 @@ test('a refusal (not_ready) leaves the notice pending and is retried on the next
   assert.equal(state.poked, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_terminal_poke_queue WHERE state='confirmed'").get().n, 0);
   assert.deepEqual(seatBrief(channel), { state: 'pending', reason: 'not_ready:agent_status_blocked' });
-  // Same unread, still pending: the next cycle must try again, not drop it.
+  // Same unread, still pending: once the backoff window has passed, the
+  // next cycle must try again, not drop it.
   state.nudgeState = 'notified';
+  state.hours = 0.02; // 72s, past the 30s first backoff step
   await channel.pollOnce();
   assert.equal(state.poked, 1);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_terminal_poke_queue WHERE state='confirmed'").get().n, 1);
@@ -140,6 +142,33 @@ test('a project that opted out of agmsgd delivery gets no nudge', async (t) => {
   assert.equal(optedOutState.nudgeCalls, 0, 'an opted-out project is never poked');
   assert.deepEqual(seatBrief(optedOutChannel), { state: 'unaddressable', reason: 'delivery_chosen_monitor' });
   await optedOutChannel.stop();
+  await channel.stop();
+});
+
+test('a pending notice backs off instead of being retried every poll cycle (review-criteria §4)', async (t) => {
+  const { channel, state } = channelFixture(t);
+  state.nudgeState = 'not_ready:agent_status_blocked';
+  await channel.pollOnce(); // attempt 1, at t=0
+  assert.equal(state.nudgeCalls, 1);
+  state.hours = 0.001; // a few seconds later -- well under the 30s first step
+  await channel.pollOnce();
+  await channel.pollOnce();
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 1, 'no process launch before the backoff is due');
+  await channel.stop();
+});
+
+test('backoff resets to the first step immediately when the unread set changes', async (t) => {
+  const { channel, state } = channelFixture(t);
+  state.nudgeState = 'not_ready:agent_status_blocked';
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 1);
+  state.hours = 0.001;
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 1, 'still backing off for the SAME unread set');
+  state.sequence = 2; // a new message arrived
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 2, 'a new unread transition retries immediately, backoff or not');
   await channel.stop();
 });
 

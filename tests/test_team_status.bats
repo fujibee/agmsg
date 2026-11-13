@@ -496,7 +496,7 @@ _herdr_observe_stub() {   # <entries-json>
   ps() {
     case "$*" in
       *tpgid*) printf '85225\n' ;;
-      *command*) printf 'claude -n team-alice\n' ;;
+      *pgid*command*) printf '85225 claude -n team-alice\n99 -bash\n' ;;
     esac
   }
   run terminal_team_input_ready '%3' claude
@@ -512,12 +512,30 @@ _herdr_observe_stub() {   # <entries-json>
   ps() {
     case "$*" in
       *tpgid*) printf '64066\n' ;;
-      *command*) printf '/bin/zsh\n' ;;
+      *pgid*command*) printf '64066 /bin/zsh\n' ;;
     esac
   }
   run terminal_team_input_ready '%3' claude
   [ "$status" -eq 1 ]
   [ "$output" = not_ready:foreground_cli_mismatch ]
+}
+
+@test "tmux readiness finds the expected CLI as a child in the group, not only the leader (spawn's own boot script owns the group)" {
+  install_team_fake_tmux
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  ps() {
+    case "$*" in
+      # The leader (same pid as the group, tpgid) is the boot script's own
+      # shell; the CLI is a child sharing the SAME pgid. A leader-only check
+      # would see "bash" and answer not_ready -- this must see "claude".
+      *tpgid*) printf '70001\n' ;;
+      *pgid*command*) printf '70001 /bin/bash /tmp/agmsg-spawn/boot-ABCDEF.command\n70001 claude -n team-alice\n99 -bash\n' ;;
+    esac
+  }
+  run terminal_team_input_ready '%3' claude
+  [ "$status" -eq 0 ]
+  [ "$output" = ready ]
 }
 
 @test "tmux observation reads the key and CLI title from a bare pane" {

@@ -37,20 +37,20 @@ function fixture(t) {
 // block this one while they run): answers hello, then status, or seats with
 // the rows given, or never answers seats when `mode` is "silent". The install
 // record is set to point at it, as a running daemon's would.
-async function fakeDaemon(t, { root, db }, { codex = [], mode = 'answer' } = {}) {
+async function fakeDaemon(t, { root, db }, { codex = [], terminalPoke = [], mode = 'answer' } = {}) {
   const socket = join(root, 'run/d.sock');
   const child = spawn(process.execPath, ['-e', `
     const net = require('node:net');
-    const [socket, mode, rows] = process.argv.slice(1);
+    const [socket, mode, rows, tpRows] = process.argv.slice(1);
     net.createServer((c) => { let b = '', n = 0;
       c.on('data', (d) => { b += d; let i;
         while ((i = b.indexOf('\\n')) >= 0) { const msg = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); n += 1;
           if (msg.type === 'hello') c.write(JSON.stringify({ type: 'hello_ok' }) + '\\n');
           else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true }) + '\\n'); c.end(); }
           else if (msg.type === 'seats' && mode !== 'silent') {
-            c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: JSON.parse(rows) }, claude_code: { polled: true, seats: [] } }) + '\\n'); c.end(); } } });
+            c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: JSON.parse(rows) }, claude_code: { polled: true, seats: [] }, terminal_poke: { polled: true, seats: JSON.parse(tpRows) } }) + '\\n'); c.end(); } } });
     }).listen(socket, () => console.log('up'));
-  `, socket, mode, JSON.stringify(codex)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  `, socket, mode, JSON.stringify(codex), JSON.stringify(terminalPoke)], { stdio: ['ignore', 'pipe', 'inherit'] });
   t.after(() => child.kill());
   await new Promise((resolve) => child.stdout.once('data', resolve));
   db.prepare("UPDATE daemon_owner SET state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
@@ -195,6 +195,23 @@ test('with agmsgd running but silent on seats, status says it did not answer', a
 test('multiple project registrations produce one seat line', t => {
   const { status } = fixture(t);
   assert.equal(status().split('\n').filter(line => line.startsWith('Codex test/alice:')).length, 1);
+});
+
+test('terminal-poke seats are shown with the channel\'s own status vocabulary', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    terminalPoke: [
+      { seat: JSON.stringify(['test', 'agy1']), state: 'notified', reason: '' },
+      { seat: JSON.stringify(['test', 'g1']), state: 'pending', reason: 'not_ready:agent_status_blocked' },
+      { seat: JSON.stringify(['test', 'g2']), state: 'unaddressable', reason: 'no_pane' },
+      { seat: JSON.stringify(['test', 'g3']), state: 'unaddressable', reason: 'pane_gone' },
+    ],
+  });
+  const text = await runAsync(f.root);
+  assert.match(text, /Terminal poke test\/agy1: notified via terminal poke/);
+  assert.match(text, /Terminal poke test\/g1: pending: seat is not ready \(agent_status_blocked\)/);
+  assert.match(text, /Terminal poke test\/g2: agmsgd cannot reach this seat \(no native channel, no pane\)/);
+  assert.match(text, /Terminal poke test\/g3: pane gone/);
 });
 
 test('a recorded Node that is gone does not turn a running agmsgd into "not running": the seat state is still fetched', async t => {
