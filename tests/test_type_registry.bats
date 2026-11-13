@@ -43,11 +43,11 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the thirteen built-ins" {
+@test "type-registry: known_types lists the fourteen built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "agmsg-app,antigravity,app-addon,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,app-addon,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,muse,opencode" ]
 }
 
 @test "type-registry: sourcing alone does not compute the renderable-types list (#631)" {
@@ -298,10 +298,10 @@ EOF
   done <<<"$renderable_types"
 }
 
-@test "type-registry: spawnable set is exactly eight of the thirteen built-ins (#277, #279)" {
+@test "type-registry: spawnable set is exactly eight of the fourteen built-ins (#277, #279)" {
   # hermes and devin deliberately stay out (#279): no known CLI mode starts them
-  # interactive with a seeded initial prompt. agmsg-app and app-addon also stay out: they
-  # are members of the desktop app (spawnable=no), not spawnable agent types.
+  # interactive with a seeded initial prompt. agmsg-app, app-addon and muse also stay
+  # out: they are not CLI agents (spawnable=no), not spawnable agent types.
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'
      while IFS= read -r t; do
@@ -310,6 +310,22 @@ EOF
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
   [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode" ]
+}
+
+@test "type-registry: muse is a data-only non-CLI member type" {
+  # muse (the Muse personal-agent runtime) is a member, not a CLI agent: like
+  # agmsg-app / app-addon it carries a manifest only -- nothing to detect,
+  # no command template to render, nothing to spawn, and no agmsg-side
+  # delivery (its runtime watches its own inbox).
+  g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
+  [ "$(g muse name)" = "muse" ]
+  [ "$(g muse spawnable)" = "no" ]
+  [ "$(g muse readiness_sentinel)" = "no" ]
+  [ "$(g muse delivery_modes)" = "off" ]
+  [ -z "$(g muse template)" ]
+  [ -z "$(g muse cli)" ]
+  [ -z "$(g muse detect)" ]
+  [ ! -e "$SCRIPTS/drivers/types/muse/template.md" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
@@ -564,6 +580,23 @@ YAML
      for k in spawnable readiness_sentinel delivery_modes; do printf '%s=%s\n' \$k \"\$(agmsg_type_get app-addon \$k)\"; done"
   [ "$status" -eq 0 ]
   [ "$output" = $'spawnable=no\nreadiness_sentinel=no\ndelivery_modes=off' ]
+}
+
+@test "join: type muse is accepted, and spawn.sh and doctor leave it alone" {
+  local proj="$TEST_SKILL_DIR/muse-proj"
+  mkdir -p "$proj"
+  run bash "$SCRIPTS/join.sh" team muse muse "$proj"
+  [ "$status" -eq 0 ]
+  grep -q '"type": *"muse"' "$TEST_SKILL_DIR/teams/team/config.json"
+
+  run bash "$SCRIPTS/spawn.sh" muse muse --project "$proj" --team team
+  [ "$status" -ne 0 ]
+  grep -Fq "not supported by spawn" <<<"$output"
+
+  run bash "$SCRIPTS/doctor.sh" --project "$proj" --type muse
+  [ "$status" -eq 0 ]
+  grep -Fq "no warnings." <<<"$output"
+  refute grep -Fq "delivery.sh status exited" <<<"$output"
 }
 
 @test "join: type app-addon is accepted, and spawn.sh and doctor leave it alone" {
