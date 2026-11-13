@@ -66,9 +66,10 @@
     "emptyState": "Noch keine Nachrichten."
   },
   "pane": {
-    "monitorTip": {
-      "native": "Selbstüberwachung — dieser Typ liefert agmsg-Nachrichten selbstständig",
-      "app": "App-Monitor — agmsg-Nachrichten werden in die Standardeingabe (stdin) dieses Bereichs eingespeist"
+    "deliveryTip": {
+      "agmsgd": "agmsgd liefert Nachrichten an diesen Agenten",
+      "native": "Diese CLI empfängt agmsg-Nachrichten selbstständig",
+      "app": "Die App tippt Nachrichtenhinweise in dieses Terminal"
     },
     "closeTitle": "Bereich schließen",
     "closeGlyph": "×",

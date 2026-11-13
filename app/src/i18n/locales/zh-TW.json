@@ -66,9 +66,10 @@
     "emptyState": "尚無訊息。"
   },
   "pane": {
-    "monitorTip": {
-      "native": "自行監控 — 此類型會自行傳遞 agmsg 訊息",
-      "app": "App 監控 — agmsg 訊息會注入至此面板的標準輸入（stdin）"
+    "deliveryTip": {
+      "agmsgd": "agmsgd 會將訊息傳遞給此代理",
+      "native": "此 CLI 會自行接收 agmsg 訊息",
+      "app": "App 會將訊息通知輸入至此終端機"
     },
     "closeTitle": "關閉面板",
     "closeGlyph": "×",
