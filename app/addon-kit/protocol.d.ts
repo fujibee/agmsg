@@ -383,8 +383,9 @@ export type AgentState = "idle" | "working" | "blocked" | "unknown";
 /**
  * An agent pane in the granted team changed state, or closed. Pushed only to panes that hold `messages:read` for that
  * team, once per actual change of the state the app itself shows (the moment its own status changes), plus one with
- * `state: "closed"` when the pane goes away (it closes, or its agent's process ends). A pane that opens is reported with
- * its first state. Carries no pane id, command, folder or terminal text.
+ * `state: "closed"` when the pane goes away (it closes, or its agent's process ends). A pane that opens is reported as
+ * `unknown` (the app's own state until it has read the pane), then as it changes. A pane whose agent process has ended is `closed`
+ * even if its tab stays open. Carries no pane id, command, folder or terminal text.
  *  - name:  the agent's member name
  *  - state: the new state, or `closed`
  *  - at:    when it changed (ms since epoch)

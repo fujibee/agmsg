@@ -32,7 +32,7 @@ const { agents } = await app.agents.status();  // [{ name, type, state, since }]
 ```
 
 - `state` is `idle`, `working`, `blocked` or `unknown`; `since` is when it entered that state (ms since epoch).
-- `onStatus({ name, state, at })` is called when an agent pane's state changes, and once with `state: "closed"` when the pane goes away. A pane that opens is reported with its first state.
+- `onStatus({ name, state, at })` is called when an agent pane's state changes, and once with `state: "closed"` when the pane goes away. A pane that opens is reported as `unknown` (the app's own state until it has read the pane), then as it changes. A pane whose agent process has ended is `closed`, even if its tab stays open.
 - `app.canReportStatus` is true once the app says it reports these. With an older app it stays false: show nothing, or use your own signal.
 - Only agent panes are listed, by member name. Shells, add-on panes and members with no open pane are not. No pane id, command, folder or terminal text is sent.
 - `agents.status()` is refused with `not_granted` once `messages:read` is revoked, and the events stop.
