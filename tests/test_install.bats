@@ -633,6 +633,7 @@ _pid_gone_harness() {   # <kill message>
   # Both installs select the same throwaway CODEX_HOME profile. The default
   # config is a sentinel that neither installation nor cleanup may edit.
   # Also cover the OpenCode/Hermes/Grok Build dedicated skill files.
+  _with_antigravity
   mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex" \
     "$FAKE_HOME/.config/opencode" "$FAKE_HOME/.hermes" "$FAKE_HOME/.grok"
   printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
@@ -776,6 +777,7 @@ _pid_gone_harness() {   # <kill message>
 }
 
 @test "uninstall --all --yes: removes every install and the shared shim (#1400)" {
+  _with_antigravity
   mkdir -p "$FAKE_HOME/.claude"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
