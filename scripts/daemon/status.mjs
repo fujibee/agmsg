@@ -129,7 +129,9 @@ export function readOwnerAndIntentReadOnly(installRoot) {
   try {
     const owner = db.prepare("SELECT * FROM daemon_owner").get();
     const intent = db.prepare("SELECT * FROM daemon_intent").get();
-    const lastAttempt = db.prepare("SELECT at, reason FROM daemon_start_attempts WHERE at > ? ORDER BY at DESC, rowid DESC LIMIT 1").get(owner.last_end_at ?? "");
+    // Newer than both the last end and this owner's own claim: a running owner has
+    // no last end, so the claim bounds the refusals that can explain this state.
+    const lastAttempt = db.prepare("SELECT at, reason FROM daemon_start_attempts WHERE at > MAX(?, ?) ORDER BY at DESC, rowid DESC LIMIT 1").get(owner.last_end_at ?? "", owner.started_at ?? "");
     let codexPending = [];
     try {
       codexPending = db.prepare("SELECT seat, created_at, children FROM beta_codex_queue WHERE state='pending' ORDER BY created_at, id").all();
