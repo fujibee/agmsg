@@ -1146,7 +1146,7 @@ _capability_endpoint() {
   # would do. On fixed code nothing else is left in the group to catch it.
   local leader
   leader="$(ps -o pgid=,ppid=,command= -p "$launcher_pid" 2>/dev/null)"
-  [[ "$leader" == *"$nonce"* ]]
+  grep -qF -- "$nonce" <<<"$leader"
   [ "$(awk '{print $1}' <<<"$leader")" = "$launcher_pid" ]
   [ "$(awk '{print $2}' <<<"$leader")" = "$control_pid" ]
   kill -TERM -- "-$launcher_pid"
