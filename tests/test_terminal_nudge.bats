@@ -36,11 +36,13 @@ _terminal_less_path() {
   printf '%s' "$dir"
 }
 
-# A placement record for (testteam, agy1), typed antigravity (no
-# input_prompt_marker -- the one existing type that reaches terminal-nudge.sh
-# through terminal-poke without poke.sh's own input-box check also firing,
-# so a fake herdr here only ever needs to answer `agent get` and
-# `agent prompt`, same as the design note's cost accounting assumes).
+# A placement record for (testteam, agy1), typed antigravity. antigravity's
+# own input_prompt_marker=> / input_prompt_boxed=yes (terminal-poke review,
+# 2026-11-13) means poke.sh's input-box check now also reads the pane via
+# `herdr pane read ... --format ansi` -- the fake herdr below answers that
+# with an idle, empty box (rule / ">" / rule) so these tests exercise the
+# readiness gate, not the box check (test_antigravity_input_box.bats covers
+# the box check itself, including the confirmation-screen refusal).
 _write_agy_record() {
   local ref="$1" path
   path="$(bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; agmsg_spawn_path testteam agy1')"
@@ -50,9 +52,15 @@ _write_agy_record() {
 
 _install_fake_herdr_status() {
   local status="$1" kind="${2:-agy}"
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  printf '%s\n>\n%s\n' '$rule' '$rule'
+  exit 0
+fi
 if [ "\$1" = agent ] && [ "\$2" = get ]; then
   printf '{"result":{"agent":{"agent":"$kind","agent_status":"$status"}}}\n'
   exit 0
@@ -103,6 +111,35 @@ EOF
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello there\]$' "$ARGV_LOG"
   # Never prints the body itself to stdout.
   ! _out_has "hello there"
+}
+
+@test "terminal-nudge: a live permission-confirmation screen refuses as box_not_found, never typed over (terminal-poke real-machine round, 2026-11-13)" {
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  printf '%s\nFile access\n%s\nRead: /tmp/x/harmless.txt\n\nAllow access to this file?\n> 1. Yes, allow access\n  2. No, deny access\n' '$rule' '$rule'
+  exit 0
+fi
+if [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n'
+  exit 0
+fi
+if [ "\$1" = agent ] && [ "\$2" = prompt ]; then
+  echo "must never submit into a live confirmation screen" >&2
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+  _write_agy_record "herdr:wC:p4"
+  run bash "$SCRIPTS/internal/terminal-nudge.sh" testteam agy1 --body-file <(printf 'agmsg: you have new messages.')
+  [ "$status" -eq 0 ]
+  _out_has "state=box_not_found"
+  ! grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 }
 
 @test "terminal-nudge: a working herdr agent is still ready (queues, does not wait for idle)" {
