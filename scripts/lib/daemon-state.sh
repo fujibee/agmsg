@@ -143,36 +143,39 @@ agmsg_daemon_read_state() {
     AGMSGD_REASON="executor start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
+  local node_alive=""
   if [ -z "$current_boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
     case "$(_agmsg_pid_signal_presence "$pid")" in
       gone)
-        # Neither the boot id nor the start time could be read here and this
+        # Either the boot id or the start time could not be read here, and this
         # shell's own signal says the pid is gone. Before saying the daemon is
         # not running, take the judgement `agmsg daemon status` gives (one node,
         # only on this path): a caller whose view of the pid space is cut down
-        # must not contradict it.
-        if [ "$(_agmsg_daemon_node_verdict "$pid" "$boot")" = alive ]; then
-          AGMSGD_HEALTH=ready
-          AGMSGD_REASON=""
-          return 0
-        fi ;;
+        # must not contradict it. Its answer is only that the pid is there in
+        # this boot, so the process-state check below still decides whether it
+        # is running, and a stopped or exited process it can read still is not.
+        [ "$(_agmsg_daemon_node_verdict "$pid" "$boot")" != alive ] || node_alive=1 ;;
       *)
         AGMSGD_HEALTH=unchecked
         AGMSGD_REASON="the boot id or process start time cannot be read from here"
         return 0 ;;
     esac
   fi
-  if [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
+  if [ -z "$node_alive" ] && { [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; }; then
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
-  if [ -z "$start_unreliable" ] && { [ -z "$claim_epoch" ] || [ "$started_epoch" -gt "$claim_epoch" ]; }; then
+  if [ -z "$node_alive" ] && [ -z "$start_unreliable" ] && { [ -z "$claim_epoch" ] || [ "$started_epoch" -gt "$claim_epoch" ]; }; then
     AGMSGD_REASON="executor start evidence does not match ($evidence; $AGMSGD_REASON)"
     return 0
   fi
   local process_state
   process_state="$(ps -p "$pid" -o stat= 2>/dev/null)" || process_state=""
-  case "$process_state" in ''|*Z*|*T*) AGMSGD_REASON="executor exited or suspended ($AGMSGD_REASON)"; return 0 ;; esac
+  case "$process_state" in
+    *Z*|*T*) AGMSGD_REASON="executor exited or suspended ($AGMSGD_REASON)"; return 0 ;;
+    # ps unreadable: the daemon's own judgement stands where it was taken.
+    '') [ -n "$node_alive" ] || { AGMSGD_REASON="executor exited or suspended ($AGMSGD_REASON)"; return 0; } ;;
+  esac
   AGMSGD_HEALTH=ready
   AGMSGD_REASON=""
 }

@@ -394,11 +394,26 @@ WRAPPER
   printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/getconf"
   chmod +x "$BATS_TEST_TMPDIR/denied/ps" "$BATS_TEST_TMPDIR/denied/getconf"
   sqlite3 "$db" "UPDATE meta SET node_path='$node'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
-  # The shell can read neither the start time nor a live signal answer, and its
-  # own signal says the pid is gone; the daemon's judgement says it is there.
+  # The boot id is readable but the start time is not, and the shell's own
+  # signal says the pid is gone; the daemon's judgement says it is there.
   run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
   [ "$status" -eq 0 ]
   [ "$output" = "ready|" ]
+  # The daemon's judgement is only that the pid exists in this boot: a process
+  # state the shell can still read (stopped, or exited and not reaped) decides.
+  local real_ps
+  real_ps="$(command -v ps)"
+  mkdir -p "$BATS_TEST_TMPDIR/statonly"
+  # ps answers the process-state query only, and reports the pid in
+  # FAKE_STOPPED as stopped; the start-time query stays unreadable.
+  printf '#!/bin/sh\ncase "$*" in\n  *stat=*) case "$*" in *" $FAKE_STOPPED "*) echo "T   "; exit 0 ;; esac; exec %s "$@" ;;\nesac\nexit 1\n' "$real_ps" > "$BATS_TEST_TMPDIR/statonly/ps"
+  cp "$BATS_TEST_TMPDIR/denied/getconf" "$BATS_TEST_TMPDIR/statonly/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/statonly/ps" "$BATS_TEST_TMPDIR/statonly/getconf"
+  run env PATH="$BATS_TEST_TMPDIR/statonly:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$output" = "ready|" ]
+  run env FAKE_STOPPED="$$" PATH="$BATS_TEST_TMPDIR/statonly:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  assert_contains 'stopped|executor exited or suspended'
+  sqlite3 "$db" "UPDATE daemon_owner SET executor_pid=$$;"
   # A pid that really is gone stays stopped, and the reason carries the pid.
   bash -c 'exit 0' &
   dead=$!
