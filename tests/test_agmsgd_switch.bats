@@ -351,6 +351,84 @@ WRAPPER
   [ "$output" = stopped ]
 }
 
+@test "a start refusal from before the current owner's claim is not offered as the reason" {
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  local db="$TEST_SKILL_DIR/run/install.db"
+  # A running owner has no last end. Refusals recorded for earlier generations
+  # must not stand in for a reason once this one is judged.
+  sqlite3 "$db" "INSERT INTO daemon_start_attempts VALUES ('2000-01-01T00:00:00.000Z','intent changed since the launcher read it',1);"
+  sqlite3 "$db" "UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), last_end_at=NULL;"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "ready|" ]
+  # The same record with a boot id that does not match: stopped, and the reason
+  # names the values that differed, not the old refusal.
+  sqlite3 "$db" "UPDATE daemon_owner SET executor_boot_id='previous-boot';"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$status" -eq 0 ]
+  assert_contains 'stopped|executor missing or boot/start evidence does not match'
+  assert_contains "pid $$; boot id recorded previous-boot, read $boot;"
+  assert_lacks 'intent changed since the launcher read it'
+  # A refusal recorded after the claim is still the reason.
+  sqlite3 "$db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01T00:00:00.000Z','a newer refusal',2);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  assert_contains 'a newer refusal'
+}
+
+@test "a shell that cannot see the daemon's process defers to the daemon's own liveness judgement" {
+  local boot node dead
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  node="$(command -v node)"
+  local db="$TEST_SKILL_DIR/run/install.db"
+  mkdir -p "$BATS_TEST_TMPDIR/denied"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/ps"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/denied/ps" "$BATS_TEST_TMPDIR/denied/getconf"
+  sqlite3 "$db" "UPDATE meta SET node_path='$node'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  # The boot id is readable but the start time is not, and the shell's own
+  # signal says the pid is gone; the daemon's judgement says it is there.
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "ready|" ]
+  # The daemon's judgement is only that the pid exists in this boot: a process
+  # state the shell can still read (stopped, or exited and not reaped) decides.
+  local real_ps
+  real_ps="$(command -v ps)"
+  mkdir -p "$BATS_TEST_TMPDIR/statonly"
+  # ps answers the process-state query only, and reports the pid in
+  # FAKE_STOPPED as stopped; the start-time query stays unreadable.
+  printf '#!/bin/sh\ncase "$*" in\n  *stat=*) case "$*" in *" $FAKE_STOPPED "*) echo "T   "; exit 0 ;; esac; exec %s "$@" ;;\nesac\nexit 1\n' "$real_ps" > "$BATS_TEST_TMPDIR/statonly/ps"
+  cp "$BATS_TEST_TMPDIR/denied/getconf" "$BATS_TEST_TMPDIR/statonly/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/statonly/ps" "$BATS_TEST_TMPDIR/statonly/getconf"
+  run env PATH="$BATS_TEST_TMPDIR/statonly:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$output" = "ready|" ]
+  run env FAKE_STOPPED="$$" PATH="$BATS_TEST_TMPDIR/statonly:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  assert_contains 'stopped|executor exited or suspended'
+  sqlite3 "$db" "UPDATE daemon_owner SET executor_pid=$$;"
+  # A pid that really is gone stays stopped, and the reason carries the pid.
+  bash -c 'exit 0' &
+  dead=$!
+  wait "$dead"
+  sqlite3 "$db" "UPDATE daemon_owner SET executor_pid=$dead;"
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
+  [ "$status" -eq 0 ]
+  assert_contains 'stopped|executor missing or boot/start evidence does not match'
+  assert_contains "pid $dead;"
+  # With no node to ask, the shell's own answer stands.
+  sqlite3 "$db" "UPDATE meta SET node_path=''; UPDATE daemon_owner SET executor_pid=$$;"
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
+}
+
 @test "Git Bash (no boot id or start time to read) takes the daemon's own liveness judgement" {
   local boot node
   case "$(uname -s)" in

@@ -35,6 +35,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ~/.agmsg by default) -- that is a separate override with its own existing
 # env var, outside what this change touches.
 INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
+# How the messages below name a location under INSTALL_HOME: "~" when it is the
+# default (the text these messages always had), the real path once
+# AGMSG_INSTALL_HOME relocates it.
+INSTALL_HOME_SHOWN="${AGMSG_INSTALL_HOME:-~}"
 AGENTS_DIR="$INSTALL_HOME/.agents"
 # agmsg-launcher.sh's own default (~/.local/bin, or ~/bin on native Windows)
 # is $HOME-rooted directly, not $AGENTS_DIR -- it already has its own
@@ -1257,7 +1261,7 @@ install_antigravity_skill() {
   agmsg_install_op_require || return 1
   agmsg_render_skill antigravity "$CMD_NAME" "$skill_dir/SKILL.md" 2>/dev/null || return 2
   agmsg_install_op_require || return 1
-  echo "  + installed /$CMD_NAME skill to ~/.gemini/config/skills/"
+  echo "  + installed /$CMD_NAME skill to $INSTALL_HOME_SHOWN/.gemini/config/skills/"
 }
 
 # Run one Antigravity setup step. These steps only matter to someone who uses
@@ -1298,7 +1302,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --recover <id>    Clear a verified incomplete operation, then continue this install"
       echo ""
       echo "After install, join a team per-project:"
-      echo "  ~/.agents/skills/<cmd>/scripts/join.sh <team> <name> <type> <project>"
+      echo "  $INSTALL_HOME_SHOWN/.agents/skills/<cmd>/scripts/join.sh <team> <name> <type> <project>"
       echo "  Or just run /<cmd> in Claude Code — it will prompt if not in a team."
       exit 0
       ;;
@@ -1357,7 +1361,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   if [ -n "$CMD_NAME" ]; then
     SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
     if [ ! -f "$SKILL_DIR/.agmsg" ]; then
-      echo "  ! Not installed: ~/.agents/skills/$CMD_NAME. Run ./install.sh --cmd $CMD_NAME first." >&2
+      echo "  ! Not installed: $INSTALL_HOME_SHOWN/.agents/skills/$CMD_NAME. Run ./install.sh --cmd $CMD_NAME first." >&2
       exit 1
     fi
   else
@@ -1546,7 +1550,7 @@ $_agmsg_running_team"
     mkdir -p "$GROK_SKILL_DIR" || exit 1
     agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
   fi
-  install_antigravity_step "skill (~/.gemini/config/skills/)" install_antigravity_skill
+  install_antigravity_step "skill ($INSTALL_HOME_SHOWN/.gemini/config/skills/)" install_antigravity_skill
   agmsg_install_op_phase_end || exit 1
   agmsg_install_op_phase_begin || exit 1
   agmsg_install_optional_copy "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml"
@@ -1624,7 +1628,7 @@ $_agmsg_running_team"
   # Extensionless entry points the *.sh glob does not reach.
   chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
   agmsg_install_optional_codex_chmod
-  install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
+  install_antigravity_step "TUI launcher shim ($INSTALL_HOME_SHOWN/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
   # cp's the new codex-shim-install.sh but does not re-run it, so a shim from an
   # older install keeps its stale baked exec path after the
@@ -1751,7 +1755,7 @@ agmsg_install_operation_begin || exit 1
 agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
 
 # --- Install skill ---
-echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."
+echo "  Installing to $INSTALL_HOME_SHOWN/.agents/skills/$CMD_NAME/ ..."
 agmsg_install_op_run_phase mkdir -p "$SKILL_DIR"/{scripts,types,db,agents} || exit 1
 
 # SKILL.md is composed from the shared root and the agent-specific overlay
@@ -1806,7 +1810,7 @@ chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
 # Extensionless entry points the *.sh glob does not reach.
 chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
 agmsg_install_optional_codex_chmod
-install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
+install_antigravity_step "TUI launcher shim ($INSTALL_HOME_SHOWN/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
 # older layout (no-op when no agmsg shim is present). See the --update block
 # above. NOT forced (#553): unlike --update, a fresh install here gives no
@@ -1860,7 +1864,7 @@ CC_COMMANDS_DIR="$INSTALL_HOME/.claude/commands"
 if [ -d "$INSTALL_HOME/.claude" ]; then
   mkdir -p "$CC_COMMANDS_DIR" || exit 1
   agmsg_render_skill claude-code "$CMD_NAME" "$CC_COMMANDS_DIR/$CMD_NAME.md" || exit 1
-  echo "  + installed /$CMD_NAME command to ~/.claude/commands/"
+  echo "  + installed /$CMD_NAME command to $INSTALL_HOME_SHOWN/.claude/commands/"
 fi
 
 # --- Install Copilot CLI skill ---
@@ -1871,7 +1875,7 @@ COPILOT_SKILL_DIR="$INSTALL_HOME/.copilot/skills/$CMD_NAME"
 if [ -d "$INSTALL_HOME/.copilot" ]; then
   mkdir -p "$COPILOT_SKILL_DIR" || exit 1
   agmsg_render_skill copilot "$CMD_NAME" "$COPILOT_SKILL_DIR/SKILL.md" || exit 1
-  echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
+  echo "  + installed /$CMD_NAME skill to $INSTALL_HOME_SHOWN/.copilot/skills/"
 fi
 
 # --- Install OpenCode skill ---
@@ -1883,7 +1887,7 @@ OPENCODE_SKILL_DIR="$INSTALL_HOME/.config/opencode/skills/$CMD_NAME"
 if [ -d "$INSTALL_HOME/.config/opencode" ]; then
   mkdir -p "$OPENCODE_SKILL_DIR" || exit 1
   agmsg_render_skill opencode "$CMD_NAME" "$OPENCODE_SKILL_DIR/SKILL.md" || exit 1
-  echo "  + installed \$$CMD_NAME skill to ~/.config/opencode/skills/"
+  echo "  + installed \$$CMD_NAME skill to $INSTALL_HOME_SHOWN/.config/opencode/skills/"
 fi
 
 # --- Install Hermes Agent skill ---
@@ -1895,7 +1899,7 @@ HERMES_SKILL_DIR="$INSTALL_HOME/.hermes/skills/$CMD_NAME"
 if [ -d "$INSTALL_HOME/.hermes" ]; then
   mkdir -p "$HERMES_SKILL_DIR" || exit 1
   agmsg_render_skill hermes "$CMD_NAME" "$HERMES_SKILL_DIR/SKILL.md" || exit 1
-  echo "  + installed /$CMD_NAME skill to ~/.hermes/skills/"
+  echo "  + installed /$CMD_NAME skill to $INSTALL_HOME_SHOWN/.hermes/skills/"
 fi
 
 # --- Install Grok Build skill ---
@@ -1910,14 +1914,14 @@ GROK_SKILL_DIR="$INSTALL_HOME/.grok/skills/$CMD_NAME"
 if [ -d "$INSTALL_HOME/.grok" ]; then
   mkdir -p "$GROK_SKILL_DIR" || exit 1
   agmsg_render_skill grok-build "$CMD_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
-  echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"
+  echo "  + installed /$CMD_NAME skill to $INSTALL_HOME_SHOWN/.grok/skills/"
 fi
 
 # --- Install Antigravity skill ---
 # Antigravity (agy) reads global skills from ~/.gemini/config/skills/<name>/.
 # Its CLI may create ~/.gemini/antigravity-cli before the config directory, so
 # either path is a sufficient installation signal.
-install_antigravity_step "skill (~/.gemini/config/skills/)" install_antigravity_skill
+install_antigravity_step "skill ($INSTALL_HOME_SHOWN/.gemini/config/skills/)" install_antigravity_skill
 agmsg_install_op_phase_end || exit 1
 
 # Codex sandbox writable_roots are configured by configure_codex_sandbox() at
@@ -1931,7 +1935,7 @@ configure_codex_sandbox || exit 1
 agmsg_install_op_phase_end || exit 1
 agmsg_install_operation_finish || exit 1
 echo ""
-echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
+echo "  ✓ Installed to $INSTALL_HOME_SHOWN/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
 echo "  Next steps:"
 agmsg_install_restart_guidance

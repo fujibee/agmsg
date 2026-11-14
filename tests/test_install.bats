@@ -3656,3 +3656,57 @@ CYG
   run bash -c "grep -vE '^[[:space:]]*#' '$REPO_ROOT/uninstall.sh' | grep -n '\\\$HOME' | grep -v 'INSTALL_HOME=\"\\\${AGMSG_INSTALL_HOME:-\\\$HOME}\"'"
   [ "$status" -eq 1 ]
 }
+
+@test "install.sh / uninstall.sh: with AGMSG_INSTALL_HOME the output names the real location, not ~ (#1951)" {
+  local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home" out="$BATS_TEST_TMPDIR/out"
+  mkdir -p "$dest/.claude" "$dest/.copilot" "$dest/.config/opencode" "$dest/.hermes" "$dest/.grok" "$dest/.gemini/config"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --cmd agmsg > "$out" 2>&1
+  grep -Fq "Installing to $dest/.agents/skills/agmsg/ ..." "$out"
+  grep -Fq "+ installed /agmsg command to $dest/.claude/commands/" "$out"
+  grep -Fq "+ installed /agmsg skill to $dest/.copilot/skills/" "$out"
+  grep -Fq "+ installed \$agmsg skill to $dest/.config/opencode/skills/" "$out"
+  grep -Fq "+ installed /agmsg skill to $dest/.hermes/skills/" "$out"
+  grep -Fq "+ installed /agmsg skill to $dest/.grok/skills/" "$out"
+  grep -Fq "+ installed /agmsg skill to $dest/.gemini/config/skills/" "$out"
+  grep -Fq "Installed to $dest/.agents/skills/agmsg/ (version" "$out"
+  run grep -F -e '~/.agents' -e '~/.claude' -e '~/.copilot' -e '~/.config' -e '~/.hermes' -e '~/.grok' -e '~/.gemini' "$out"
+  [ "$status" -eq 1 ]
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$dest/.agents/skills/agmsg/uninstall.sh" --yes > "$out" 2>&1
+  grep -Fq -e "- removed /agmsg from $dest/.claude/commands/" "$out"
+  grep -Fq -e "- removed /agmsg skill from $dest/.copilot/skills/" "$out"
+  grep -Fq -e "- removed /agmsg skill from $dest/.gemini/config/skills/" "$out"
+  run grep -F '~/.' "$out"
+  [ "$status" -eq 1 ]
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --help > "$out" 2>&1
+  grep -Fq "  $dest/.agents/skills/<cmd>/scripts/join.sh" "$out"
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/uninstall.sh" --help > "$out" 2>&1
+  grep -Fq "under $dest/.agents/skills" "$out"
+}
+
+@test "install.sh / uninstall.sh: AGMSG_INSTALL_HOME unset keeps the ~ wording byte for byte (#1951)" {
+  local out="$BATS_TEST_TMPDIR/out"
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.copilot" "$FAKE_HOME/.config/opencode" "$FAKE_HOME/.hermes" "$FAKE_HOME/.grok" "$FAKE_HOME/.gemini/config"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg > "$out" 2>&1
+  grep -Fxq "  Installing to ~/.agents/skills/agmsg/ ..." "$out"
+  grep -Fxq "  + installed /agmsg command to ~/.claude/commands/" "$out"
+  grep -Fxq "  + installed /agmsg skill to ~/.copilot/skills/" "$out"
+  grep -Fxq "  + installed \$agmsg skill to ~/.config/opencode/skills/" "$out"
+  grep -Fxq "  + installed /agmsg skill to ~/.hermes/skills/" "$out"
+  grep -Fxq "  + installed /agmsg skill to ~/.grok/skills/" "$out"
+  grep -Fxq "  + installed /agmsg skill to ~/.gemini/config/skills/" "$out"
+  grep -Fq "  ✓ Installed to ~/.agents/skills/agmsg/ (version" "$out"
+
+  HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes > "$out" 2>&1
+  grep -Fxq "  - removed /agmsg from ~/.claude/commands/" "$out"
+  grep -Fxq "  - removed /agmsg skill from ~/.copilot/skills/" "$out"
+  grep -Fxq "  - removed /agmsg skill from ~/.gemini/config/skills/" "$out"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --help > "$out" 2>&1
+  grep -Fxq "  ~/.agents/skills/<cmd>/scripts/join.sh <team> <name> <type> <project>" "$out"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --help > "$out" 2>&1
+  grep -Fxq "  --cmd <name>    Select one installation under ~/.agents/skills" "$out"
+}
