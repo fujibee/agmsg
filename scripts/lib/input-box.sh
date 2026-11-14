@@ -159,11 +159,35 @@ agmsg_input_box_locate() {
   fi
 }
 
+# The length (in repeats of the single rule character) of <plain>'s LEADING
+# run of "─", bounded so a corrupted/huge line cannot loop unboundedly.
+# Herdr mixes two different rule widths on one screen (measured live,
+# 2026-11-13): a short ~60-char rule separates scrollback TURNS, a long
+# ~120-char (full pane width) rule bounds the live input box. Both satisfy
+# "starts with 20+ dashes", so matching on "the rule prefix is present" alone
+# -- the ORIGINAL version of this function -- paired a short turn-separator
+# with an unrelated long rule further down and bracketed a PRIOR turn's own
+# "> ..." line as if it were the live box (antigravity's confirmation
+# screen, where that prior-turn line happened to start with the marker too).
+_agmsg_input_box_rule_run_len() {
+  local s="$1" unit="─" count=0
+  while [ "$count" -lt 300 ]; do
+    case "$s" in
+      "$unit"*) s="${s#"$unit"}"; count=$((count + 1)) ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$count"
+}
+
 # Boxed style (Claude Code): the input sits between the LAST two lines whose
-# STYLE-STRIPPED content starts with a run of 20+ "─" — the top rule also
-# carries the pane's own label after its run, the bottom rule is unbroken.
-# Echoes every line strictly between that pair, styling intact (the box's
-# full content, marker line included, multi-line drafts and all).
+# STYLE-STRIPPED content starts with a run of 20+ "─" AND whose leading runs
+# are the SAME length — the top rule may carry the pane's own label after
+# its run (Claude Code), the bottom rule is unbroken, but the RUN itself
+# must match: a top and bottom from two visually different rule widths (see
+# above) are never a real pair, however late in the screen either sits.
+# Echoes every line strictly between the matched pair, styling intact (the
+# box's full content, marker line included, multi-line drafts and all).
 _agmsg_input_box_raw_boxed() {
   local marker="$1" screen="$2" rule="$_AGMSG_INPUT_BOX_RULE20"
   local -a lines=() plain=()
@@ -174,15 +198,27 @@ _agmsg_input_box_raw_boxed() {
     n=$((n + 1))
   done <<<"$screen"
 
-  local top=-1 bottom=-1 i=0
-  while [ "$i" -lt "$n" ]; do
+  local top=-1 bottom=-1 bottom_run=0 i run
+  i=$((n - 1))
+  while [ "$i" -ge 0 ]; do
     case "${plain[$i]}" in
-      "$rule"*) top="$bottom"; bottom="$i" ;;
+      "$rule"*) bottom="$i"; bottom_run="$(_agmsg_input_box_rule_run_len "${plain[$i]}")"; break ;;
     esac
-    i=$((i + 1))
+    i=$((i - 1))
+  done
+  [ "$bottom" -ge 0 ] || return 1
+
+  i=$((bottom - 1))
+  while [ "$i" -ge 0 ]; do
+    case "${plain[$i]}" in
+      "$rule"*)
+        run="$(_agmsg_input_box_rule_run_len "${plain[$i]}")"
+        if [ "$run" -eq "$bottom_run" ]; then top="$i"; break; fi
+        ;;
+    esac
+    i=$((i - 1))
   done
   [ "$top" -ge 0 ] || return 1
-  [ "$bottom" -gt "$top" ] || return 1
 
   local marker_seen=0
   i=$((top + 1))
@@ -319,13 +355,24 @@ _agmsg_input_box_raw_flat() {
   return 0
 }
 
-# agmsg_input_box_is_real_draft <marker> <ansi_region>
+# agmsg_input_box_is_real_draft <marker> <ansi_region> [placeholder_style]
 # 0 (true) if <ansi_region> — as returned by agmsg_input_box_locate, styling
 # intact — carries any VISIBLE character outside a dim (SGR faint, code 2)
 # span once <marker> and Codex's own decorative Braille animation are both
 # removed first. 1 (false) otherwise: blank, or everything visible is dim
 # (Claude Code's candidate text, Codex's own placeholder — both measured
 # dim, live, 2026-09-21/22).
+#
+# [placeholder_style], when given, is a second span treated exactly like
+# dim: the SGR parameter string a type's own idle-box placeholder is drawn
+# with, when that type does not use code 2 for it. Antigravity's idle box
+# ("> " + "Auto mode: edits & safe commands auto-approved …") draws its
+# placeholder text in `ESC[38;5;8m` (256-color index 8, a dark gray), not
+# SGR 2 -- measured live, 2026-11-13, after the plain two-code check above
+# read that placeholder as a real draft and refused every idle herdr seat.
+# type.conf's input_placeholder_style= names this per type; every other
+# type passes "" here and gets byte-identical behavior to before this
+# existed.
 #
 # <marker> is removed by SUBSTRING match, not prefix: measured live on
 # Codex, the marker glyph itself can sit after leading style codes (bold +
@@ -350,11 +397,21 @@ _agmsg_input_box_raw_flat() {
 # slicing, so this is immune to the same ambient-locale multibyte trap
 # _agmsg_strip_decorative_braille's own comment documents.
 agmsg_input_box_is_real_draft() {
-  local marker="$1" region="$2" tail nobraille sentinel
+  local marker="$1" region="$2" placeholder_style="${3:-}" tail nobraille sentinel
   tail="${region/"$marker"/}"
   nobraille="$(_agmsg_strip_decorative_braille "$tail")"
+  # The placeholder-style rule (when given) MUST run before the catch-all
+  # strip below, or that rule consumes the exact same escape first and
+  # there is nothing left for this one to match.
+  local placeholder_rule=()
+  case "$placeholder_style" in
+    '') ;;
+    *[!0-9\;]*) ;;   # not digits/semicolons only: not a usable SGR param list, ignore it rather than build a pattern from unexpected data
+    *) placeholder_rule=(-e "s/${_AGMSG_ESC}\[${placeholder_style}m/${_AGMSG_DIM_START}/g") ;;
+  esac
   sentinel="$(LC_ALL=C sed -E \
     -e "s/${_AGMSG_ESC}\[2m/${_AGMSG_DIM_START}/g" \
+    "${placeholder_rule[@]}" \
     -e "s/${_AGMSG_ESC}\[(0|22)?m/${_AGMSG_DIM_END}/g" \
     -e "s/${_AGMSG_ESC}\[[0-9;]*m//g" \
     -e "s/${_AGMSG_NBSP}/ /g" \

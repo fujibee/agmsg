@@ -52,7 +52,7 @@ _AGMSG_SAFE_POKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # two-snapshot change check (narrower: won't catch a STALLED real draft),
 # never a regression from what shipped before this existed.
 _agmsg_safe_poke_read_box() {
-  local id="$1" marker="$2" boxed="$3" styled="$4"
+  local id="$1" marker="$2" boxed="$3" styled="$4" placeholder_style="${5:-}"
   local screen="" peek_rc=0 region="" region_rc=0
   if [ "$styled" -eq 1 ]; then
     screen="$(terminal_peek_styled "$id")" || peek_rc=$?
@@ -79,7 +79,7 @@ _agmsg_safe_poke_read_box() {
   # function can set RC=14 with a region actually located are both right
   # here -- a failed locate above never reaches this line.
   _AGMSG_SAFE_POKE_IB_REGION="$region"
-  if [ "$styled" -eq 1 ] && agmsg_input_box_is_real_draft "$marker" "$region"; then
+  if [ "$styled" -eq 1 ] && agmsg_input_box_is_real_draft "$marker" "$region" "$placeholder_style"; then
     _AGMSG_SAFE_POKE_IB_RC=14
     return 0
   fi
@@ -124,7 +124,7 @@ _agmsg_safe_poke_read_box() {
 # gained-focus-mid-clear abort path, which trusted terminal_input_type's
 # restore without checking its own result at all.
 _agmsg_safe_poke_box_is_empty() {
-  local id="$1" marker="$2" boxed="$3" styled="$4"
+  local id="$1" marker="$2" boxed="$3" styled="$4" placeholder_style="${5:-}"
   local screen="" rc=0
   if [ "$styled" -eq 1 ]; then
     screen="$(terminal_peek_styled "$id")" || rc=$?
@@ -136,7 +136,7 @@ _agmsg_safe_poke_box_is_empty() {
   region="$(agmsg_input_box_locate "$marker" "$boxed" "$screen")" || region_rc=$?
   [ "$region_rc" -eq 0 ] || return 1
   [ "$styled" -eq 1 ] || return 0
-  agmsg_input_box_is_real_draft "$marker" "$region" && return 1
+  agmsg_input_box_is_real_draft "$marker" "$region" "$placeholder_style" && return 1
   return 0
 }
 
@@ -179,8 +179,8 @@ _agmsg_safe_poke_box_matches() {
 #   refused    the box did NOT read back empty (or could not be confirmed)
 #              -- NOTHING was typed; the pane is exactly as found.
 _agmsg_safe_poke_retype_if_empty() {
-  local id="$1" marker="$2" boxed="$3" styled="$4" draft="$5" expect_region="$6"
-  if ! _agmsg_safe_poke_box_is_empty "$id" "$marker" "$boxed" "$styled"; then
+  local id="$1" marker="$2" boxed="$3" styled="$4" draft="$5" expect_region="$6" placeholder_style="${7:-}"
+  if ! _agmsg_safe_poke_box_is_empty "$id" "$marker" "$boxed" "$styled" "$placeholder_style"; then
     echo refused
     return 0
   fi
@@ -204,16 +204,16 @@ _agmsg_safe_poke_retype_if_empty() {
 # _AGMSG_SAFE_POKE_IB_REGION, exactly as _agmsg_safe_poke_read_box already
 # documents.
 _agmsg_safe_poke_screen_check() {
-  local id="$1" marker="$2" boxed="$3" styled="$4" settle_seconds="$5"
+  local id="$1" marker="$2" boxed="$3" styled="$4" settle_seconds="$5" placeholder_style="${6:-}"
   local ib_rc=0
   _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
-  _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
+  _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled" "$placeholder_style"
   ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
   [ "$ib_rc" -eq 0 ] || return 0
   local snap1="$_AGMSG_SAFE_POKE_IB_SNAPSHOT"
   sleep "$settle_seconds"
   _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
-  _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
+  _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled" "$placeholder_style"
   ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
   if [ "$ib_rc" -ne 0 ]; then
     return 0
@@ -267,7 +267,7 @@ _agmsg_safe_poke_draft_read() {
 }
 
 _agmsg_safe_poke_recover() {
-  local id="$1" text="$2" team="$3" name="$4" marker="$5" boxed="$6" styled="$7" region="$8"
+  local id="$1" text="$2" team="$3" name="$4" marker="$5" boxed="$6" styled="$7" region="$8" placeholder_style="${9:-}"
   local draft
   draft="$(agmsg_input_box_draft_text "$marker" "$boxed" "$region")"
 
@@ -299,7 +299,7 @@ _agmsg_safe_poke_recover() {
   focus2="$(terminal_pane_focused "$id" 2>/dev/null)" || focus2=""
   if [ "$focus2" != no ]; then
     local retyped
-    retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region")"
+    retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region" "$placeholder_style")"
     case "$retyped" in
       matched)
         rm -f "$draft_file"
@@ -319,7 +319,7 @@ _agmsg_safe_poke_recover() {
   # (review): a draft longer than the fixed key-repeat margin, or a key
   # that did not land, both leave content here that must be caught before
   # the poke's own text is typed on top of it.
-  if ! _agmsg_safe_poke_box_is_empty "$id" "$marker" "$boxed" "$styled"; then
+  if ! _agmsg_safe_poke_box_is_empty "$id" "$marker" "$boxed" "$styled" "$placeholder_style"; then
     echo "poke: pane '$id' did not read back empty after clearing its input box -- not typing over it; the draft is saved at $draft_file" >&2
     return 12
   fi
@@ -331,7 +331,7 @@ _agmsg_safe_poke_recover() {
     # same discipline as every retype in this file -- only if the box is
     # confirmed empty first.
     local retyped
-    retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region")"
+    retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region" "$placeholder_style")"
     case "$retyped" in
       matched) echo "poke: could not deliver to pane '$id' past its draft -- restored the draft; a saved copy also remains at $draft_file" >&2 ;;
       mismatch) echo "poke: could not deliver to pane '$id' past its draft, and restoring it could not be confirmed -- the draft is saved at $draft_file" >&2 ;;
@@ -345,7 +345,7 @@ _agmsg_safe_poke_recover() {
   # either read might carry, against the ORIGINAL region this function was
   # handed -- not a fresh classification, a byte-for-byte content check.
   local retyped
-  retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region")"
+  retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region" "$placeholder_style")"
   case "$retyped" in
     matched) rm -f "$draft_file" ;;
     mismatch) echo "poke: delivered to pane '$id', but its retyped draft does not match what was there before -- the original is saved at $draft_file" >&2 ;;
@@ -356,7 +356,13 @@ _agmsg_safe_poke_recover() {
 
 # agmsg_safe_poke <id> <text> <input_marker> <input_boxed> <team> <name>
 #                 [--retries N] [--retry-delay SECONDS]
-#                 [--backoff fixed|exponential]
+#                 [--backoff fixed|exponential] [--placeholder-style SGR]
+#
+# --placeholder-style, when given, is the CALLER's own agmsg_type_get
+# lookup (input_placeholder_style) for a type whose idle box draws its own
+# placeholder text in an SGR span other than the plain dim (code 2) every
+# other type uses -- threaded straight to agmsg_input_box_is_real_draft.
+# Omitted (empty), every call behaves exactly as before this existed.
 #
 # Types <text> into pane <id> and submits it via terminal_poke, after the
 # input-box safety check above (#1321/#1322: two snapshots ~1s apart, a
@@ -387,12 +393,13 @@ _agmsg_safe_poke_recover() {
 agmsg_safe_poke() {
   local id="$1" text="$2" marker="$3" boxed="$4" team="$5" name="$6"
   shift 6
-  local retries=0 retry_delay=2 backoff=exponential
+  local retries=0 retry_delay=2 backoff=exponential placeholder_style=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --retries) retries="${2:-0}"; shift 2 ;;
       --retry-delay) retry_delay="${2:-2}"; shift 2 ;;
       --backoff) backoff="${2:-exponential}"; shift 2 ;;
+      --placeholder-style) placeholder_style="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -468,7 +475,7 @@ agmsg_safe_poke() {
         # orca has none of them today. rc=14 here just refuses, same as any
         # other driver with no focus signal at all.
       else
-        _agmsg_safe_poke_screen_check "$id" "$marker" "$boxed" "$styled" "$settle_seconds"
+        _agmsg_safe_poke_screen_check "$id" "$marker" "$boxed" "$styled" "$settle_seconds" "$placeholder_style"
         rc="$_AGMSG_SAFE_POKE_IB_RC"
         ib_region="$_AGMSG_SAFE_POKE_IB_REGION"
       fi
@@ -484,7 +491,7 @@ agmsg_safe_poke() {
         local focused1=""
         focused1="$(terminal_pane_focused "$id" 2>/dev/null)" || focused1=""
         if [ "$focused1" = no ]; then
-          _agmsg_safe_poke_recover "$id" "$text" "$team" "$name" "$marker" "$boxed" "$styled" "$ib_region"
+          _agmsg_safe_poke_recover "$id" "$text" "$team" "$name" "$marker" "$boxed" "$styled" "$ib_region" "$placeholder_style"
           rc=$?
           [ "$rc" -eq 0 ] && return 0
         fi

@@ -176,11 +176,13 @@ agmsg_terminal_load "$TERMINAL" \
 # terminal_poke call, the same as before any of this existed.
 INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
+INPUT_PLACEHOLDER_STYLE="$(agmsg_type_get "$TYPE" input_placeholder_style)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
 RC=0
 agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
-  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
+  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" \
+  --placeholder-style "$INPUT_PLACEHOLDER_STYLE" || RC=$?
 
 if [ "$RC" -eq 14 ]; then
   echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
