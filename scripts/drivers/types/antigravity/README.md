@@ -10,6 +10,7 @@ be run where it is, not copied elsewhere. Put a two-line wrapper on your `PATH`
 instead (here `~/.local/bin`; use any directory that is on it):
 
 ```bash
+mkdir -p ~/.local/bin
 cat > ~/.local/bin/agy-tui <<'WRAPPER'
 #!/usr/bin/env bash
 exec bash "$HOME/.agents/skills/agmsg/scripts/drivers/types/antigravity/agy-tui.sh" "$@"
