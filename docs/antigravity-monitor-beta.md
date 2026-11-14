@@ -71,10 +71,11 @@ other way, is ordinary Antigravity with no agmsg delivery at all — the
 supervisor is `agy-tui`'s PTY wrapper, and nothing else runs it or injects
 into it.
 
-`agy-tui` is a small wrapper installed at `~/.agents/bin/agy-tui`. That
-directory has to be on `PATH` for the bare `agy-tui` command above to resolve
-(agmsg's installer adds it; confirm with `command -v agy-tui`, or invoke
-`~/.agents/bin/agy-tui` by its full path if it is not on `PATH`). With no
+`agy-tui` is a command you create yourself: agmsg's installer does not place it.
+It is a two-line wrapper around `agy-tui.sh`, and
+`scripts/drivers/types/antigravity/README.md` shows it. Put it in a directory
+on `PATH` for the bare `agy-tui` command above to resolve (confirm with
+`command -v agy-tui`, or invoke the wrapper by its full path). With no
 arguments it resolves `--project` from the current directory and resolves
 `--team` / `--name` from the single Antigravity identity registered for that
 project; it refuses (fail-closed) if zero or several are registered. Pass them

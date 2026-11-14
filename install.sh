@@ -1214,56 +1214,19 @@ install_antigravity_present() {
   [ -d "$INSTALL_HOME/.gemini/antigravity-cli" ] || [ -d "$INSTALL_HOME/.gemini/config" ]
 }
 
-install_antigravity_tui_shim() {
-  local source target target_dir owner expected_owner tmp quoted_source
-  source="$1"
-  # Nothing to launch without Antigravity: no shim, and no output.
-  install_antigravity_present || return 0
-  target="$AGENTS_DIR/bin/agy-tui"
-  target_dir="$(dirname "$target")"
-  owner="# agmsg-shim-owner: $source"
-  expected_owner=""
-  agmsg_install_op_require || return 1
-  mkdir -p "$target_dir" 2>/dev/null || return 2
-  agmsg_install_op_require || return 1
-  if [ -e "$target" ] || [ -L "$target" ]; then
-    expected_owner="$(grep '^# agmsg-shim-owner: ' "$target" 2>/dev/null || true)"
-    if ! grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null; then
-      return 0
-    fi
-    if [ "$expected_owner" != "$owner" ]; then
-      return 0
-    fi
-  fi
-  printf -v quoted_source '%q' "$source"
-  tmp="$(mktemp "$target_dir/.agy-tui.XXXXXX" 2>/dev/null)" || return 2
-  {
-    printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' 'set -euo pipefail'
-    printf '%s\n' '# agmsg Antigravity TUI launcher shim'
-    printf '%s\n' "$owner"
-    printf 'exec bash %s "$@"\n' "$quoted_source"
-  } 2>/dev/null > "$tmp" || { rm -f "$tmp"; return 2; }
-  chmod +x "$tmp" 2>/dev/null || { rm -f "$tmp"; return 2; }
-  agmsg_install_op_require || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$target" 2>/dev/null || { rm -f "$tmp"; return 2; }
-  agmsg_install_op_require || return 1
-}
-
-# An update on a machine without Antigravity takes back a shim an earlier
-# release placed there. Only this install's own shim goes, judged by its
+# agmsg no longer places ~/.agents/bin/agy-tui. An update takes back the shim an
+# earlier release placed there. Only this install's own shim goes, judged by its
 # content: a symlink, another file, or another install's shim stays.
 remove_antigravity_tui_shim() {
   local source target owner
   source="$1"
   target="$AGENTS_DIR/bin/agy-tui"
   owner="# agmsg-shim-owner: $source"
-  install_antigravity_present && return 0
   agmsg_install_op_require || return 1
   [ -f "$target" ] && [ ! -L "$target" ] || return 0
   grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null || return 0
   [ "$(grep '^# agmsg-shim-owner: ' "$target" 2>/dev/null || true)" = "$owner" ] || return 0
-  rm -f "$target" 2>/dev/null || return 2
+  rm -f "$target" 2>/dev/null || true
   agmsg_install_op_require || return 1
 }
 
@@ -1647,7 +1610,6 @@ $_agmsg_running_team"
   # Extensionless entry points the *.sh glob does not reach.
   chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
   agmsg_install_optional_codex_chmod
-  install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
   install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" remove_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
   # cp's the new codex-shim-install.sh but does not re-run it, so a shim from an
@@ -1830,7 +1792,6 @@ chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
 # Extensionless entry points the *.sh glob does not reach.
 chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
 agmsg_install_optional_codex_chmod
-install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
 # older layout (no-op when no agmsg shim is present). See the --update block
 # above. NOT forced (#553): unlike --update, a fresh install here gives no
