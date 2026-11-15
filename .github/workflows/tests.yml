@@ -212,6 +212,10 @@ jobs:
       sync_changed: ${{ steps.detect.outputs.sync_changed }}
       contracts_needed: ${{ steps.detect.outputs.contracts_needed }}
       reuse_run: ${{ steps.reuse.outputs.reuse_run }}
+      # Comma-separated tests/*.bats files this run does not need to run (empty:
+      # run everything). From the diff on a pull_request, from the pull
+      # request's own record on a push (see the reuse step).
+      bats_skip: ${{ steps.reuse.outputs.bats_skip || steps.detect.outputs.bats_skip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -356,6 +360,25 @@ jobs:
           echo "sync_changed=$sync_changed" >> "$GITHUB_OUTPUT"
           echo "contracts_needed=$contracts_needed" >> "$GITHUB_OUTPUT"
 
+          # Test files whose inputs the diff does not touch. The table of
+          # inputs is traced, not guessed (select-bats.mjs explains the
+          # rules), and every doubt runs the file: an error here, an unknown
+          # path, a CI-definition change all leave the list empty, which runs
+          # the whole suite. Pushes (main, integration) never get here, so
+          # they keep running everything.
+          bats_skip=""
+          if [ "$docs_only" != true ]; then
+            printf '%s\n' "$changed" > "$RUNNER_TEMP/changed.txt"
+            if sel="$(node .github/scripts/select-bats.mjs --changed "$RUNNER_TEMP/changed.txt")"; then
+              bats_skip="$(printf '%s\n' "$sel" | grep -v '^$' | paste -sd, - || true)"
+              echo "bats files skipped: $(printf '%s' "$bats_skip" | tr ',' '\n' | grep -c . || true)"
+              printf '%s\n' "$sel"
+            else
+              echo "::warning title=bats selection::could not decide which bats files to skip; running every file"
+            fi
+          fi
+          echo "bats_skip=$bats_skip" >> "$GITHUB_OUTPUT"
+
       # Whole-tree reuse, push only. A pull_request run tests GitHub's merge
       # ref: the PR head merged into the base as it was at that moment. When
       # the base has not moved by the time the PR is squashed in, the push
@@ -392,6 +415,58 @@ jobs:
             echo "Tree $tree has no passing pull_request run on record; running the suite."
           fi
           echo "reuse_run=$run" >> "$GITHUB_OUTPUT"
+
+          # A pull_request run that skipped files records its tree under
+          # partial-tree-<tree hash>, with the files it did not run. On the
+          # same tree a push then runs exactly those and nothing else: every
+          # other file already passed on this byte-identical tree. Any trouble
+          # looking, downloading or reading it leaves bats_skip empty, which
+          # runs everything.
+          bats_skip=""
+          if [ -z "$run" ]; then
+            pid=""
+            if resp="$(curl -fsS --max-time 20 \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts?name=partial-tree-$tree&per_page=20")"; then
+              pid="$(printf '%s' "$resp" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" \
+                '[.artifacts[]? | select(.expired == false and .workflow_run.head_repository_id == $repo)][0].id // empty' \
+                2>/dev/null || true)"
+            fi
+            case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+            if [ -n "$pid" ] \
+               && curl -fsSL --max-time 60 -H "Authorization: Bearer $GH_TOKEN" \
+                    "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$pid/zip" -o "$RUNNER_TEMP/partial.zip" \
+               && unzip -p "$RUNNER_TEMP/partial.zip" green-tree.txt > "$RUNNER_TEMP/partial.txt"; then
+              # The record must be this tree's own and well formed, and every
+              # file it names must exist here as tests/<name>.bats; otherwise
+              # it is not trusted and everything runs.
+              todo=""
+              m="$RUNNER_TEMP/partial.txt"
+              if [ "$(grep -c '^tree ' "$m" || true)" = 1 ] && [ "$(sed -n 's/^tree //p' "$m")" = "$tree" ] \
+                 && [ "$(grep -c '^run [0-9][0-9]*$' "$m" || true)" = 1 ] \
+                 && [ "$(grep -c '^sha [0-9a-f]\{40\}$' "$m" || true)" = 1 ] \
+                 && [ "$(grep -c '^skipped ' "$m" || true)" = 1 ]; then
+                todo="$(sed -n 's/^skipped //p' "$m")"
+                case "$todo" in
+                  ''|*[!A-Za-z0-9_./,-]*) todo="" ;;
+                esac
+                for f in $(printf '%s' "$todo" | tr ',' ' '); do
+                  case "$f" in
+                    tests/*/*|tests/../*) todo="" ;;
+                    tests/*.bats) [ -f "$f" ] || todo="" ;;
+                    *) todo="" ;;
+                  esac
+                done
+              fi
+              if [ -n "$todo" ]; then
+                bats_skip="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort \
+                  | grep -vxF -f <(printf '%s' "$todo" | tr ',' '\n') | paste -sd, - || true)"
+                echo "Tree $tree passed a pull_request run that skipped $(printf '%s' "$todo" | tr ',' '\n' | grep -c .) file(s); running only those."
+              fi
+            fi
+          fi
+          echo "bats_skip=$bats_skip" >> "$GITHUB_OUTPUT"
 
   bats-shard:
     # The docs-only skip below reports this check green without running the
@@ -462,6 +537,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         env:
           SHARD: ${{ matrix.shard }}
+          AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
         run: |
           set -euo pipefail
           if [ "$SHARD" -gt "$SHARD_TOTAL" ]; then
@@ -469,9 +545,16 @@ jobs:
             exit 1
           fi
           .github/scripts/shard-tests.sh "$SHARD" "$SHARD_TOTAL" > shard-files.txt
-          if [ ! -s shard-files.txt ]; then
+          # With nothing skipped every shard must have work: an empty one means
+          # the partition lost files. With files skipped, a small remainder can
+          # leave a shard empty, which is fine and said out loud.
+          if [ ! -s shard-files.txt ] && [ -z "$AGMSG_BATS_SKIP" ]; then
             echo "::error::shard $SHARD of $SHARD_TOTAL was assigned no test files"
             exit 1
+          fi
+          if [ -n "$AGMSG_BATS_SKIP" ]; then
+            skipped="$(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n' | grep -c .)"
+            echo "::notice title=bats files skipped::$skipped test file(s) skipped because nothing they read changed; this shard runs $(grep -c . shard-files.txt || true)"
           fi
 
       - name: Ensure sqlite3 is available (Linux)
@@ -546,6 +629,11 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           set +e
+          if [ ! -s shard-files.txt ]; then
+            echo "this shard has no test files left after the skips"
+            : > "$RUNNER_TEMP/bats-done"
+            exit 0
+          fi
           .github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"
           status=$?
           : > "$RUNNER_TEMP/bats-done"
@@ -670,22 +758,35 @@ jobs:
         # header -- so recomputing it here needs nothing any shard produced,
         # and is the same union on every run regardless of which shards (if
         # any) were actually re-executed.
+        env:
+          AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
         run: |
           set -euo pipefail
           expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
+          if [ -n "$AGMSG_BATS_SKIP" ]; then
+            # The files the run chose not to run are not expected to be covered.
+            expected="$(printf '%s\n' "$expected" | grep -vxF -f <(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n') || true)"
+          fi
           actual="$(
             for shard in $(seq 1 "$SHARD_TOTAL"); do
               .github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"
             done | LC_ALL=C sort
           )"
           if [ "$actual" != "$expected" ]; then
-            echo "::error::shards 1..$SHARD_TOTAL do not exactly cover tests/*.bats"
+            echo "::error::shards 1..$SHARD_TOTAL do not exactly cover tests/*.bats (less the skipped files)"
             exit 1
           fi
           # The other green, named the same way (#798): how many files the
           # shards ran, so a full pass and a skip never read alike.
-          count="$(printf '%s\n' "$expected" | grep -c .)"
-          printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
+          # grep -c exits 1 on a count of 0, which a diff that skips every file
+          # legitimately produces; that is a result, not a failure.
+          count="$(printf '%s\n' "$expected" | grep -c . || true)"
+          if [ -n "$AGMSG_BATS_SKIP" ]; then
+            skipped="$(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n' | grep -c . || true)"
+            printf '%s\n' "## bats: suite ran, $skipped file(s) skipped" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed. $skipped more file(s) were not run because nothing they read was changed by this diff (inputs traced per file, see .github/scripts/select-bats.mjs); a push of this exact tree runs those." >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Record a tree whose suite ran and passed, for the push that may follow
       # (the reuse step in `changes`). A pull_request run checks out the merge
@@ -695,16 +796,27 @@ jobs:
       - name: Record this tree as passed
         id: green
         if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        env:
+          AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
         run: |
           tree="$(git rev-parse 'HEAD^{tree}')"
           printf 'tree %s\nrun %s\nsha %s\n' "$tree" "$GITHUB_RUN_ID" "$GITHUB_SHA" > green-tree.txt
+          # A run that skipped files did not pass the whole suite: record it
+          # under another name, with the files left to run, so a push of this
+          # tree runs those and not everything (see the reuse step).
+          if [ -n "$AGMSG_BATS_SKIP" ]; then
+            printf 'skipped %s\n' "$AGMSG_BATS_SKIP" >> green-tree.txt
+            echo "name=partial-tree-$tree" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=green-tree-$tree" >> "$GITHUB_OUTPUT"
+          fi
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       - name: Upload the passed-tree record
         if: steps.green.outputs.tree != ''
         uses: actions/upload-artifact@v4
         with:
-          name: green-tree-${{ steps.green.outputs.tree }}
+          name: ${{ steps.green.outputs.name }}
           path: green-tree.txt
           retention-days: 14
 

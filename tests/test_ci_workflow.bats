@@ -236,7 +236,11 @@ GIT
   grep -Fq "      - id: reuse" "$workflow"
   [ "$(grep -A1 '^      - id: reuse$' "$workflow" | tail -1)" = "        if: github.event_name == 'push'" ]
   [ "$(grep -A2 '^      - name: Record this tree as passed$' "$workflow" | tail -1)" = "        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'" ]
-  grep -Fq 'name: green-tree-${{ steps.green.outputs.tree }}' "$workflow"
+  # The artifact is named green-tree-<tree>, or partial-tree-<tree> when the
+  # run skipped files; the step records which in its `name` output.
+  grep -Fq 'name: ${{ steps.green.outputs.name }}' "$workflow"
+  grep -Fq 'echo "name=green-tree-$tree"' "$workflow"
+  grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
   # Every heavy shard step skips on a reused tree, the same set the docs-only
   # skip gates; nothing heavy is left gated on docs_only alone.
   [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 10 ]
@@ -244,4 +248,15 @@ GIT
   grep -Fq "format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run)" "$workflow"
   grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
   grep -Fq '::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN' "$workflow"
+}
+
+@test "CI: a diff that skips every file is a result, and a partial-tree record is only trusted when it is this tree's own" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+  # grep -c exits 1 on a count of 0; under set -e that must not fail the verify step.
+  grep -Fq "count=\"\$(printf '%s\\n' \"\$expected\" | grep -c . || true)\"" "$workflow"
+  # The record must name this tree, carry one run id, one sha, one skipped line,
+  # and only tests/<name>.bats files that exist; anything else runs everything.
+  grep -Fq '"$(sed -n '"'"'s/^tree //p'"'"' "$m")" = "$tree"' "$workflow"
+  grep -Fq "'^sha [0-9a-f]\\{40\\}\$'" "$workflow"
+  grep -Fq 'tests/*.bats) [ -f "$f" ] || todo="" ;;' "$workflow"
 }

@@ -1,0 +1,53 @@
+name: bats-trace
+
+# Manual regeneration of the input map. Which repository files does each bats file touch?
+# Runs every test file under strace on Linux and uploads, per shard, the
+# distinct paths each file opened, executed, stat'ed or listed. The result
+# feeds .github/scripts/bats-inputs.tsv (see build-bats-inputs.mjs).
+# Run it from the Actions tab, download the six bats-inputs-N artifacts, then
+#   node .github/scripts/build-bats-inputs.mjs inputs-*.tsv > .github/scripts/bats-inputs.tsv
+# from the traced commit's root. Refresh when tests start reading files the
+# table does not know; a stale table only ever errs toward running more.
+on:
+  workflow_dispatch:
+
+env:
+  SHARD_TOTAL: 6
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace sqlite3
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+      - name: Trace this shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          .github/scripts/shard-tests.sh "$SHARD" "$SHARD_TOTAL" > shard-files.txt
+          out="$RUNNER_TEMP/inputs-$SHARD.tsv"
+          : > "$out"
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "trace: $f"
+            strace -f -qq -s 256 \
+              -e trace=openat,open,execve,stat,lstat,newfstatat,statx,access,faccessat,faccessat2,readlink,readlinkat,chdir \
+              -o "| awk -v T=$f -f $PWD/.github/scripts/trace-filter.awk >> $out" \
+              bats "$f" </dev/null >/dev/null 2>&1 || echo "trace: $f exited non-zero (ignored)"
+          done < shard-files.txt
+          wc -l "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bats-inputs-${{ matrix.shard }}
+          path: ${{ runner.temp }}/inputs-${{ matrix.shard }}.tsv

@@ -102,6 +102,30 @@ case "$total" in ''|*[!0-9]*) usage ;; esac
 files="$(find "$dir" -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
 [ -n "$files" ] || { echo "${0##*/}: no .bats files under $dir" >&2; exit 1; }
 
+# AGMSG_BATS_SKIP: comma-separated test files (by base name) a pull request
+# does not need to run, chosen by select-bats.mjs. They are taken out BEFORE the
+# partition is computed, so the files that remain are balanced across all the
+# shards instead of the skipped ones leaving holes in the plan. Coverage then
+# means "every file except the named ones lands in exactly one shard", which the
+# workflow's verify step recomputes with the same list. A shard may end up with
+# nothing to run; that is not an error here.
+if [ -n "${AGMSG_BATS_SKIP:-}" ]; then
+  skip_names=",$(printf '%s' "$AGMSG_BATS_SKIP" | tr '\n' ',' | sed 's#[^,]*/##g'),"
+  kept=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$skip_names" in
+      *",$(basename "$f"),"*) continue ;;
+    esac
+    kept="${kept}${f}
+"
+  done <<EOF
+$files
+EOF
+  files="${kept%$'\n'}"
+  [ -n "$files" ] || exit 0
+fi
+
 # The checked-in table of measured per-file macOS seconds this script weights
 # by. Overridable so this script's own tests can point at a fixture table
 # without touching the real one.
