@@ -425,7 +425,7 @@ agmsg_input_box_is_real_draft() {
   esac
   sentinel="$(LC_ALL=C sed -E \
     -e "s/${_AGMSG_ESC}\[2m/${_AGMSG_DIM_START}/g" \
-    "${placeholder_rule[@]}" \
+    "${placeholder_rule[@]+"${placeholder_rule[@]}"}" \
     -e "s/${_AGMSG_ESC}\[(0|22)?m/${_AGMSG_DIM_END}/g" \
     -e "s/${_AGMSG_ESC}\[[0-9;]*m//g" \
     -e "s/${_AGMSG_NBSP}/ /g" \
