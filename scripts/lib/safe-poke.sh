@@ -362,7 +362,11 @@ _agmsg_safe_poke_recover() {
 # lookup (input_placeholder_style) for a type whose idle box draws its own
 # placeholder text in an SGR span other than the plain dim (code 2) every
 # other type uses -- threaded straight to agmsg_input_box_is_real_draft.
-# Omitted (empty), every call behaves exactly as before this existed.
+# May list more than one space-separated SGR param list, since the SAME
+# placeholder can render through a different code depending on capture
+# path (e.g. herdr vs tmux's `capture-pane -e`); each is checked
+# independently. Omitted (empty), every call behaves exactly as before
+# this existed.
 #
 # Types <text> into pane <id> and submits it via terminal_poke, after the
 # input-box safety check above (#1321/#1322: two snapshots ~1s apart, a

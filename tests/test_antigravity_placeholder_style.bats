@@ -29,6 +29,11 @@ setup() {
     "$RULE" "$ESC" "$ESC" "$ESC" "$ESC" "$RULE")"
   REAL_DRAFT_SCREEN="$(printf '%s\n%s[38;5;12m>%s[0m hello, this is really being typed\n%s\n' \
     "$RULE" "$ESC" "$ESC" "$RULE")"
+  # tmux's own `capture-pane -e` re-encodes the SAME 256-color index 8
+  # through the aixterm bright-fg shorthand (ESC[90m) instead of the
+  # ESC[38;5;8m herdr gives back for it (real-machine round, 2026-11-15).
+  TMUX_IDLE_SCREEN="$(printf '%s\n%s[94m>%s[39m %s[90mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)%s[39m\n%s\n' \
+    "$RULE" "$ESC" "$ESC" "$ESC" "$ESC" "$RULE")"
 }
 teardown() { teardown_test_env; }
 
@@ -50,6 +55,22 @@ teardown() { teardown_test_env; }
 
 @test "a genuine real draft still refuses even with --placeholder-style set (the fix does not widen what counts as empty)" {
   terminal_peek_styled() { printf '%s\n' "$REAL_DRAFT_SCREEN"; return 0; }
+  sleep() { :; }
+  run agmsg_safe_poke pane-1 "agmsg: you have new messages." '>' yes testteam agy1 --placeholder-style '38;5;8'
+  [ "$status" -eq 14 ]
+  [ ! -s "$POKE_LOG" ]
+}
+
+@test "antigravity idle placeholder under tmux's capture-pane -e (ESC[90m), a SECOND space-separated style still matches (real-machine round, 2026-11-15)" {
+  terminal_peek_styled() { printf '%s\n' "$TMUX_IDLE_SCREEN"; return 0; }
+  sleep() { :; }
+  run agmsg_safe_poke pane-1 "agmsg: you have new messages." '>' yes testteam agy1 --placeholder-style '38;5;8 90'
+  [ "$status" -eq 0 ]
+  grep -q '^pane-1 agmsg: you have new messages\.$' "$POKE_LOG"
+}
+
+@test "antigravity idle placeholder under tmux's capture-pane -e (ESC[90m), WITHOUT the second style: misread as a real draft, refuses (the bug this fixes)" {
+  terminal_peek_styled() { printf '%s\n' "$TMUX_IDLE_SCREEN"; return 0; }
   sleep() { :; }
   run agmsg_safe_poke pane-1 "agmsg: you have new messages." '>' yes testteam agy1 --placeholder-style '38;5;8'
   [ "$status" -eq 14 ]

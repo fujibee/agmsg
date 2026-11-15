@@ -414,15 +414,21 @@ agmsg_input_box_is_real_draft() {
   local marker="$1" region="$2" placeholder_style="${3:-}" tail nobraille sentinel
   tail="${region/"$marker"/}"
   nobraille="$(_agmsg_strip_decorative_braille "$tail")"
-  # The placeholder-style rule (when given) MUST run before the catch-all
+  # The placeholder-style rule(s) (when given) MUST run before the catch-all
   # strip below, or that rule consumes the exact same escape first and
-  # there is nothing left for this one to match.
-  local placeholder_rule=()
-  case "$placeholder_style" in
-    '') ;;
-    *[!0-9\;]*) ;;   # not digits/semicolons only: not a usable SGR param list, ignore it rather than build a pattern from unexpected data
-    *) placeholder_rule=(-e "s/${_AGMSG_ESC}\[${placeholder_style}m/${_AGMSG_DIM_START}/g") ;;
-  esac
+  # there is nothing left for this one to match. A type may draw its own
+  # placeholder with more than one SGR code depending on terminal/capture
+  # path (e.g. herdr renders antigravity's placeholder as ESC[38;5;8m, but
+  # tmux's capture-pane -e renders the SAME 256-color index via the aixterm
+  # bright-fg shorthand, ESC[90m) -- so input_placeholder_style can list
+  # several space-separated SGR param lists, one -e rule per style.
+  local placeholder_rule=() style
+  for style in $placeholder_style; do
+    case "$style" in
+      *[!0-9\;]*) ;;   # not digits/semicolons only: not a usable SGR param list, ignore it rather than build a pattern from unexpected data
+      *) placeholder_rule+=(-e "s/${_AGMSG_ESC}\[${style}m/${_AGMSG_DIM_START}/g") ;;
+    esac
+  done
   sentinel="$(LC_ALL=C sed -E \
     -e "s/${_AGMSG_ESC}\[2m/${_AGMSG_DIM_START}/g" \
     "${placeholder_rule[@]+"${placeholder_rule[@]}"}" \
