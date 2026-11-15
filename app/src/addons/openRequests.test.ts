@@ -79,6 +79,14 @@ describe("the bar and messages", () => {
     expect(html).toContain("addons.request.dismiss");
     expect(html).not.toContain("addons.request.open");
   });
+  it("a host notice with a known code is said by its i18n key; an unknown code keeps Rust's words", () => {
+    const render = (noticeCode?: string) => renderToStaticMarkup(createElement(OpenRequestMessages, { t, error: null, actionError: null, notice: "Rust words.", noticeCode }));
+    expect(render("no_app_user")).toContain("addons.request.notice.no_app_user");
+    expect(render("no_app_user")).not.toContain("Rust words.");
+    expect(render("several_app_users")).toContain("addons.request.notice.several_app_users");
+    expect(render("something_new")).toContain("Rust words.");
+    expect(render(undefined)).toContain("Rust words.");
+  });
   it("a failed read, a host notice, truncation and a refused click are each said", () => {
     const html = renderToStaticMarkup(createElement(OpenRequestMessages, {
       t, error: "state_unreadable: broken", actionError: { code: "not_openable", message: "No." }, notice: "No app-user.", truncated: true,
