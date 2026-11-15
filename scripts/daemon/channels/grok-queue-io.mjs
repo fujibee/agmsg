@@ -14,11 +14,14 @@
 //      file was built around (NG2).
 //   3) request (an id-bearing request, NOT a notification) "session/prompt"
 //      {sessionId, prompt: [{type: "text", text}]} -- prompt is an ARRAY of
-//      content blocks, never a bare string.
+//      content blocks, never a bare string. `text` carries a short,
+//      per-attempt random nonce appended to the caller's own nudge text
+//      (see randomNonce/createGrokPromptTracker below for why).
 //   4) acceptance: a "_x.ai/queue/changed" notification whose params show
-//      our own prompt either queued (entries[].text === our text) or
-//      already running (runningText === our text, entries empty) -- killing
-//      the client right after does not cancel an already-accepted prompt.
+//      an entry/running prompt CONTAINING our own nonce, either queued
+//      (entries[].text) or already running (runningText, entries empty)
+//      -- killing the client right after does not cancel an already-
+//      accepted prompt.
 //
 // the review on #1979 (2026-11-15) found acceptance detection matched ANY
 // queue/changed showing our fixed nudge TEXT, from ANY session, at ANY
@@ -31,6 +34,7 @@
 // already seen (so a notification observed before arming -- stale state --
 // can never later be mistaken for this attempt's own acceptance).
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import net from "node:net";
 
 export const ACP_PROTOCOL_VERSION = 1;
@@ -96,16 +100,28 @@ export async function probeLeaderListening(socketPath, timeoutMs = 2000) {
   });
 }
 
-// createGrokPromptTracker(sessionId, text)
+// createGrokPromptTracker(sessionId, nonce)
+//
+// Matches by NONCE (a short, fresh-per-attempt random token expected to
+// appear somewhere in the entry/running text), not by the nudge's own
+// full text. Review on #1979, finding (2): the nudge's base text is the
+// same fixed string every attempt, and each attempt builds a brand-new
+// tracker (its own seen-set starts empty) -- so a queue/changed snapshot
+// left over from a DIFFERENT, earlier attempt for the same seat (one this
+// new tracker has never itself observed) could still be read as this
+// attempt's own fresh acceptance purely because the text matched. A
+// per-attempt nonce makes two different attempts' own expected matches
+// genuinely different strings, so leftover state from attempt N can never
+// satisfy attempt N+1's own tracker.
 //
 // observe(params) must be called for EVERY "_x.ai/queue/changed"
 // notification received over the whole lifetime of the client (before and
 // after arm()), so entries/running state that existed before THIS attempt
 // sent its own session/prompt are recorded as already-seen and can never
 // later read as a fresh acceptance. Returns true the first time, after
-// arm() was called, that a genuinely NEW entry or running-prompt matching
-// `text` appears under this exact `sessionId`.
-export function createGrokPromptTracker(sessionId, text) {
+// arm() was called, that a genuinely NEW entry or running-prompt whose
+// text CONTAINS this exact `nonce` appears under this exact `sessionId`.
+export function createGrokPromptTracker(sessionId, nonce) {
   const seenEntryIds = new Set();
   let seenRunningId;
   let armed = false;
@@ -117,12 +133,14 @@ export function createGrokPromptTracker(sessionId, text) {
       let accepted = false;
       if (armed) {
         for (const entry of entries) {
-          if (entry && typeof entry === "object" && !seenEntryIds.has(entry.id) && entry.text === text) {
+          if (entry && typeof entry === "object" && !seenEntryIds.has(entry.id)
+              && typeof entry.text === "string" && entry.text.includes(nonce)) {
             accepted = true;
             break;
           }
         }
-        if (!accepted && params.runningPromptId && params.runningPromptId !== seenRunningId && params.runningText === text) {
+        if (!accepted && params.runningPromptId && params.runningPromptId !== seenRunningId
+            && typeof params.runningText === "string" && params.runningText.includes(nonce)) {
           accepted = true;
         }
       }
@@ -135,6 +153,16 @@ export function createGrokPromptTracker(sessionId, text) {
       return accepted;
     },
   };
+}
+
+// A short, URL/text-safe random token appended to the nudge text so each
+// attempt's own expected match is a genuinely different string from every
+// other attempt's (see createGrokPromptTracker above). 4 random bytes (8
+// hex chars) -- short enough to read as an incidental tag on the nudge
+// line, long enough that two attempts colliding by chance is not a
+// realistic concern for a single seat's own retry cadence.
+function randomNonce() {
+  return randomBytes(4).toString("hex");
 }
 
 // Runs one grok-queue nudge: spawn the leader-socket stdio bridge, speak
@@ -198,7 +226,9 @@ export async function runGrokNudge({
     child.once("close", (code) => settle({ code }));
   });
 
-  const tracker = createGrokPromptTracker(sessionId, text);
+  const nonce = randomNonce();
+  const promptText = `${text} (agmsg ${nonce})`;
+  const tracker = createGrokPromptTracker(sessionId, nonce);
 
   let settle;
   const result = new Promise((resolveResult) => { settle = resolveResult; });
@@ -303,7 +333,7 @@ export async function runGrokNudge({
       // Its own response does not arrive until the turn ends, so this is
       // intentionally not awaited; acceptance is observed via
       // queue/changed above instead.
-      request("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).catch(() => {
+      request("session/prompt", { sessionId, prompt: [{ type: "text", text: promptText }] }).catch(() => {
         // A late RPC error after acceptance was already observed (or after
         // this attempt otherwise settled) is moot; before that, the error
         // path below still has the close/timeout handlers as a backstop.

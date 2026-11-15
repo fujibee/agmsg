@@ -107,3 +107,61 @@ teardown() { teardown_test_env; }
   [ "$output" = "removed" ]
   [ ! -f "$marker" ]
 }
+
+# review on #1979, finding (1): a failed scan (mktemp or awk, isolated so
+# every OTHER mktemp/awk call in enable/disable's own config-writing path
+# still works normally) must never read as "absent" or "not true" --
+# the real bug was disable() reading a failed scan as "the user changed
+# it", dropping the ownership marker and leaving use_leader = true
+# orphaned in the config. Overriding mktemp/awk as shell functions scoped
+# to one test only intercepts the SCAN's own call (matched by its
+# mktemp template's distinct name), never enable/disable's own writes.
+
+@test "enable: a scan whose own mktemp fails reports write_failed, writes nothing, creates no marker" {
+  # The scan's own mktemp/awk only run when the config FILE exists (an
+  # absent one short-circuits to "absent" before ever reaching them) --
+  # an existing file is needed to exercise the failure path at all.
+  printf '[other]\nfoo = 1\n' > "$CFG"
+  local before; before="$(cat "$CFG")"
+  mktemp() { case "$*" in *agmsg-grok-scan-awk*) return 1 ;; *) command mktemp "$@" ;; esac; }
+  run agmsg_grok_use_leader_enable "$SKILL_DIR" "$CFG"
+  [ "$status" -ne 0 ]
+  [ "$output" = "write_failed" ]
+  [ "$(cat "$CFG")" = "$before" ]
+  ! ls "$SKILL_DIR"/run/grok-config-owns-use-leader.* >/dev/null 2>&1
+}
+
+@test "enable: a scan whose own awk invocation fails reports write_failed, writes nothing, creates no marker" {
+  printf '[other]\nfoo = 1\n' > "$CFG"
+  local before; before="$(cat "$CFG")"
+  awk() { case "$*" in *agmsg-grok-scan-awk*) return 1 ;; *) command awk "$@" ;; esac; }
+  run agmsg_grok_use_leader_enable "$SKILL_DIR" "$CFG"
+  [ "$status" -ne 0 ]
+  [ "$output" = "write_failed" ]
+  [ "$(cat "$CFG")" = "$before" ]
+  ! ls "$SKILL_DIR"/run/grok-config-owns-use-leader.* >/dev/null 2>&1
+}
+
+@test "disable: a scan whose own mktemp fails reports write_failed, config and marker both untouched (the real bug: this used to be left_user_owned + marker dropped)" {
+  agmsg_grok_use_leader_enable "$SKILL_DIR" "$CFG" >/dev/null
+  local marker="$SKILL_DIR/run/grok-config-owns-use-leader.$(printf '%s' "$CFG" | agmsg_sha1)"
+  [ -f "$marker" ]
+  mktemp() { case "$*" in *agmsg-grok-scan-awk*) return 1 ;; *) command mktemp "$@" ;; esac; }
+  run agmsg_grok_use_leader_disable "$SKILL_DIR" "$CFG"
+  [ "$status" -ne 0 ]
+  [ "$output" = "write_failed" ]
+  [ -f "$marker" ]
+  grep -qx "use_leader = true" "$CFG"
+}
+
+@test "disable: a scan whose own awk invocation fails reports write_failed, config and marker both untouched" {
+  agmsg_grok_use_leader_enable "$SKILL_DIR" "$CFG" >/dev/null
+  local marker="$SKILL_DIR/run/grok-config-owns-use-leader.$(printf '%s' "$CFG" | agmsg_sha1)"
+  [ -f "$marker" ]
+  awk() { case "$*" in *agmsg-grok-scan-awk*) return 1 ;; *) command awk "$@" ;; esac; }
+  run agmsg_grok_use_leader_disable "$SKILL_DIR" "$CFG"
+  [ "$status" -ne 0 ]
+  [ "$output" = "write_failed" ]
+  [ -f "$marker" ]
+  grep -qx "use_leader = true" "$CFG"
+}

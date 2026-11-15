@@ -296,6 +296,32 @@ export function createGrokQueueChannel({
       return;
     }
 
+    // Re-checked immediately before the spawn, with nothing async between
+    // this and checkLeaderListening above other than the synchronous driver/
+    // store reads and createSendAttempt just above: grok 1.0.77 has no
+    // attach-only/no-autostart option for its ACP bridge (measured:
+    // `grok agent --help` / `grok agent stdio --help` offer only
+    // --leader/--no-leader/--leader-socket, and the leader socket itself is
+    // grok's own internal IPC, not ACP -- a raw JSON-RPC initialize sent to
+    // it directly gets no reply), so the bridge the probe above exists to
+    // guard stays necessary. KNOWN RESIDUAL RACE (real-machine review,
+    // finding 3, 2026-11-15): if this seat's own leader process dies in the
+    // narrow window between the probe and the spawn, the bridge may itself
+    // start a NEW leader at this exact socket path -- but that path only
+    // ever comes from THIS seat's own GROK_LEADER_SOCKET (never a guessed
+    // default, see grok-session-start.sh), so the outcome is exactly what
+    // that seat's own grok does on its own: measured live, a TUI whose
+    // leader was killed respawned an identical
+    // `grok agent leader --no-exit-on-disconnect --relay-on-demand` within
+    // about 2 seconds, and a TUI-spawned leader also outlives the TUI. No
+    // leader is ever started for a seat that is not itself running in
+    // leader mode, or at a path that seat did not itself choose.
+    if (!pidAlive(witnessResult.witness.pid)) {
+      setQueueState(db, id, "expired");
+      saveSeat(book, { seat: key, state: "unaddressable", reason: "process_gone" });
+      return;
+    }
+
     let result;
     try {
       result = await nudge({

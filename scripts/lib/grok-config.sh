@@ -63,16 +63,29 @@ _agmsg_grok_cli_header_present() {
 #
 # Prints "absent" (no [cli] table, or no use_leader key in it), "true",
 # "false", "other\t<raw>" (some other literal -- never touched, whatever it
-# is), or "unsupported\t<reason>" for a TOML shape this does not attempt to
+# is), "unsupported\t<reason>" for a TOML shape this does not attempt to
 # parse (see the file header): dotted_key, inline_table, quoted_table_header,
-# quoted_key. A caller sees "unsupported" and refuses to write, rather than
-# risk a second, conflicting use_leader next to one already there under a
-# spelling this does not recognize.
+# quoted_key -- a caller sees "unsupported" and refuses to write, rather
+# than risk a second, conflicting use_leader next to one already there
+# under a spelling this does not recognize -- or "scan_failed" (rc 1) when
+# the read itself could not be completed (a temp file could not be
+# created, or awk itself failed). Both callers treat "scan_failed" as its
+# own distinct outcome, never as "absent": an unreadable config is not
+# evidence that use_leader is missing from it.
 agmsg_grok_use_leader_scan() {
   local path="$1"
   [ -f "$path" ] || { printf 'absent\n'; return 0; }
   local awk_script
-  awk_script="$(mktemp "${TMPDIR:-/tmp}/agmsg-grok-scan-awk.XXXXXX")" || { printf 'absent\n'; return 0; }
+  # A failure HERE (or of the awk run below) must never read as "absent" --
+  # an "absent" scan is exactly the signal that makes enable() go write a
+  # brand-new use_leader, and makes disable() treat the key as the user's
+  # own and drop the ownership marker (review on #1979, finding (1): an
+  # isolated repro that failed only this mktemp call still returned rc 0
+  # with empty-ish output, which both callers read as "absent"/"not true"
+  # and acted on -- disable() dropped the marker and left our own
+  # use_leader = true sitting in the config, now unowned). Prints
+  # "scan_failed" and returns 1 instead; see both callers' own guards.
+  awk_script="$(mktemp "${TMPDIR:-/tmp}/agmsg-grok-scan-awk.XXXXXX")" || { printf 'scan_failed\n'; return 1; }
   cat > "$awk_script" <<'AWK_EOF'
 /^[ \t]*["']?cli["']?[ \t]*\.[ \t]*["']?use_leader["']?[ \t]*=/ {
   print "unsupported\tdotted_key"; done = 1; exit
@@ -101,8 +114,23 @@ incli && match($0, /^[ \t]*use_leader[ \t]*=[ \t]*/) {
 }
 END { if (!done) print "absent" }
 AWK_EOF
-  awk -f "$awk_script" "$path" 2>/dev/null
+  local out
+  if ! out="$(awk -f "$awk_script" "$path" 2>/dev/null)"; then
+    rm -f "$awk_script"
+    printf 'scan_failed\n'
+    return 1
+  fi
   rm -f "$awk_script"
+  if [ -z "$out" ]; then
+    # awk exited 0 but produced nothing -- should not happen (the script's
+    # own END block always prints something), but an empty result is
+    # exactly as dangerous misread as "absent" as an outright awk failure,
+    # so it is held to the same explicit-failure contract rather than
+    # trusted.
+    printf 'scan_failed\n'
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 # agmsg_grok_use_leader_enable <skill_dir> <config.toml>
@@ -122,7 +150,7 @@ AWK_EOF
 agmsg_grok_use_leader_enable() {
   local skill_dir="$1" path="$2"
   local current
-  current="$(agmsg_grok_use_leader_scan "$path")"
+  current="$(agmsg_grok_use_leader_scan "$path")" || { printf 'write_failed\n'; return 1; }
   case "$current" in
     true) printf 'already_true\n'; return 0 ;;
     false) printf 'already_set:false\n'; return 0 ;;
@@ -134,8 +162,7 @@ agmsg_grok_use_leader_enable() {
   esac
   # absent: write it. created_table is decided by a plain, read-only grep
   # (above), never by the mutating awk's own exit status -- an I/O failure
-  # inside that awk must never be misread as "no table existed yet" (the review
-  # review, finding 4).
+  # inside that awk must never be misread as "no table existed yet" (review, finding 4).
   local created_table=""
   _agmsg_grok_cli_header_present "$path" || created_table="table"
   mkdir -p "$(dirname "$path")" 2>/dev/null || true
@@ -211,8 +238,7 @@ AWK_EOF
 # added it (see agmsg_grok_use_leader_enable). Any other state -- no
 # marker, marker present but the config is now the user's own `false`/other
 # value, config missing entirely -- leaves the file untouched. The marker
-# itself is removed only AFTER the config edit actually succeeds (the review
-# review, finding 4: removing it first and then hitting a write failure
+# itself is removed only AFTER the config edit actually succeeds (review, finding 4: removing it first and then hitting a write failure
 # used to permanently lose the ownership record for a key that was, in
 # fact, never removed).
 #
@@ -230,7 +256,13 @@ agmsg_grok_use_leader_disable() {
   fi
   owned_table="$(cat "$marker" 2>/dev/null || true)"
   local current
-  current="$(agmsg_grok_use_leader_scan "$path")"
+  # A failed/unreadable scan here (review on #1979, finding (1)) must
+  # never fall into the `!= true` branch below -- that branch's own job
+  # is "the user changed it since we added it, so the marker is safe to
+  # drop", and a scan failure is not evidence of that: it dropped the
+  # marker and left our own use_leader = true behind, now unowned, in the
+  # isolated repro that forced only this read to fail.
+  current="$(agmsg_grok_use_leader_scan "$path")" || { printf 'write_failed\n'; return 1; }
   case "$current" in
     unsupported*)
       printf 'unsupported:%s\n' "${current#unsupported	}"

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 
 import { createGrokQueueChannel } from '../scripts/daemon/channels/grok-queue.mjs';
 import { ensureGrokQueueChannelSchema } from '../scripts/daemon/channels/grok-queue-store.mjs';
@@ -117,6 +118,28 @@ test('a leader socket that starts listening again (seat restarted in leader mode
   state.leaderListening = true;
   await channel.pollOnce();
   assert.equal(state.nudgeCalls, 1);
+  await channel.stop();
+});
+
+test('a pid that dies in the window between the probe and the spawn is caught by the immediately-before-spawn re-check (real-machine review, finding 3)', async (t) => {
+  // A real short-lived process, killed DURING checkLeaderListening's own
+  // (fake, but still genuinely async) wait -- the witness's pid passed
+  // classifyWitness's own earlier check (it was alive then), but must
+  // still be caught again right before the spawn, not assumed live from
+  // that earlier read.
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)']);
+  await new Promise((resolve) => child.once('spawn', resolve));
+  const { channel, state } = channelFixture(t, {
+    checkLeaderListening: async () => {
+      child.kill('SIGKILL');
+      await new Promise((resolve) => child.once('exit', resolve));
+      return true;
+    },
+  });
+  state.witness = { ...state.witness, pid: child.pid };
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 0, 'the spawn must never happen for a pid that is already gone by the time the probe resolves');
+  assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'process_gone' });
   await channel.stop();
 });
 

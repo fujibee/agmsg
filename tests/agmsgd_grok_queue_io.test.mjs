@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -240,6 +240,73 @@ test('runGrokNudge end to end: a queue/changed with matching text that arrives B
     spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
   });
   assert.equal(result.kind, 'ok');
+});
+
+test('runGrokNudge across TWO separate attempts: a leftover queue entry from attempt 1 is never mistaken for attempt 2\'s own acceptance (review on #1979, finding 2)', async (t) => {
+  // Each attempt is its OWN spawn (its own fresh tracker/seen-set) talking
+  // to what a real leader's own persistent queue would be -- modeled here
+  // as a state file both spawns of this one fake script share, so an
+  // entry attempt 1 queued (and never consumed, as if the turn had not
+  // run yet) is still sitting there when attempt 2's own, brand-new
+  // client connects. Before the per-attempt nonce fix, attempt 2's own
+  // tracker had never itself seen that entry's id, and the nudge text is
+  // the identical fixed string every attempt -- so it read as attempt
+  // 2's OWN fresh acceptance even though attempt 2's real session/prompt
+  // was never actually sent to this point in the exchange.
+  const dir = temporaryDirectory(t);
+  const statePath = path.join(dir, 'queue-state.json');
+  writeFileSync(statePath, JSON.stringify({ entries: [] }));
+  const scriptBody = `
+    const fs = require('node:fs');
+    const statePath = ${JSON.stringify(statePath)};
+    const readline = require('node:readline');
+    const rl = readline.createInterface({ input: process.stdin });
+    function state() { return JSON.parse(fs.readFileSync(statePath, 'utf8')); }
+    function emit(entries) {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', method: '_x.ai/queue/changed',
+        params: { sessionId: 'sess-1', entries },
+      }) + '\\n');
+    }
+    rl.on('line', (line) => {
+      let msg; try { msg = JSON.parse(line); } catch { return; }
+      if (msg.method === 'initialize') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+      } else if (msg.method === 'session/resume') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+      } else if (msg.method === 'session/prompt') {
+        // The stale snapshot (any earlier attempt's own leftover,
+        // unconsumed entry) arrives FIRST, as its own queue/changed --
+        // only AFTER arm(), since this fires off of session/prompt, not
+        // proactively right after initialize/session/resume (the prior
+        // fix round already protects a pre-arm notification; this models
+        // the case that fix does not reach).
+        const before = state();
+        if (before.entries.length) emit(before.entries);
+        const s = state();
+        s.entries.push({ id: 'e' + (s.entries.length + 1), text: msg.params.prompt[0].text });
+        fs.writeFileSync(statePath, JSON.stringify(s));
+        emit(s.entries);
+      }
+    });
+  `;
+  const scriptPath = writeFakeLeaderClient(dir, scriptBody);
+  const spawnProcess = (exe, args, opts) => callDefault(exe, args, opts, scriptPath);
+
+  const first = await runGrokNudge({
+    executable: process.execPath, leaderSocket: '/tmp/fake.sock', sessionId: 'sess-1',
+    cwd: '/a/project', text: 'agmsg: you have new messages.', timeoutMs: 5000, spawnProcess,
+  });
+  assert.equal(first.kind, 'ok');
+
+  const second = await runGrokNudge({
+    executable: process.execPath, leaderSocket: '/tmp/fake.sock', sessionId: 'sess-1',
+    cwd: '/a/project', text: 'agmsg: you have new messages.', timeoutMs: 5000, spawnProcess,
+  });
+  assert.equal(second.kind, 'ok');
+
+  const finalEntries = JSON.parse(readFileSync(statePath, 'utf8')).entries;
+  assert.equal(finalEntries.length, 2, 'attempt 2 must have sent its OWN session/prompt, not merely re-observed attempt 1\'s leftover entry');
 });
 
 test('runGrokNudge: an unresponsive client that ignores SIGTERM is SIGKILLed after the grace period, not left running', async (t) => {
