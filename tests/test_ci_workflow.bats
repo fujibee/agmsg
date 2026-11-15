@@ -236,7 +236,11 @@ GIT
   grep -Fq "      - id: reuse" "$workflow"
   [ "$(grep -A1 '^      - id: reuse$' "$workflow" | tail -1)" = "        if: github.event_name == 'push'" ]
   [ "$(grep -A2 '^      - name: Record this tree as passed$' "$workflow" | tail -1)" = "        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'" ]
-  grep -Fq 'name: green-tree-${{ steps.green.outputs.tree }}' "$workflow"
+  # The artifact is named green-tree-<tree>, or partial-tree-<tree> when the
+  # run skipped files; the step records which in its `name` output.
+  grep -Fq 'name: ${{ steps.green.outputs.name }}' "$workflow"
+  grep -Fq 'echo "name=green-tree-$tree"' "$workflow"
+  grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
   # Every heavy shard step skips on a reused tree, the same set the docs-only
   # skip gates; nothing heavy is left gated on docs_only alone.
   [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 10 ]

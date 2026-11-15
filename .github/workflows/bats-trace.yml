@@ -1,13 +1,15 @@
 name: bats-trace
 
-# One-off measurement: which repository files does each bats file touch?
+# Manual regeneration of the input map. Which repository files does each bats file touch?
 # Runs every test file under strace on Linux and uploads, per shard, the
 # distinct paths each file opened, executed, stat'ed or listed. The result
 # feeds .github/scripts/bats-inputs.tsv (see build-bats-inputs.mjs).
+# Run it from the Actions tab, download the six bats-inputs-N artifacts, then
+#   node .github/scripts/build-bats-inputs.mjs inputs-*.tsv > .github/scripts/bats-inputs.tsv
+# from the traced commit's root. Refresh when tests start reading files the
+# table does not know; a stale table only ever errs toward running more.
 on:
-  push:
-    branches: ['ci/skip-unchanged-bats']
-    paths: ['.github/workflows/bats-trace.yml', '.github/scripts/trace-filter.awk']
+  workflow_dispatch:
 
 env:
   SHARD_TOTAL: 6
