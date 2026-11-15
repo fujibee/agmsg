@@ -82,6 +82,23 @@ freshen_map() {
   [ -z "$output" ]
 }
 
+@test "a test also traced on macOS is not held back by a platform branch, but a stale file still is" {
+  printf 'if [ "$(uname)" = Darwin ]; then :; fi\n' > "$FIX/scripts/x.sh"
+  git -C "$FIX" add -A
+  freshen_map
+  printf 'M\ttests/a.bats\n' >> "$FIX/.github-map.tsv"
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  # a reads x.sh (platform branch) but was observed on macOS: skipped.
+  printf '%s\n' "$output" | grep -qxF tests/a.bats
+  # the same test with x.sh changed after the trace still runs.
+  printf 'echo changed\n# uname\n' > "$FIX/scripts/x.sh"
+  git -C "$FIX" add -A
+  select_for scripts/y.sh
+  run grep -cxF tests/a.bats <<< "$output"
+  [ "$output" = 0 ]
+}
+
 @test "a test whose dependency is assembled at run time after the trace is not skipped" {
   printf 'name=y; source "../scripts/${name}.sh"\n' > "$FIX/tests/a.bats"
   git -C "$FIX" add -A

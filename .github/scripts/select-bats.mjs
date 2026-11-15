@@ -74,6 +74,7 @@ function main() {
   const known = new Set(); // every path some test touches
   const mapped = new Set();
   const traced = new Map(); // path -> blob id when traced
+  const macTraced = new Set(); // tests whose macOS branches were observed
   for (const line of readFileSync(o.map, 'utf8').split('\n')) {
     if (!line || line.startsWith('#')) continue;
     const c = line.split('\t');
@@ -86,6 +87,8 @@ function main() {
       mapped.add(c[1]);
       if (!dirs.has(c[1])) dirs.set(c[1], []);
       dirs.get(c[1]).push(c[2]);
+    } else if (c[0] === 'M' && c.length === 2) {
+      macTraced.add(c[1]);
     } else if (c[0] === 'H' && c.length === 3) {
       traced.set(c[1], c[2]);
     } else if (c[0] === 'C' && c.length === 2) {
@@ -117,17 +120,30 @@ function main() {
   // unreadable), or it branches on the platform (Darwin, uname, OSTYPE): the
   // trace is Linux only, so what a macOS branch reads was never observed, and a
   // path built at run time cannot be recovered from the text. Unknown means run.
-  const untrusted = new Map();
-  const isUntrusted = (p) => {
-    if (untrusted.has(p)) return untrusted.get(p);
-    let bad = false;
-    if (p === '\0copied') bad = false;
-    else if (!cur.has(p) || traced.get(p) !== cur.get(p)) bad = true;
-    else {
+  // Two reasons a file is not vouched for: its content changed since the trace
+  // ("stale"), or it branches on the platform. The second is waived for a test
+  // that was also traced on macOS (an M row), since then its macOS branches ran
+  // under observation.
+  const staleMemo = new Map();
+  const platMemo = new Map();
+  const stale = (p) => {
+    if (p === '\0copied') return false;
+    if (!staleMemo.has(p)) staleMemo.set(p, !cur.has(p) || traced.get(p) !== cur.get(p));
+    return staleMemo.get(p);
+  };
+  const platform = (p) => {
+    if (p === '\0copied' || !cur.has(p)) return false;
+    if (!platMemo.has(p)) {
+      let bad = false;
       try { bad = /\b(Darwin|darwin|uname|OSTYPE)\b/.test(readFileSync(join(o.root, p), 'utf8')); } catch { bad = true; }
+      platMemo.set(p, bad);
     }
-    untrusted.set(p, bad);
-    return bad;
+    return platMemo.get(p);
+  };
+  const isUntrusted = (t) => {
+    const all = [t, ...(files.get(t) || [])];
+    if (all.some(stale)) return true;
+    return !macTraced.has(t) && all.some(platform);
   };
 
   const skip = [];
@@ -135,7 +151,7 @@ function main() {
     let why = '';
     if (!mapped.has(t)) why = 'is not in the input map';
     else if (changed.includes(t)) why = 'is itself changed';
-    else if (isUntrusted(t) || [...(files.get(t) || [])].some(isUntrusted)) why = 'itself or a file it reads changed since the table was traced, or branches on the platform';
+    else if (isUntrusted(t)) why = 'itself or a file it reads changed since the table was traced, or branches on the platform';
     else {
       const f = files.get(t) || new Set();
       if (files.has(t) && files.get(t).has('\0copied')) f.add('\0copied');

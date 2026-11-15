@@ -17,6 +17,11 @@
 //   F <test> <path>        a file the test opened, executed, stat'ed or probed
 //   D <test> <dir>         a directory the test listed or globbed: a file added
 //                          to or removed from it runs the test
+//   M <test>               the test was also traced on macOS (eslogger, see
+//                          mac-trace-filter.mjs) with no sign of lost events, so
+//                          its macOS branches have been observed; a test without
+//                          this row is never skipped on account of a platform
+//                          branch it reads
 //   H <path> <blob>        the git blob id of every file named above (and of each
 //                          test file) at the traced commit; the selector treats
 //                          a file whose blob has since changed as one whose
@@ -51,13 +56,18 @@ const mapPath = (raw, wantDir) => {
 // scripts/ made by cp are not inputs. What the test then runs out of the copy is
 // seen through the program that opens it, and is.
 const COPIERS = new Set(['cp', 'rsync', 'tar', 'ditto']);
+const mac = new Set();   // tests with a clean macOS trace
+const bad = new Set();   // tests whose macOS trace cannot be trusted
 const files = new Map(); // test -> Set(path)
 const dirs = new Map();  // test -> Set(dir)
 const copies = new Set();
 for (const f of process.argv.slice(2)) {
+  const isMac = /(^|\/)inputs-mac-/.test(f);
   for (const line of readFileSync(f, 'utf8').split('\n')) {
     const [t, kind, exe, raw] = line.split('\t');
+    if (t === 'X') { bad.add(kind); continue; }
     if (!t || !raw) continue;
+    if (isMac) mac.add(t);
     if (!files.has(t)) { files.set(t, new Set()); dirs.set(t, new Set()); }
     if (kind === 'D') {
       const d = mapPath(raw, true);
@@ -79,6 +89,7 @@ const universal = new Set([...count].filter(([, n]) => n >= UNIVERSAL * tests.le
 const out = [];
 for (const p of universal) out.push(`U\t${p}`);
 for (const t of tests) {
+  if (mac.has(t) && !bad.has(t)) out.push(`M\t${t}`);
   if (copies.has(t)) out.push(`C\t${t}`);
   for (const p of files.get(t)) if (!universal.has(p) && p !== t) out.push(`F\t${t}\t${p}`);
   for (const d of dirs.get(t)) out.push(`D\t${t}\t${d}`);
