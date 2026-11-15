@@ -4,7 +4,7 @@
 //   build-bats-inputs.mjs <inputs.tsv>...   > .github/scripts/bats-inputs.tsv
 //
 // Run from the repository root at the commit the traces were taken from. Each
-// input row is "<test>\tF|D\t<path>"; a path is mapped to the tracked file it
+// input row is "<test>\tF|D\t<exe>\t<path>" (see trace-filter.awk); a path is mapped to the tracked file it
 // names by its longest trailing run of path parts (tests copy scripts/ into a
 // temporary directory, so only the tail is stable). A path that maps to no
 // tracked file is dropped.
@@ -12,6 +12,8 @@
 // Output rows (tab separated, sorted):
 //   U <path>               touched by at least UNIVERSAL of the tests: a change
 //                          here runs every test
+//   C <test>               the test runs install.sh / uninstall.sh / setup.sh from
+//                          the repository, which copies the runtime tree
 //   F <test> <path>        a file the test opened, executed, stat'ed or probed
 //   D <test> <dir>         a directory the test listed or globbed: a file added
 //                          to or removed from it runs the test
@@ -39,15 +41,30 @@ const mapPath = (raw, wantDir) => {
   return hit;
 };
 
+// Every test's setup copies scripts/ into a temporary skill directory with cp,
+// which opens every script whether the test uses it or not. Counting those
+// reads would make every test an input-reader of every script, so reads of
+// scripts/ made by cp are not inputs. What the test then runs out of the copy is
+// seen through the program that opens it, and is.
+const COPIERS = new Set(['cp', 'rsync', 'tar', 'ditto']);
 const files = new Map(); // test -> Set(path)
 const dirs = new Map();  // test -> Set(dir)
+const copies = new Set();
 for (const f of process.argv.slice(2)) {
   for (const line of readFileSync(f, 'utf8').split('\n')) {
-    const [t, kind, raw] = line.split('\t');
+    const [t, kind, exe, raw] = line.split('\t');
     if (!t || !raw) continue;
     if (!files.has(t)) { files.set(t, new Set()); dirs.set(t, new Set()); }
-    if (kind === 'D') { const d = mapPath(raw, true); if (d) dirs.get(t).add(d); }
-    else { const p = mapPath(raw, false); if (p) files.get(t).add(p); }
+    if (kind === 'D') {
+      const d = mapPath(raw, true);
+      if (d && !(COPIERS.has(exe) && /^(scripts|templates)(\/|$)/.test(d))) dirs.get(t).add(d);
+      continue;
+    }
+    const p = mapPath(raw, false);
+    if (!p) continue;
+    if (COPIERS.has(exe) && (p.startsWith('scripts/') || p.startsWith('templates/'))) continue;
+    files.get(t).add(p);
+    if (/^(install|uninstall|setup)\.sh$/.test(p) && !COPIERS.has(exe)) copies.add(t);
   }
 }
 
@@ -58,6 +75,7 @@ const universal = new Set([...count].filter(([, n]) => n >= UNIVERSAL * tests.le
 const out = [];
 for (const p of universal) out.push(`U\t${p}`);
 for (const t of tests) {
+  if (copies.has(t)) out.push(`C\t${t}`);
   for (const p of files.get(t)) if (!universal.has(p) && p !== t) out.push(`F\t${t}\t${p}`);
   for (const d of dirs.get(t)) out.push(`D\t${t}\t${d}`);
 }
