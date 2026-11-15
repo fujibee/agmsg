@@ -32,7 +32,7 @@ function channelFixture(t, overrides = {}) {
     unread: true,
     nudgeKind: 'ok',
     nudgeCalls: 0,
-    witness: { session_id: 'sess-1', pid: process.pid, leader_socket: '/tmp/fake.sock', first_turn_done: true },
+    witness: { session_id: 'sess-1', pid: process.pid, leader_socket: '/tmp/fake.sock', cwd: '/a/project', first_turn_done: true },
   };
   const teamConfig = { agents: { ga1: { registrations: [{ type: 'grok-build', project: root }] } } };
   const options = {
@@ -87,6 +87,15 @@ test('a witness whose pid is dead is unaddressable, never attempted', async (t) 
   await channel.pollOnce();
   assert.equal(state.nudgeCalls, 0);
   assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'process_gone' });
+  await channel.stop();
+});
+
+test('a witness missing cwd (needed for session/resume) is unaddressable, never attempted', async (t) => {
+  const { channel, state } = channelFixture(t);
+  state.witness = { ...state.witness, cwd: undefined };
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 0);
+  assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'cwd_unknown' });
   await channel.stop();
 });
 
@@ -164,5 +173,20 @@ test('the nudge call receives a cancellation signal, and stop() aborts it', asyn
   });
   await channel.pollOnce();
   assert.ok(state.seenSignal instanceof AbortSignal);
+  await channel.stop();
+});
+
+test('the nudge call receives the witness-recorded cwd, sessionId and leaderSocket verbatim', async (t) => {
+  const { channel, state } = channelFixture(t, {
+    nudge: async (args) => {
+      state.nudgeCalls += 1;
+      state.seenArgs = args;
+      return { kind: 'ok' };
+    },
+  });
+  await channel.pollOnce();
+  assert.equal(state.seenArgs.cwd, '/a/project');
+  assert.equal(state.seenArgs.sessionId, 'sess-1');
+  assert.equal(state.seenArgs.leaderSocket, '/tmp/fake.sock');
   await channel.stop();
 });

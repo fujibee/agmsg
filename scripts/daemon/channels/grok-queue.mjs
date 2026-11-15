@@ -9,6 +9,7 @@
 // One process launch per seat per unread TRANSITION, never per poll cycle.
 
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { createSeatBook } from "../seat-book.mjs";
 import { assertPollActive, pollSignal, SEAT_DEADLINE_MS } from "../poll-deadline.mjs";
@@ -108,6 +109,27 @@ function pidAlive(pid) {
   }
 }
 
+// PATH wins when `grok` is actually on it; only then do the two documented
+// install locations get tried (2026-11-15 review, NG3) -- a user who put
+// their own `grok` on PATH is never second-guessed. A spawn with none of
+// these found still gets attempted against the bare name "grok" so
+// spawn_failed:ENOENT (grok-queue-io.mjs) is still the reported reason,
+// rather than inventing a fourth, unreachable path here.
+export function resolveGrokExecutable(env) {
+  const pathDirs = (env.PATH || "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
+  const onPath = pathDirs.some((dir) => existsSync(join(dir, "grok")));
+  if (onPath) return "grok"; // let spawn's own PATH search resolve it
+  const grokHome = env.GROK_HOME || join(homedir(), ".grok");
+  const candidates = [
+    join(homedir(), ".local", "bin", "grok"),
+    join(grokHome, "bin", "grok"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return "grok"; // nothing found anywhere: let spawn report ENOENT
+}
+
 function classifyWitness(result) {
   if (result.state === "missing") return { ok: false, reason: "not_registered_for_agmsgd" };
   if (result.state === "unreadable") return { ok: false, reason: `witness_${result.reason}` };
@@ -116,6 +138,9 @@ function classifyWitness(result) {
   if (witness.first_turn_done !== true) return { ok: false, reason: "first_turn_pending" };
   if (typeof witness.leader_socket !== "string" || witness.leader_socket.length === 0) {
     return { ok: false, reason: "leader_socket_unknown" };
+  }
+  if (typeof witness.cwd !== "string" || witness.cwd.length === 0) {
+    return { ok: false, reason: "cwd_unknown" };
   }
   return { ok: true, witness };
 }
@@ -138,7 +163,7 @@ export function createGrokQueueChannel({
   readOwnMarker = readOwnUnreadMarker,
   nudge = (args) => runGrokNudge(args),
   checkSocketPerms = leaderSocketDirIsLax,
-  grokExecutable = "grok",
+  grokExecutable = (callEnv) => resolveGrokExecutable(callEnv),
   cmdName = installRoot.split(/[\\/]/).filter(Boolean).pop() ?? "agmsg",
 }) {
   let stopped = false;
@@ -257,9 +282,10 @@ export function createGrokQueueChannel({
     let result;
     try {
       result = await nudge({
-        executable: grokExecutable,
+        executable: grokExecutable(env),
         leaderSocket: witnessResult.witness.leader_socket,
         sessionId: witnessResult.witness.session_id,
+        cwd: witnessResult.witness.cwd,
         text: nudgeText(cmdName),
         timeoutMs,
         env,

@@ -24,6 +24,15 @@ function writeFakeLeaderClient(dir, body) {
   return scriptPath;
 }
 
+function callDefault(exe, args, opts, scriptPath) {
+  return spawn(exe, [scriptPath], opts);
+}
+
+// Matches the real sequence measured live (2026-11-15, seat-sandbox, Mac):
+// session/resume needs cwd + mcpServers, session/prompt is an id-bearing
+// request whose own prompt param is an array of content blocks, and
+// acceptance is announced via queue/changed with either `entries` (queued)
+// or `runningText` (already running, entries empty).
 const HAPPY_PATH_SCRIPT = `
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
@@ -33,37 +42,122 @@ rl.on('line', (line) => {
   if (msg.method === 'initialize') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
   } else if (msg.method === 'session/resume') {
+    if (typeof msg.params.cwd !== 'string' || !Array.isArray(msg.params.mcpServers)) {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'missing cwd/mcpServers' } }) + '\\n');
+      return;
+    }
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
   } else if (msg.method === 'session/prompt') {
+    if (!Array.isArray(msg.params.prompt) || msg.params.prompt[0]?.type !== 'text') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'prompt must be an array of content blocks' } }) + '\\n');
+      return;
+    }
     process.stdout.write(JSON.stringify({
       jsonrpc: '2.0', method: '_x.ai/queue/changed',
-      params: { entries: [{ id: 'p1', text: msg.params.prompt }], runningPromptId: null },
+      params: { sessionId: msg.params.sessionId, entries: [{ id: 'p1', version: 0, kind: 'prompt', text: msg.params.prompt[0].text, position: 0 }] },
     }) + '\\n');
   }
 });
 `;
 
-test('queueChangedAccepts matches by text in entries or the running prompt', () => {
+const RUNNING_PATH_SCRIPT = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.method === 'initialize' || msg.method === 'session/resume') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+  } else if (msg.method === 'session/prompt') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0', method: '_x.ai/queue/changed',
+      params: { sessionId: msg.params.sessionId, entries: [], runningPromptId: 'r1', runningText: msg.params.prompt[0].text, runningKind: 'prompt' },
+    }) + '\\n');
+  }
+});
+`;
+
+test('queueChangedAccepts matches by text in queued entries or the running prompt text', () => {
   assert.equal(queueChangedAccepts({ entries: [{ id: 'a', text: 'hello' }] }, 'hello'), true);
   assert.equal(queueChangedAccepts({ entries: [{ id: 'a', text: 'other' }] }, 'hello'), false);
+  assert.equal(queueChangedAccepts({ entries: [], runningText: 'hello' }, 'hello'), true);
+  assert.equal(queueChangedAccepts({ entries: [], runningText: 'other' }, 'hello'), false);
   assert.equal(queueChangedAccepts({ entries: [], runningPromptId: 'a' }, 'hello'), false);
   assert.equal(queueChangedAccepts(null, 'hello'), false);
   assert.equal(queueChangedAccepts({}, 'hello'), false);
 });
 
-test('a prompt accepted via queue/changed reports ok, and the client is torn down right after', async (t) => {
+test('a queued prompt accepted via queue/changed entries reports ok, and the client is torn down right after', async (t) => {
   const dir = temporaryDirectory(t);
   const scriptPath = writeFakeLeaderClient(dir, HAPPY_PATH_SCRIPT);
   const result = await runGrokNudge({
     executable: process.execPath,
     leaderSocket: '/tmp/fake.sock',
     sessionId: 'sess-1',
+    cwd: '/a/project',
     text: 'agmsg: you have new messages.',
     timeoutMs: 5000,
-    spawnProcess: (exe, args, opts) => spawn(exe, [scriptPath], opts),
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
   });
   assert.equal(result.kind, 'ok');
   assert.equal(result.state, 'notified');
+});
+
+test('a prompt already running (queue/changed runningText, entries empty) also reports ok', async (t) => {
+  const dir = temporaryDirectory(t);
+  const scriptPath = writeFakeLeaderClient(dir, RUNNING_PATH_SCRIPT);
+  const result = await runGrokNudge({
+    executable: process.execPath,
+    leaderSocket: '/tmp/fake.sock',
+    sessionId: 'sess-1',
+    cwd: '/a/project',
+    text: 'agmsg: you have new messages.',
+    timeoutMs: 5000,
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
+  });
+  assert.equal(result.kind, 'ok');
+});
+
+test('session/resume sends cwd and mcpServers (a leader that rejects a request missing them would otherwise report an unexplained timeout)', async (t) => {
+  const dir = temporaryDirectory(t);
+  const scriptPath = writeFakeLeaderClient(dir, HAPPY_PATH_SCRIPT);
+  const result = await runGrokNudge({
+    executable: process.execPath,
+    leaderSocket: '/tmp/fake.sock',
+    sessionId: 'sess-1',
+    cwd: '/a/project',
+    text: 'x',
+    timeoutMs: 5000,
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
+  });
+  assert.equal(result.kind, 'ok');
+});
+
+test('an RPC error response (e.g. session/resume rejected) is reported distinctly, not as a bare timeout', async (t) => {
+  const dir = temporaryDirectory(t);
+  const scriptPath = writeFakeLeaderClient(dir, `
+    const readline = require('node:readline');
+    const rl = readline.createInterface({ input: process.stdin });
+    rl.on('line', (line) => {
+      let msg; try { msg = JSON.parse(line); } catch { return; }
+      if (msg.method === 'initialize') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+      } else if (msg.method === 'session/resume') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: 'no such session' } }) + '\\n');
+      }
+    });
+  `);
+  const result = await runGrokNudge({
+    executable: process.execPath,
+    leaderSocket: '/tmp/fake.sock',
+    sessionId: 'sess-1',
+    cwd: '/a/project',
+    text: 'x',
+    timeoutMs: 5000,
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
+  });
+  assert.equal(result.kind, 'failed');
+  assert.match(result.reason, /rpc_failed:rpc_error:-32001/);
 });
 
 test('no acceptance before the timeout reports timeout, not a hang', async (t) => {
@@ -76,11 +170,28 @@ test('no acceptance before the timeout reports timeout, not a hang', async (t) =
     executable: process.execPath,
     leaderSocket: '/tmp/fake.sock',
     sessionId: 'sess-1',
+    cwd: '/a/project',
     text: 'agmsg: you have new messages.',
     timeoutMs: 300,
-    spawnProcess: (exe, args, opts) => spawn(exe, [scriptPath], opts),
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
   });
   assert.equal(result.kind, 'timeout');
+});
+
+test('a leader client that exits early (e.g. bad socket path) is reported as its own distinct reason, not timeout', async (t) => {
+  const dir = temporaryDirectory(t);
+  const scriptPath = writeFakeLeaderClient(dir, `process.exit(1);`);
+  const result = await runGrokNudge({
+    executable: process.execPath,
+    leaderSocket: '/tmp/fake.sock',
+    sessionId: 'sess-1',
+    cwd: '/a/project',
+    text: 'x',
+    timeoutMs: 5000,
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
+  });
+  assert.equal(result.kind, 'failed');
+  assert.match(result.reason, /^leader_client_exit_1/);
 });
 
 test('an abort signal cancels an in-flight attempt rather than hanging until timeout', async (t) => {
@@ -93,10 +204,11 @@ test('an abort signal cancels an in-flight attempt rather than hanging until tim
     executable: process.execPath,
     leaderSocket: '/tmp/fake.sock',
     sessionId: 'sess-1',
+    cwd: '/a/project',
     text: 'x',
     timeoutMs: 30000,
     signal: controller.signal,
-    spawnProcess: (exe, args, opts) => spawn(exe, [scriptPath], opts),
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
   });
   controller.abort();
   const result = await promise;
@@ -110,6 +222,7 @@ test('an already-aborted signal is cancelled before any process is spawned', asy
   const result = await runGrokNudge({
     leaderSocket: '/tmp/fake.sock',
     sessionId: 'sess-1',
+    cwd: '/a/project',
     text: 'x',
     timeoutMs: 5000,
     signal: controller.signal,
@@ -124,9 +237,17 @@ test('a missing grok executable is reported as a failed spawn, not a crash', asy
     executable: '/no/such/grok-binary-xyz',
     leaderSocket: '/tmp/fake.sock',
     sessionId: 'sess-1',
+    cwd: '/a/project',
     text: 'x',
     timeoutMs: 2000,
   });
   assert.equal(result.kind, 'failed');
   assert.match(result.reason, /^spawn_failed:/);
+});
+
+test('a missing cwd is a programming error, caught before anything spawns', async () => {
+  await assert.rejects(
+    () => runGrokNudge({ leaderSocket: '/tmp/fake.sock', sessionId: 'sess-1', text: 'x', timeoutMs: 1000 }),
+    /missing cwd/,
+  );
 });

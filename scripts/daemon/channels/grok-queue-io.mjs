@@ -1,24 +1,27 @@
 // grok-queue I/O: talks to a grok-build seat's own leader over ACP
 // (https://agentclientprotocol.com), the same way the design memo's
-// real-machine measurements (2026-11-15) did -- by spawning
-// `grok agent --leader --leader-socket <sock> stdio`, which itself bridges
-// stdio to the leader socket and presents the ordinary ACP JSON-RPC-over-
-// stdio contract. agmsg never opens the leader socket directly.
+// real-machine measurements (2026-11-15, Mac, grok 1.0.77, via seat-sandbox)
+// did -- by spawning `grok agent --leader --leader-socket <sock> stdio`,
+// which itself bridges stdio to the leader socket and presents the ordinary
+// ACP JSON-RPC-over-stdio contract (newline-delimited JSON, one message per
+// line -- confirmed, not LSP-style Content-Length framing). agmsg never
+// opens the leader socket directly.
 //
-// UNVERIFIED BEYOND WHAT WAS ACTUALLY MEASURED LIVE: the exact JSON-RPC
-// message framing (this assumes ACP's own documented newline-delimited
-// JSON, one message per line -- not LSP-style Content-Length framing) and
-// the exact field names inside the `_x.ai/queue/changed` notification's
-// entries. Those three measured facts (session/resume over session/load,
-// acceptance = seeing OUR OWN text/id in queue/changed rather than waiting
-// for session/prompt's own response, killing the client right after does
-// not cancel an already-accepted prompt) are the ones this file is built
-// around; the surrounding wire details should be confirmed against a real
-// leader before this merges (seat-sandbox, same as every other round of
-// this feature).
-
+// Measured call sequence (confirmed live):
+//   1) request "initialize" {protocolVersion: 1, clientCapabilities: {}}
+//   2) request "session/resume" {sessionId, cwd, mcpServers: []} -- cwd and
+//      mcpServers are required; omitting them was one of the two bugs this
+//      file was built around (NG2).
+//   3) request (an id-bearing request, NOT a notification) "session/prompt"
+//      {sessionId, prompt: [{type: "text", text}]} -- prompt is an ARRAY of
+//      content blocks, never a bare string.
+//   4) acceptance: a "_x.ai/queue/changed" notification whose params show
+//      our own prompt either queued (entries[].text === our text) or
+//      already running (runningText === our text, entries empty) -- killing
+//      the client right after does not cancel an already-accepted prompt.
 import { spawn } from "node:child_process";
 
+export const ACP_PROTOCOL_VERSION = 1;
 const MAX_BUFFER_CHARS = 64 * 1024;
 
 function appendBounded(current, chunk) {
@@ -44,32 +47,29 @@ function signalProcessGroup(child, signal) {
 
 // True when a queue/changed notification's payload shows OUR prompt text
 // already accepted -- either queued (entries) or already running
-// (runningPromptId whose own entry's text matches). Matching by TEXT, not
-// by an id agmsg generated itself: session/prompt's own response (which
-// would normally carry a server-assigned id) does not arrive until the
-// turn ends, so there is nothing else to match on by the time acceptance
-// needs to be decided (measured 2026-11-15, point (e)).
+// (runningText, entries empty in that case). Matching by TEXT, not an id
+// agmsg generated itself: session/prompt's own response (which would
+// normally carry one) does not arrive until the turn ends, so there is
+// nothing else to match on by the time acceptance needs to be decided
+// (measured live).
 export function queueChangedAccepts(payload, promptText) {
   if (!payload || typeof payload !== "object") return false;
   const entries = Array.isArray(payload.entries) ? payload.entries : [];
-  const runningId = payload.runningPromptId;
   for (const entry of entries) {
-    if (!entry || typeof entry !== "object") continue;
-    if (entry.text === promptText || entry.prompt === promptText) return true;
-    if (runningId && entry.id === runningId && (entry.text === promptText || entry.prompt === promptText)) return true;
+    if (entry && typeof entry === "object" && entry.text === promptText) return true;
   }
+  if (payload.runningText === promptText) return true;
   return false;
 }
 
 // Runs one grok-queue nudge: spawn the leader-socket stdio bridge, speak
 // ACP long enough to get the prompt accepted, then disconnect -- the
-// client's own process is never kept alive past acceptance (measured live:
-// killing it the moment acceptance is observed does not cancel the
-// already-accepted prompt).
+// client's own process is never kept alive past acceptance.
 export async function runGrokNudge({
   executable = "grok",
   leaderSocket,
   sessionId,
+  cwd,
   text,
   timeoutMs,
   signal,
@@ -78,6 +78,7 @@ export async function runGrokNudge({
 }) {
   if (typeof leaderSocket !== "string" || leaderSocket.length === 0) throw new TypeError("missing leader socket path");
   if (typeof sessionId !== "string" || sessionId.length === 0) throw new TypeError("missing sessionId");
+  if (typeof cwd !== "string" || cwd.length === 0) throw new TypeError("missing cwd");
   if (typeof text !== "string" || !text) throw new TypeError("text must not be empty");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
   if (signal?.aborted) return { kind: "cancelled", reason: "daemon_stopping" };
@@ -119,10 +120,6 @@ export async function runGrokNudge({
     }
     return id;
   }
-  function sendNotification(method, params) {
-    const line = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
-    try { child.stdin.write(line); } catch { /* ignore */ }
-  }
 
   let buffer = "";
   let started = false;
@@ -148,16 +145,17 @@ export async function runGrokNudge({
         continue;
       }
       if (typeof msg.id === "number" && pending.has(msg.id)) {
-        const { resolve } = pending.get(msg.id);
+        const { resolve, reject } = pending.get(msg.id);
         pending.delete(msg.id);
-        resolve(msg);
+        if (msg.error) reject(new Error(`rpc_error:${msg.error.code ?? "unknown"}:${msg.error.message ?? ""}`));
+        else resolve(msg.result);
       }
     }
   });
 
   function request(method, params) {
     const id = send(method, params);
-    return new Promise((resolve) => { pending.set(id, { resolve }); });
+    return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); });
   }
 
   let timedOut = false;
@@ -185,16 +183,27 @@ export async function runGrokNudge({
 
   (async () => {
     try {
-      await request("initialize", { protocolVersion: 1 });
+      await request("initialize", { protocolVersion: ACP_PROTOCOL_VERSION, clientCapabilities: {} });
       if (settled) return;
       // session/resume (not session/load): resuming replays nothing, where
       // load would replay the whole prior transcript via session/update
-      // first (measured live, point (c)).
-      await request("session/resume", { sessionId });
+      // first (measured live). cwd/mcpServers are required by the real
+      // leader -- omitting them was NG2's first half.
+      await request("session/resume", { sessionId, cwd, mcpServers: [] });
       if (settled) return;
-      sendNotification("session/prompt", { sessionId, prompt: text });
-    } catch {
-      // A write failure surfaces through the close/error handlers above.
+      // An id-bearing REQUEST, not a notification (measured live: a
+      // notification never reached the leader's own queue at all) --
+      // and prompt is an array of content blocks, never a bare string.
+      // Its own response does not arrive until the turn ends, so this is
+      // intentionally not awaited; acceptance is observed via
+      // queue/changed above instead.
+      request("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).catch(() => {
+        // A late RPC error after acceptance was already observed (or after
+        // this attempt otherwise settled) is moot; before that, the error
+        // path below still has the close/timeout handlers as a backstop.
+      });
+    } catch (error) {
+      if (!settled) finish({ kind: "failed", reason: `rpc_failed:${error.message}`, stderr });
     }
   })();
 

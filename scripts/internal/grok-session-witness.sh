@@ -48,3 +48,51 @@ agmsg_grok_resolve_seat() {
   [ -n "$team" ] && [ -n "$agent" ] && [ "$team" != "$agent" ] || return 1
   printf '%s\t%s\n' "$team" "$agent"
 }
+
+# agmsg_grok_active_session_lookup <active_sessions.json> <session_id>
+#
+# Real-machine round, 2026-11-15 (NG1): a hook's own pid ($$) is the hook
+# SCRIPT's pid, which exits the moment the hook returns -- the channel's
+# own pid-liveness check then always reads the seat as process_gone. The
+# session's REAL process (and its start time, for a future PID-reuse
+# guard) is recorded by grok itself in GROK_HOME/active_sessions.json, a
+# flat JSON array of per-session objects -- one of which matches this
+# SESSION_ID.
+#
+# Not JSON-parsed in general (no jq/python3 dependency wanted in a hook
+# that fires on every turn boundary -- python3 risks the macOS CLT
+# trampoline dialog, see lib/require-python3.sh). Instead: scan character
+# by character for top-level `{...}` objects (one nesting level -- each
+# session record is assumed flat, no nested object/array values; accepted
+# risk, flagged for the next real-machine round if active_sessions.json
+# turns out to nest), find the one containing this session id as a quoted
+# string, and print its whole text verbatim so the caller's own tolerant
+# field patterns (camelCase pidStart vs snake_case pid_start -- the exact
+# spelling was not confirmed live) can extract from it.
+#
+# Prints the matched object's raw text (one line, newlines stripped) on
+# success; nothing, rc 1, if the file is absent/unreadable or no object
+# contains this session id.
+agmsg_grok_active_session_lookup() {
+  local path="$1" sid="$2"
+  [ -f "$path" ] || return 1
+  awk -v sid="\"$sid\"" '
+    BEGIN { depth = 0; buf = "" }
+    {
+      line = $0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (c == "{") {
+          depth++
+          if (depth == 1) buf = ""
+        }
+        if (depth >= 1) buf = buf c
+        if (c == "}") {
+          if (depth == 1 && index(buf, sid) > 0) { print buf; found = 1; exit }
+          depth--
+        }
+      }
+    }
+    END { exit (found ? 0 : 1) }
+  ' "$path"
+}

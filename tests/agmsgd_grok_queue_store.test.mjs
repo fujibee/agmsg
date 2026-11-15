@@ -114,3 +114,43 @@ test('leaderSocketDirIsLax: a 0700 directory is not flagged', (t) => {
 test('leaderSocketDirIsLax: a directory that cannot be statted is not flagged (nothing known to warn about)', () => {
   assert.equal(leaderSocketDirIsLax('/no/such/dir/leader.sock'), false);
 });
+
+test('resolveGrokExecutable: PATH wins when grok is actually on it (2026-11-15 review, NG3)', async (t) => {
+  const { resolveGrokExecutable } = await import('../scripts/daemon/channels/grok-queue.mjs');
+  const dir = temporaryDirectory(t);
+  writeFileSync(path.join(dir, 'grok'), '');
+  chmodSync(path.join(dir, 'grok'), 0o755);
+  assert.equal(resolveGrokExecutable({ PATH: dir }), 'grok');
+});
+
+test('resolveGrokExecutable: falls back to ~/.local/bin/grok when not on PATH', async (t) => {
+  const { resolveGrokExecutable } = await import('../scripts/daemon/channels/grok-queue.mjs');
+  const home = temporaryDirectory(t);
+  mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+  writeFileSync(path.join(home, '.local', 'bin', 'grok'), '');
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = originalHome; });
+  assert.equal(resolveGrokExecutable({ PATH: '/empty' }), path.join(home, '.local', 'bin', 'grok'));
+});
+
+test('resolveGrokExecutable: falls back to $GROK_HOME/bin/grok when ~/.local/bin has none', async (t) => {
+  const { resolveGrokExecutable } = await import('../scripts/daemon/channels/grok-queue.mjs');
+  const home = temporaryDirectory(t);
+  const grokHome = path.join(home, 'customgrok');
+  mkdirSync(path.join(grokHome, 'bin'), { recursive: true });
+  writeFileSync(path.join(grokHome, 'bin', 'grok'), '');
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = originalHome; });
+  assert.equal(resolveGrokExecutable({ PATH: '/empty', GROK_HOME: grokHome }), path.join(grokHome, 'bin', 'grok'));
+});
+
+test('resolveGrokExecutable: nothing found anywhere still returns the bare name (spawn reports ENOENT)', async (t) => {
+  const { resolveGrokExecutable } = await import('../scripts/daemon/channels/grok-queue.mjs');
+  const home = temporaryDirectory(t);
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = originalHome; });
+  assert.equal(resolveGrokExecutable({ PATH: '/empty' }), 'grok');
+});

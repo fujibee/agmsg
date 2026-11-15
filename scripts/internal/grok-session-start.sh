@@ -37,9 +37,36 @@ fi
 # confirmed the same way -- so a hook invocation missing it falls back to
 # grok's documented default, exactly as a real leader does when launched with
 # no --leader-socket override.
-LEADER_SOCKET="${GROK_LEADER_SOCKET:-${GROK_HOME:-$HOME/.grok}/leader.sock}"
+GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
+# Measured live, 2026-11-15: a hook invocation DOES inherit GROK_LEADER_SOCKET
+# (comment corrected from an earlier "not yet confirmed" note).
+LEADER_SOCKET="${GROK_LEADER_SOCKET:-$GROK_HOME_RESOLVED/leader.sock}"
 CWD="${PWD:-$PROJECT}"
-PID="${GROK_AGENT_PID:-$$}"
+
+# NG1 (2026-11-15 real-machine round): $$ is this HOOK SCRIPT's own pid,
+# which is gone the instant this script exits -- the channel's pid-liveness
+# check then always read the seat as process_gone. There is no
+# GROK_AGENT_PID env var. The session's real process (and its start time,
+# recorded for a future PID-reuse guard the channel does not check yet) is
+# in GROK_HOME/active_sessions.json, keyed by this SESSION_ID.
+PID=""
+PID_START=""
+_session_obj="$(agmsg_grok_active_session_lookup "$GROK_HOME_RESOLVED/active_sessions.json" "$SESSION_ID" 2>/dev/null || true)"
+if [ -n "$_session_obj" ]; then
+  PID="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+  # Exact key spelling not confirmed live -- tries both camelCase and
+  # snake_case; whichever the real file uses, one of these matches.
+  PID_START="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid[Ss]tart[A-Za-z]*"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+fi
+# No active_sessions.json entry found (unexpected shape, or the lookup's
+# own flat-object assumption did not hold): fail toward "no witness" rather
+# than writing one with a wrong pid that would misreport as unaddressable
+# forever. GROK_SESSION_ID was still confirmed non-empty above, so this is
+# a real gap worth reporting back, not a routine absence.
+if [ -z "$PID" ]; then
+  echo "agmsg: grok-session-start.sh: could not find session $SESSION_ID in $GROK_HOME_RESOLVED/active_sessions.json; no witness written" >&2
+  exit 0
+fi
 
 SEAT="$(agmsg_grok_resolve_seat "$PROJECT" 2>/dev/null || true)"
 [ -n "$SEAT" ] || exit 0   # ambiguous / unregistered project: nothing to attach
@@ -73,6 +100,7 @@ CONTENT="$(cat <<EOF
   "agent": "$(esc "$AGENT")",
   "session_id": "$(esc "$SESSION_ID")",
   "pid": "$(esc "$PID")",
+  "pid_start": "$(esc "$PID_START")",
   "cwd": "$(esc "$CWD")",
   "leader_socket": "$(esc "$LEADER_SOCKET")",
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
