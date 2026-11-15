@@ -9,7 +9,7 @@ setup() {
 }
 
 ev() { # seq type-json pid ppid exe
-  printf '{"seq_num":%s,"event":%s,"process":{"audit_token":{"pid":%s},"ppid":%s,"executable":{"path":"%s"}}}\n' "$1" "$2" "$3" "$4" "$5"
+  printf '{"global_seq_num":%s,"event":%s,"process":{"audit_token":{"pid":%s},"ppid":%s,"executable":{"path":"%s"}}}\n' "$1" "$2" "$3" "$4" "$5"
 }
 
 stream() { # the standard bracket around a body given on stdin

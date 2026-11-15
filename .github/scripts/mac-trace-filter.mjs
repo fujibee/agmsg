@@ -87,9 +87,14 @@ rl.on('line', (line) => {
   if (phase === 'done' || !line) return;
   let ev;
   try { ev = JSON.parse(line); } catch { return; }
-  const seq = ev.seq_num ?? ev.global_seq_num;
-  if (phase === 'run' && lastSeq !== null && typeof seq === 'number' && ev.seq_num !== undefined && seq !== lastSeq + 1) dropped = true;
-  if (typeof seq === 'number' && ev.seq_num !== undefined) lastSeq = seq;
+  // global_seq_num counts every message the client is delivered, whatever its
+  // type (seq_num counts per event type, so it is not consecutive across them).
+  // A hole means eslogger dropped messages.
+  const seq = ev.global_seq_num;
+  if (typeof seq === 'number') {
+    if (phase === 'run' && lastSeq !== null && seq !== lastSeq + 1) dropped = true;
+    lastSeq = seq;
+  }
 
   const type = key(ev);
   const body = ev.event && ev.event[type];
