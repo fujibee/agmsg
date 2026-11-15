@@ -162,6 +162,9 @@ fi
 MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY" ${BODY_NUL_FILE:+"$BODY_NUL_FILE"})" || _agmsg_send_rc=$?
 if [ -n "${_agmsg_send_rc:-}" ]; then
   [ -z "$BODY_NUL_FILE" ] || rm -f "$BODY_NUL_FILE"
+  # Whatever the driver printed above says why; this line makes sure a failed
+  # send is never silent, and says plainly that nothing was stored.
+  echo "send.sh: the message to $TO in team $TEAM was not stored; nothing was sent (exit $_agmsg_send_rc)" >&2
   exit "$_agmsg_send_rc"
 fi
 

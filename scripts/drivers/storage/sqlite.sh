@@ -388,8 +388,11 @@ storage_send() {
   agmsg_sqlite_warm
   if ! printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1; then
     storage_init "$team" >/dev/null
+    # The first attempt's failure is the ordinary missing-table path and stays
+    # quiet. This one is the real failure: its stderr (the busy-store line, or
+    # sqlite's own error) is left in place, so a send that did not store says why.
     agmsg_sqlite_warm
-    printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null || return 1
   fi
   printf '%s\n' "$id"
 }

@@ -1624,12 +1624,25 @@ storage_sync_apply_pull() {
 #
 # One sqlite3 process runs the batches as separate statements, so the writer
 # lock is taken once per batch of 100 rows and released between them, never held
-# for the backlog. At most 100 batches run per call; the rest is taken on the
-# next pull. A failure is reported and retried on the next pull, never fatal:
-# the page it follows has already been applied.
+# for the backlog. The process takes the lock again the moment it lets go, so
+# another writer is not let in between the batches: it waits for the whole call,
+# however many batches there are. What bounds that wait is the time the call may
+# run: a batch starts only while less than 200 ms have passed since the call
+# began (an elapsed-time test inside each DELETE; a batch past the deadline does
+# no work), with 100 batches as the outer limit. The rest is taken on the next
+# pull. Measured on a store with a 43,000-row backlog, a call of 100 batches
+# kept four other writers waiting 0.46 to 0.56 s here, and on a slower, busier
+# store that is what ran past the 5 s timeout. A failure is reported and
+# retried on the next pull, never fatal: the page it follows has already been
+# applied.
 _sqlite_sync_quarantine_sweep() {
-  local db="$1" batch sql="" n=0
-  batch="DELETE FROM sync_quarantine WHERE rowid IN (
+  local db="$1" batch sql="" n=0 deadline_ms="${AGMSG_SYNC_SWEEP_MS:-200}"
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=200 ;; esac
+  # The clock row lives in sqlite's temp database, so keeping it takes no lock
+  # on the store. `julianday('now')` is fixed within a statement and is tested
+  # once, before the scan, so a batch past the deadline scans nothing.
+  batch="DELETE FROM sync_quarantine WHERE (julianday('now')-(SELECT t0 FROM temp.sweep_clock))*86400000 < $deadline_ms
+    AND rowid IN (
     SELECT q.rowid FROM sync_quarantine q
      WHERE q.status IN ('imported','reconciled') AND COALESCE(q.reason,'')=''
        AND EXISTS(SELECT 1 FROM sync_messages m
@@ -1642,7 +1655,7 @@ _sqlite_sync_quarantine_sweep() {
      LIMIT 100);"
   while [ "$n" -lt 100 ]; do sql="$sql$batch"$'\n'; n=$((n + 1)); done
   agmsg_sqlite_warm
-  printf '.bail on\n%s' "$sql" | agmsg_sqlite "$db" >/dev/null 2>&1 || {
+  printf '.bail on\nCREATE TEMP TABLE sweep_clock AS SELECT julianday('"'"'now'"'"') AS t0;\n%s' "$sql" | agmsg_sqlite "$db" >/dev/null 2>&1 || {
     echo "agmsg: storage sync could not clean up imported quarantine rows (#1966); it is retried on the next pull" >&2
     return 1
   }

@@ -2145,7 +2145,7 @@ _1966_cursor_only() {
   [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 0 ]
 }
 
-@test "quarantine cleanup: a backlog is taken in batches, at most 10,000 rows per pull (#1966)" {
+@test "quarantine cleanup: a backlog is taken over several pulls, each bounded by time (#1966)" {
   _1966_page 1 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
   _1966_sql "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10500)
     INSERT INTO sync_messages
@@ -2160,10 +2160,22 @@ _1966_cursor_only() {
            server_seq,wire_id,'2026-07-21T06:00:00.000000Z',1,'none',NULL,'e30=','imported','0','0',NULL
       FROM sync_messages WHERE wire_id LIKE 'bulk-wire-%';" >/dev/null
   [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 10500 ]
-  _1966_cursor_only 1
-  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 500 ]
-  _1966_cursor_only 1
-  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+  # With no time to spend a call removes nothing, and the pull still succeeds:
+  # the bound is on how long the call may keep the store, not on a row count.
+  AGMSG_SYNC_SWEEP_MS=0 _1966_cursor_only 1
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 10500 ]
+  # With the default bound each pull removes some, and the backlog is gone after
+  # a few. Whatever the speed of the machine, every pull makes progress.
+  local before after pulls=0
+  before=10500
+  while [ "$before" -gt 0 ] && [ "$pulls" -lt 200 ]; do
+    _1966_cursor_only 1
+    after="$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")"
+    [ "$after" -lt "$before" ]
+    before="$after"
+    pulls=$((pulls + 1))
+  done
+  [ "$before" -eq 0 ]
 }
 
 @test "quarantine cleanup: a cleanup that fails is reported, does not fail the pull, and is retried (#1966)" {
