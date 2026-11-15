@@ -689,6 +689,7 @@ pub fn run() {
             addons::agents::addon_members_state,
             addons::agents::addon_agent_reopen,
             addons::commands::addon_notice_typed,
+            addons::commands::addon_agent_status,
             addons::trust::addon_trust_agents_folder,
             addons::trust::addon_agents_folder_trust,
             addons::agents::addon_agent_open_failed,

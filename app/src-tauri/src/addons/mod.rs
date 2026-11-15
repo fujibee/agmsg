@@ -30,4 +30,5 @@ pub mod nav;
 pub mod nav_win;
 pub mod panes;
 pub mod server;
+pub mod status;
 pub mod trust;

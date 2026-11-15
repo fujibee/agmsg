@@ -6,9 +6,11 @@
 //     onInit({ team, members, messages }) {},
 //     onMessage(message) {},
 //     onNotice({ name, at, ids }) {},   // an agent this add-on started was typed a notice; see canReportDelivery
+//     onStatus({ name, state, at }) {}, // an agent pane in the team changed state, or closed; see canReportStatus
 //   });
 //   app.locale;                            // the app's language, e.g. "ja" ("en" until it is known)
 //   app.onLocaleChange((tag) => {});       // fires when the user changes the app's language
+//   const { agents } = await app.agents.status(); // [{ name, type, state, since }] open now; needs messages:read
 //   const args = await app.openArgs();     // { path } / { url } / { base }
 //   const tree = await app.fs.list(".");   // needs files:read
 //
@@ -55,6 +57,7 @@ export function connect(options = {}) {
     onMessage = () => {},
     onLocale = () => {},
     onNotice = () => {},
+    onStatus = () => {},
     sample = true,
     sampleAfterMs = 1000,
     errorOverlay = true,
@@ -64,6 +67,7 @@ export function connect(options = {}) {
 
   let port = null;
   let canReportDelivery = false; // the app says in `init` that it reports when it typed a notice into an agent
+  let canReportStatus = false; // the app says in `init` that it reports agent pane states
   let sampleMode = false;
   let nextId = 1;
   const pending = new Map();
@@ -92,6 +96,7 @@ export function connect(options = {}) {
     if (!data || data.agmsg !== PROTOCOL) return;
     if (data.type === "init") {
       canReportDelivery = data.notice === true;
+      canReportStatus = data.status === true;
       safe(() => onInit({ team: data.team, members: data.members || [], messages: data.messages || [] }));
     } else if (data.type === "locale") {
       if (typeof data.locale !== "string" || !LANG_TAG.test(data.locale)) return;
@@ -105,6 +110,9 @@ export function connect(options = {}) {
       safe(() => onMessage(data.message));
     } else if (data.type === "notice") {
       safe(() => onNotice({ name: data.name, at: data.at, ids: Array.isArray(data.ids) ? data.ids : [] }));
+    } else if (data.type === "status") {
+      if (typeof data.name !== "string" || typeof data.state !== "string") return;
+      safe(() => onStatus({ name: data.name, state: data.state, at: data.at }));
     } else if (data.type === "response") {
       const p = pending.get(data.id);
       if (!p) return;
@@ -166,6 +174,8 @@ export function connect(options = {}) {
     },
     /** True once `init` said the app reports delivery: `onNotice` will be called. False with an older app. */
     get canReportDelivery() { return canReportDelivery; },
+    /** True once `init` said the app reports agent states: `onStatus` will be called and `agents.status()` answers. False with an older app. */
+    get canReportStatus() { return canReportStatus; },
     openArgs: () => request("open.args"),
     fs: {
       stat: (path) => request("fs.stat", { path }),
@@ -185,6 +195,8 @@ export function connect(options = {}) {
       models: (type) => request("agents.models", { type }),
       spawn: (type, name, opts = {}) => request("agents.spawn", { type, name, ...opts }),
       list: () => request("agents.list"),
+      // The agent panes open now in the granted team: [{ name, type, state, since }]. Needs messages:read, nothing more.
+      status: () => request("agents.status"),
     },
     git: {
       status: () => request("git.status"),
@@ -315,6 +327,8 @@ function sampleRequest(op, args) {
       return { name: args.name, type: args.type, state: "running", pid: 1 };
     case "agents.list":
       return { agents: [] };
+    case "agents.status":
+      return { agents: [{ name: "sample-agent", type: "claude-code", state: "idle", since: Date.now() }] };
     case "fs.list": {
       const dir = norm(args.path);
       const seen = new Map();

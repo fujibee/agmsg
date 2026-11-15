@@ -98,6 +98,15 @@ The app tells every add-on its language, so an add-on can follow the app. Nothin
 - In `addon.conf`, `locales = en, ja` lists the tags you ship and `default = en` names the one used when none matches (`en` if omitted). Both are optional and advisory: the app never refuses an add-on over them, and an add-on works the same without them. `agmsg-addon-check` warns (never errors) when a tag is not shaped like a language tag or is repeated, when a listed `web/locales/<tag>.json` is missing, or when `default` is not listed; the app ignores a bad entry the same way and still installs the add-on.
 - Only the tag is sent. It costs no process and one small message per open pane per language change.
 
+## Showing what the agents are doing (optional)
+
+An add-on that reads a team's messages (`messages:read`) can also see which agents are open in that team and what each is doing. It needs no other permission, and an add-on that ignores it works as before.
+
+- `await app.agents.status()` returns `{ agents: [{ name, type, state, since }] }`: the agent panes open now in the granted team. `state` is `idle`, `working`, `blocked` or `unknown` (the app's own words), `since` is when it entered that state (ms since epoch). A member with no open pane is not listed.
+- `onStatus({ name, state, at })` in `connect({...})` is called when an agent pane changes state, and with `state: "closed"` when it goes away. A pane that opens is reported with its first state. It is called only on a change, never on a timer.
+- `app.canReportStatus` is true once the app has said it reports these; an older app leaves it false, so show nothing or fall back to your own signal. `agents.status()` is refused as `not_granted` once `messages:read` is revoked.
+- No pane id, command, folder or terminal text is ever sent. It costs no process and one small message per open pane per change.
+
 ## Do not
 
 - Do not add `allow-same-origin`, iframes of other sites, or any other workaround for the sandbox; they will not work and the app refuses them.

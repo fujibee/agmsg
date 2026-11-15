@@ -41,6 +41,8 @@ pub const PANE_FAILED_EVENT: &str = "addon-pane-failed";
 pub struct Panes {
     pub registry: Mutex<Registry>,
     pub feeds: Mutex<HashMap<(PaneId, u64), Feed>>,
+    /// The last known state of the open agent panes, per team: what `agents.status` answers from.
+    pub status: Mutex<super::status::StatusBoard>,
     /// The protected-location list, rebuilt when a pane opens or a folder is
     /// granted (stores and teams can appear later). Always includes the app's own
     /// folders, the agmsg base and the stores.
@@ -62,6 +64,7 @@ impl Panes {
         Panes {
             registry: Mutex::new(Registry::new()),
             feeds: Mutex::new(HashMap::new()),
+            status: Mutex::new(super::status::StatusBoard::default()),
             deny: Mutex::new(Arc::new(Denylist::from_process_env(crate::agmsg::protected_locations()))),
             app_dirs: Mutex::new(Vec::new()),
             extra_protected: Mutex::new(Vec::new()),
@@ -412,7 +415,9 @@ fn feed_init_inner(host: &AddonHost, id: PaneId, generation: u64) -> Result<Valu
 /// One request from the pane's port. The answer is ready to post back.
 #[tauri::command(async)]
 pub fn addon_request(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, op: String, args: Value) -> Value {
-    let out = if broker::power_need(&op).is_some() {
+    let out = if op == "agents.status" {
+        agents_status(&host.panes, id, generation)
+    } else if broker::power_need(&op).is_some() {
         match super::agents::global() {
             Some(mgr) => broker::handle_power(&host.panes.registry, &host.panes.deny(), mgr, id, generation, &op, &args),
             None => Err(BrokerError::new("not_available", "the app is still starting")),
@@ -423,6 +428,36 @@ pub fn addon_request(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u6
     match out {
         Ok(result) => json!({ "agmsg": 1, "type": "response", "ok": true, "result": result }),
         Err(e) => json!({ "agmsg": 1, "type": "response", "ok": false, "error": { "code": e.code, "message": e.message } }),
+    }
+}
+
+/// `agents.status`: the agent panes open in the team this pane may read, from what the window last reported. Needs only
+/// `messages:read` for that team (no new permission); no process runs and nothing is read from the terminals.
+fn agents_status(panes: &Panes, id: PaneId, generation: u64) -> Result<Value, BrokerError> {
+    let auth = panes.registry.lock().unwrap().authorize(id, generation, Need::Messages)?;
+    let team = auth.team.ok_or_else(|| BrokerError::new("not_granted", "no team is allowed for this pane"))?;
+    let out = panes.status.lock().unwrap().snapshot(&team);
+    // the answer is dropped if the grant went away or moved to another team while it was being made
+    let again = panes.registry.lock().unwrap().authorize(id, generation, Need::Messages)?;
+    if again.team.as_deref() != Some(team.as_str()) {
+        return Err(BrokerError::new("not_granted", "the allowed team changed"));
+    }
+    Ok(out)
+}
+
+/// The window saw the agent pane `pane` (the window's own id, never sent on) of member `name` and type `kind` in `team`
+/// change to `state` at `at` (ms since epoch), or close (`state` is "closed"). Keeps the last known row and tells the
+/// panes that read that team, once per actual change and nobody else; the grant is checked again right before each push.
+/// One call per transition, no process, no timer.
+#[tauri::command]
+pub fn addon_agent_status<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, team: String, pane: String, name: String, kind: String, state: String, at: u64) {
+    let event = host.panes.status.lock().unwrap().report(&team, &pane, &name, &kind, &state, at);
+    let Some(event) = event else { return };
+    let pushes = super::status::pushes(&host.panes.registry.lock().unwrap(), &team, &event);
+    for (pane, generation, event) in pushes {
+        if host.panes.registry.lock().unwrap().authorize(pane, generation, Need::Messages).is_ok() {
+            let _ = app.emit(PUSH_EVENT, json!({ "pane": pane, "generation": generation, "event": event }));
+        }
     }
 }
 
@@ -850,5 +885,55 @@ mod tests {
         let (id, _) = spawn_pane(&mut r, "o/r", "t");
         r.set_power(id, Power::Spawn, false).unwrap();
         assert!(notice_pushes(&r, owner("o/r", "t", "white"), &["m1".to_string()], 1).is_empty());
+    }
+
+    // ---- agents.status (the agent panes open in the team a pane may read)
+
+    fn reading_pane(r: &mut Registry, addon: &str, team: &str, declared_read: bool) -> (PaneId, u64) {
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"<div></div>".to_vec());
+        let id = r
+            .add(AddPane {
+                addon: addon.into(),
+                commit: "c".into(),
+                name: "n".into(),
+                payload: Payload::Embedded(files),
+                entry: "index.html".into(),
+                declared: Declared { messages_read: declared_read, team_join: !declared_read, ..Default::default() },
+                open_args: OpenArgs::default(),
+                expected_digest: None,
+                pinned: None,
+                on_tamper: None,
+            })
+            .unwrap()
+            .id;
+        let g = r.begin_generation(id).unwrap();
+        r.grant_team(id, team).unwrap();
+        (id, g)
+    }
+
+    #[test]
+    fn agents_status_answers_for_the_granted_team_only_and_needs_messages_read() {
+        let panes = Panes::new();
+        let (reader, g) = reading_pane(&mut panes.registry.lock().unwrap(), "o/r", "t", true);
+        let (other, g2) = reading_pane(&mut panes.registry.lock().unwrap(), "o/r", "u", true);
+        let (no_read, g3) = reading_pane(&mut panes.registry.lock().unwrap(), "o/r", "t", false);
+        panes.status.lock().unwrap().report("t", "p1", "white", "claude-code", "working", 5);
+        panes.status.lock().unwrap().report("u", "p2", "gray", "codex", "idle", 6);
+        let mine = agents_status(&panes, reader, g).unwrap();
+        assert_eq!(mine, json!({ "agents": [{ "name": "white", "type": "claude-code", "state": "working", "since": 5 }] }));
+        let theirs = agents_status(&panes, other, g2).unwrap();
+        assert_eq!(theirs["agents"][0]["name"], "gray", "another team's pane sees its own team only");
+        assert_eq!(agents_status(&panes, no_read, g3).unwrap_err().code, "not_declared", "no messages:read declared, no answer");
+        assert_eq!(agents_status(&panes, reader, g + 1).unwrap_err().code, "not_granted", "a stale frame gets nothing");
+    }
+
+    #[test]
+    fn agents_status_is_refused_once_messages_read_is_revoked() {
+        let panes = Panes::new();
+        let (id, g) = reading_pane(&mut panes.registry.lock().unwrap(), "o/r", "t", true);
+        assert!(agents_status(&panes, id, g).is_ok());
+        panes.registry.lock().unwrap().revoke_team(id);
+        assert_eq!(agents_status(&panes, id, g).unwrap_err().code, "not_granted");
     }
 }
