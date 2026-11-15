@@ -3,10 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import { createTerminalPokeChannel } from '../scripts/daemon/channels/terminal-poke.mjs';
 import { ensureTerminalPokeChannelSchema } from '../scripts/daemon/channels/terminal-poke-store.mjs';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
+import { readUnreadSnapshot } from '../scripts/daemon/channels/codex-queue-store.mjs';
 
 function temporaryDirectory(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-terminal-poke-'));
@@ -41,6 +43,7 @@ function channelFixture(t, overrides = {}) {
     log: () => {},
     listSeats: () => ({ state: 'ok', seats: [{ team: 'test', agent: 'agy1', type: 'antigravity', project: root, teamConfig }] }),
     pokeDelivery: () => state.pokeDelivery ?? true,
+    verifiedInputBox: () => state.verifiedInputBox ?? true,
     nudgeText: (type, cmdName) => `agmsg: you have new messages. Run $${cmdName} to check your inbox.`,
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     openStore: () => ({ close() {} }),
@@ -49,6 +52,7 @@ function channelFixture(t, overrides = {}) {
       unread: state.unread !== false && state.sequence > (cursor ? JSON.parse(cursor).eventSeq : 0),
       upTo: JSON.stringify({ eventSeq: state.sequence, legacyId: 0 }),
     }),
+    readOwnMarker: () => String(state.sequence),
     nudge: async () => {
       state.nudgeCalls += 1;
       if (state.nudgeState === 'notified') state.poked += 1;
@@ -169,6 +173,61 @@ test('backoff resets to the first step immediately when the unread set changes',
   state.sequence = 2; // a new message arrived
   await channel.pollOnce();
   assert.equal(state.nudgeCalls, 2, 'a new unread transition retries immediately, backoff or not');
+  await channel.stop();
+});
+
+test('review: another seat\'s own message does not reset this seat\'s backoff (real store, not the fake readSnapshot above)', async (t) => {
+  const { channel, state } = channelFixture(t);
+  const store = new DatabaseSync(':memory:');
+  t.after(() => store.close());
+  store.exec(`
+    CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, type TEXT, team TEXT, to_agent TEXT, agent TEXT, msg_id TEXT, legacy_id INTEGER);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, team TEXT, to_agent TEXT, read_at TEXT);
+    CREATE TABLE read_cursors (team TEXT, agent TEXT, local_position INTEGER);
+    INSERT INTO events(id,type,team,to_agent) VALUES ('m1','message_sent','test','agy1');
+  `);
+  // A real store is closed by the channel after every poll (matching
+  // production, where a fresh connection is opened each cycle); this test
+  // reuses one in-memory db across two polls, so close() here is a no-op
+  // and prepare() is the only thing the channel's own code actually calls.
+  state.options.openStore = () => ({
+    prepare: (...args) => store.prepare(...args),
+    exec: (...args) => store.exec(...args),
+    close() {},
+  });
+  state.options.readSnapshot = (handle, ...args) => readUnreadSnapshot(handle, ...args);
+  state.options.readOwnMarker = undefined; // use the real default (readOwnUnreadMarker)
+  const channel2 = (await import('../scripts/daemon/channels/terminal-poke.mjs')).createTerminalPokeChannel(state.options);
+  state.nudgeState = 'not_ready:agent_status_blocked';
+  await channel2.pollOnce();
+  assert.equal(state.nudgeCalls, 1);
+  state.hours = 0.001;
+  // A message to a DIFFERENT agent in the same team: readUnreadSnapshot's
+  // own `upTo` (the whole team's tip) moves, but agy1's own unread set has
+  // not changed at all.
+  store.exec("INSERT INTO events(id,type,team,to_agent) VALUES ('other','message_sent','test','someone-else');");
+  await channel2.pollOnce();
+  assert.equal(state.nudgeCalls, 1, 'an unrelated send must not reset this seat\'s backoff');
+  await channel2.stop();
+  await channel.stop();
+});
+
+test('review: the nudge call receives a cancellation signal, and stop() aborts it', async (t) => {
+  const { channel, state } = channelFixture(t);
+  let seenSignal;
+  state.options.nudge = async ({ signal }) => { seenSignal = signal; return { kind: 'ok', state: 'notified', reason: '' }; };
+  const channel2 = (await import('../scripts/daemon/channels/terminal-poke.mjs')).createTerminalPokeChannel(state.options);
+  await channel2.pollOnce();
+  assert.ok(seenSignal instanceof AbortSignal, 'the production nudge() call must be given a signal to cancel on');
+  await channel2.stop();
+  await channel.stop();
+});
+
+test('scope decision (2026-11-14): a type with no verified input-box marker gets no nudge, and is shown in status, not hidden', async (t) => {
+  const { channel, state } = channelFixture(t, { verifiedInputBox: () => false });
+  await channel.pollOnce();
+  assert.equal(state.poked, 0, 'no process launch for a type nobody has checked on a real pane');
+  assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'no_verified_input_box:antigravity' });
   await channel.stop();
 });
 

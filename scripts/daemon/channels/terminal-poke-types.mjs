@@ -55,6 +55,18 @@ export function pokeDeliveryEnabled(installRoot, type) {
   return typeConfGet(installRoot, type, "poke_delivery", "yes") !== "no";
 }
 
+// A type is only poke-eligible once its own idle box AND confirmation
+// screens have been checked on a real pane and it has an
+// input_prompt_marker to show for it (decision, 2026-11-14 -- antigravity
+// is the only such type as of this change). A type with no marker gets no
+// nudge attempt at all: poke.sh's own draft-safety check is skipped
+// entirely for an empty marker (see poke.sh), which is exactly the "type
+// a real screen was never checked" case, so there is nothing here proven
+// safe to type into.
+export function hasVerifiedInputBox(installRoot, type) {
+  return typeConfGet(installRoot, type, "input_prompt_marker", "") !== "";
+}
+
 export function pokeNudgeText(installRoot, type, cmdName) {
   const override = typeConfGet(installRoot, type, "poke_nudge", "");
   if (override) return override;

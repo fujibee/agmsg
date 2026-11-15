@@ -208,12 +208,26 @@ _agmsg_input_box_raw_boxed() {
   done
   [ "$bottom" -ge 0 ] || return 1
 
+  # The top candidate is the NEAREST rule-shaped line above bottom -- never
+  # one found by skipping past a nearer rule that did not match and
+  # continuing further back. Skipping would let an OLDER matching-width
+  # rule, from an earlier and unrelated part of the screen, pair with
+  # bottom across whatever sits between them -- exactly the class of bug
+  # the same-width requirement above was meant to close, just one hop
+  # further out (review, 2026-11-14): a short turn-separator immediately
+  # above bottom's own section correctly fails the match, but continuing
+  # past it could still reach some OLD long rule from a much earlier turn
+  # and bracket everything after it (a stale "> ..." line included) as the
+  # live box. The nearest rule-shaped line decides the outcome outright,
+  # match or not; a non-rule line is still skipped (it is ordinary screen
+  # content, not a second candidate).
   i=$((bottom - 1))
   while [ "$i" -ge 0 ]; do
     case "${plain[$i]}" in
       "$rule"*)
         run="$(_agmsg_input_box_rule_run_len "${plain[$i]}")"
-        if [ "$run" -eq "$bottom_run" ]; then top="$i"; break; fi
+        [ "$run" -eq "$bottom_run" ] && top="$i"
+        break
         ;;
     esac
     i=$((i - 1))

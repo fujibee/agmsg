@@ -165,6 +165,52 @@ EOF
   [ "$(grep -c '^herdr \[pane\] \[send-text\]' "$ARGV_LOG" || true)" -eq 0 ]
 }
 
+@test "terminal-nudge: a confirmation screen with an OLDER matching-width rule further back still refuses, never adopts the stale region (review, 2026-11-14)" {
+  # A same-width-pair requirement alone is not enough if the search for the
+  # top candidate is allowed to SKIP a nearer, mismatched rule and keep
+  # looking further back: that still finds an older long rule from an
+  # earlier, unrelated turn and brackets everything after it (a stale
+  # "> ..." line included) as if it were the live box. The nearest
+  # rule-shaped line must decide the outcome outright, match or not.
+  local short long
+  short="$(printf '─%.0s' $(seq 1 60))"
+  long="$(printf '─%.0s' $(seq 1 120))"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  printf '%s\nold output from an earlier turn\n%s\n> Read earlier.txt and tell me its word.\n\nFile access\n%s\n\nRead: /tmp/x/harmless.txt\n\nAllow access to this file?\n> 1. Yes, allow access\n  2. No, deny access\n' '$long' '$short' '$long'
+  exit 0
+fi
+if [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n'
+  exit 0
+fi
+if [ "\$1" = agent ] && [ "\$2" = prompt ]; then
+  echo "must never submit into a live confirmation screen" >&2
+  exit 1
+fi
+if [ "\$1" = agent ] && [ "\$2" = send-keys ]; then
+  echo "must never clear a live confirmation screen's box" >&2
+  exit 1
+fi
+if [ "\$1" = pane ] && [ "\$2" = send-text ]; then
+  echo "must never retype into a live confirmation screen" >&2
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+  _write_agy_record "herdr:wC:p4"
+  run bash "$SCRIPTS/internal/terminal-nudge.sh" testteam agy1 --body-file <(printf 'agmsg: you have new messages.')
+  [ "$status" -eq 0 ]
+  _out_has "state=box_not_found"
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG" || true)" -eq 0 ]
+  [ "$(grep -c '^herdr \[agent\] \[send-keys\]' "$ARGV_LOG" || true)" -eq 0 ]
+  [ "$(grep -c '^herdr \[pane\] \[send-text\]' "$ARGV_LOG" || true)" -eq 0 ]
+}
+
 @test "terminal-nudge: a working herdr agent is still ready (queues, does not wait for idle)" {
   _install_fake_herdr_status working
   _write_agy_record "herdr:wC:p4"

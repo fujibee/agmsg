@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  hasVerifiedInputBox,
   pokeDeliveryEnabled,
   pokeNudgeText,
   typeConfGet,
@@ -75,4 +76,21 @@ test('a comment line and blank lines are ignored', (t) => {
   const root = temporaryDirectory(t);
   writeTypeConf(root, 'gemini', '# a comment\n\npoke_delivery=no\n');
   assert.equal(pokeDeliveryEnabled(root, 'gemini'), false);
+});
+
+test('a type with no input_prompt_marker has no verified input box (scope decision, 2026-11-14)', (t) => {
+  const root = temporaryDirectory(t);
+  writeTypeConf(root, 'gemini', 'cli=gemini\n');
+  assert.equal(hasVerifiedInputBox(root, 'gemini'), false);
+});
+
+test('a type with input_prompt_marker set has a verified input box', (t) => {
+  const root = temporaryDirectory(t);
+  writeTypeConf(root, 'antigravity', 'input_prompt_marker=>\n');
+  assert.equal(hasVerifiedInputBox(root, 'antigravity'), true);
+});
+
+test('a missing type.conf has no verified input box (safe default: no nudge, not a guess)', (t) => {
+  const root = temporaryDirectory(t);
+  assert.equal(hasVerifiedInputBox(root, 'nosuchtype'), false);
 });

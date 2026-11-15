@@ -402,6 +402,11 @@ function formatTerminalPokeSeats(inventory, all) {
       lines.push(`Terminal poke ${label}: this type opted out of terminal poke (poke_delivery=no)`);
       continue;
     }
+    const unverified = /^no_verified_input_box:(.+)$/.exec(seat.reason ?? "")?.[1];
+    if (unverified) {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat yet: no verified input-box check for type ${unverified}`);
+      continue;
+    }
     if (seat.state === "notified") {
       lines.push(`Terminal poke ${label}: notified via terminal poke`);
       continue;

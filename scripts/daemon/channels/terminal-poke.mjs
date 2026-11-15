@@ -21,7 +21,7 @@ import {
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
 import { listTerminalPokeRegistrations } from "./terminal-poke-store.mjs";
-import { pokeDeliveryEnabled, pokeNudgeText } from "./terminal-poke-types.mjs";
+import { hasVerifiedInputBox, pokeDeliveryEnabled, pokeNudgeText } from "./terminal-poke-types.mjs";
 import { runTerminalNudge } from "./terminal-poke-io.mjs";
 
 const NUDGE_TIMEOUT_MS = 15_000;
@@ -51,6 +51,25 @@ function latestNotifiedCursor(db, seat) {
     ORDER BY id DESC LIMIT 1
   `).get(seat);
   return row?.up_to ?? "";
+}
+
+// A backoff key that changes ONLY when a message actually addressed to
+// THIS seat appears -- unlike readUnreadSnapshot's own `upTo`, which is the
+// whole TEAM's tip (every event/message row, any recipient) and exists for
+// a different job: a monotonic cursor the confirmed-notify row advances
+// past. Using that team-wide tip as the backoff key (review) meant another
+// member's own unrelated send or read-receipt moved it, resetting this
+// seat's backoff to its first step even though nothing about ITS OWN
+// unread set had changed -- a nudge for an unchanged unread set was then
+// retried immediately instead of waiting out the backoff.
+function readOwnUnreadMarker(store, team, agent) {
+  const eventRow = store.prepare(`
+    SELECT COALESCE(MAX(seq), 0) AS n FROM events WHERE type = 'message_sent' AND team = ? AND to_agent = ?
+  `).get(team, agent);
+  const legacyRow = store.prepare(`
+    SELECT COALESCE(MAX(id), 0) AS n FROM messages WHERE team = ? AND to_agent = ?
+  `).get(team, agent);
+  return `${eventRow?.n ?? 0}:${legacyRow?.n ?? 0}`;
 }
 
 function saveSeat(book, { seat, state, reason = "" }) {
@@ -115,10 +134,12 @@ export function createTerminalPokeChannel({
   log = (message) => logLine(installRoot, message),
   listSeats = listTerminalPokeRegistrations,
   pokeDelivery = (type) => pokeDeliveryEnabled(installRoot, type),
+  verifiedInputBox = (type) => hasVerifiedInputBox(installRoot, type),
   nudgeText = (type, cmdName) => pokeNudgeText(installRoot, type, cmdName),
   readDriver = readStorageDriver,
   openStore = openMessageStore,
   readSnapshot = readUnreadSnapshot,
+  readOwnMarker = readOwnUnreadMarker,
   nudge = (args) => runTerminalNudge(args),
   nudgeScriptPath = join(installRoot, "scripts", "internal", "terminal-nudge.sh"),
   cmdName = installRoot.split(/[\\/]/).filter(Boolean).pop() ?? "agmsg",
@@ -150,6 +171,15 @@ export function createTerminalPokeChannel({
     }
     if (!pokeDelivery(type)) {
       saveSeat(book, { seat: key, state: "unaddressable", reason: "poke_delivery_opted_out" });
+      return;
+    }
+    // Scope decision, 2026-11-14: only a type whose idle box and
+    // confirmation screens were checked on a real pane (and so carries its
+    // own input_prompt_marker) is poke-eligible. Everything else is shown,
+    // never silently skipped (§10 class D) -- but is never opened, never
+    // reaches the message store, and never spawns the entry script.
+    if (!verifiedInputBox(type)) {
+      saveSeat(book, { seat: key, state: "unaddressable", reason: `no_verified_input_box:${type}` });
       return;
     }
 
@@ -184,8 +214,10 @@ export function createTerminalPokeChannel({
       return;
     }
     let snapshot;
+    let ownMarker = "";
     try {
       snapshot = readSnapshot(store, team, agent, latestNotifiedCursor(db, key));
+      ownMarker = readOwnMarker(store, team, agent);
     } catch (error) {
       saveSeat(book, { seat: key, state: "pending", reason: `message_store_unreadable:${error.message}` });
       return;
@@ -200,7 +232,7 @@ export function createTerminalPokeChannel({
     }
 
     const backoff = pendingBackoff.get(key);
-    if (backoff && backoff.upTo === snapshot.upTo && now() < backoff.nextAttemptAt) {
+    if (backoff && backoff.upTo === ownMarker && now() < backoff.nextAttemptAt) {
       // Same unread set as the last refused attempt, and not due yet: no
       // process launch this cycle. The book keeps whatever reason the last
       // real attempt set.
@@ -224,6 +256,7 @@ export function createTerminalPokeChannel({
         body: nudgeText(type, cmdName),
         timeoutMs,
         env,
+        signal: pollSignal(),
       });
     } catch (error) {
       result = { kind: "failed", reason: `nudge_error:${error?.code ?? error?.message ?? String(error)}` };
@@ -231,7 +264,7 @@ export function createTerminalPokeChannel({
 
     if (result.kind !== "ok") {
       setQueueState(db, id, "expired");
-      bumpBackoff(key, snapshot.upTo);
+      bumpBackoff(key, ownMarker);
       saveSeat(book, { seat: key, state: "pending", reason: `nudge_${result.kind}:${result.reason ?? "unknown"}` });
       return;
     }
@@ -242,7 +275,7 @@ export function createTerminalPokeChannel({
       pendingBackoff.delete(key);
     } else {
       setQueueState(db, id, "expired");
-      bumpBackoff(key, snapshot.upTo);
+      bumpBackoff(key, ownMarker);
     }
     saveSeat(book, { seat: key, state: classified.seatState, reason: classified.reason });
   }

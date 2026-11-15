@@ -205,6 +205,7 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
       { seat: JSON.stringify(['test', 'g1']), state: 'pending', reason: 'not_ready:agent_status_blocked' },
       { seat: JSON.stringify(['test', 'g2']), state: 'unaddressable', reason: 'no_pane' },
       { seat: JSON.stringify(['test', 'g3']), state: 'unaddressable', reason: 'pane_gone' },
+      { seat: JSON.stringify(['test', 'g4']), state: 'unaddressable', reason: 'no_verified_input_box:gemini' },
     ],
   });
   const text = await runAsync(f.root);
@@ -212,6 +213,9 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   assert.match(text, /Terminal poke test\/g1: pending: seat is not ready \(agent_status_blocked\)/);
   assert.match(text, /Terminal poke test\/g2: agmsgd cannot reach this seat \(no native channel, no pane\)/);
   assert.match(text, /Terminal poke test\/g3: pane gone/);
+  // scope decision (2026-11-14): a type with no real-pane-verified
+  // input-box marker is shown, never silently hidden, even without --all.
+  assert.match(text, /Terminal poke test\/g4: agmsgd cannot reach this seat yet: no verified input-box check for type gemini/);
 });
 
 test('a recorded Node that is gone does not turn a running agmsgd into "not running": the seat state is still fetched', async t => {
