@@ -3903,7 +3903,42 @@ JSON
   run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [ -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
-  [ ! -s "$TEST_PROJECT/.grok/hooks/agmsg.json" ] || ! grep -q "grok-session-start.sh" "$TEST_PROJECT/.grok/hooks/agmsg.json"
+  ! grep -q "use_leader" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+}
+
+@test "delivery set agmsgd then turn (grok-build): .grok/hooks/agmsg.json is removed outright, not left as an emptied {} (2026-11-15 review)" {
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  [ -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+}
+
+@test "delivery set agmsgd then off (grok-build): .grok/hooks/agmsg.json is removed outright too" {
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set off grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+}
+
+@test "delivery set agmsgd then turn (grok-build): agmsg's own empty [cli] table header is removed too, not left orphaned (2026-11-15 review)" {
+  # No pre-existing config.toml at all: agmsg's write creates the WHOLE
+  # [cli] table, not only the key -- so opt-out must drop the header too.
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  grep -qx "\[cli\]" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  ! grep -q "\[cli\]" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+}
+
+@test "delivery set agmsgd then turn (grok-build): a [cli] table that pre-existed (another key) keeps its header and that key" {
+  mkdir -p "$BATS_TEST_TMPDIR/grokhome"
+  printf '[cli]\nmodel = "grok-4"\n' > "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qx "\[cli\]" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  grep -qx 'model = "grok-4"' "$BATS_TEST_TMPDIR/grokhome/config.toml"
   ! grep -q "use_leader" "$BATS_TEST_TMPDIR/grokhome/config.toml"
 }
 

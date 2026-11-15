@@ -66,11 +66,12 @@ agmsg_delivery_apply() {
   # relinquishes use_leader if this install is the one that added it (never
   # touches a value the user set themselves; see grok-config.sh).
   if [ "$mode" != agmsgd ]; then
-    if [ -f "$hooks_json" ]; then
-      strip_agmsg_event_file "$hooks_json" "SessionStart"
-      strip_agmsg_event_file "$hooks_json" "Stop"
-      prune_empty_hooks_file "$hooks_json"
-    fi
+    # This file exists for agmsgd mode alone (unlike claude-code/codex's
+    # settings.local.json, nothing else ever writes to it), so leaving
+    # agmsgd removes it outright rather than leaving an emptied-out {}
+    # behind (real-machine review, 2026-11-15: a stale hooks/agmsg.json
+    # survived a switch to turn, sitting alongside rules/agmsg.md).
+    rm -f "$hooks_json"
     agmsg_grok_use_leader_disable "$SKILL_DIR" "$(agmsg_grok_config_path)" >/dev/null
   fi
 

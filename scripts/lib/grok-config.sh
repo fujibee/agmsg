@@ -90,10 +90,16 @@ agmsg_grok_use_leader_enable() {
   esac
   # absent: write it.
   mkdir -p "$(dirname "$path")" 2>/dev/null || true
-  local tmp
+  local tmp created_table
   tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-grok-config.XXXXXX")" || { printf 'write_failed\n'; return 1; }
   if [ -f "$path" ]; then
-    awk '
+    # exit 0 when a [cli] table was already there (found_cli), exit 1 when
+    # this write is the one creating it -- read below so the marker can
+    # remember whether agmsg owns the table header itself, not only the
+    # key (real-machine review, 2026-11-15: an opt-out that only ever
+    # removed the key left an orphaned empty `[cli]` heading behind
+    # whenever agmsg had created the whole table).
+    if awk '
       /^[ \t]*\[[^]]*\][ \t\r]*(#.*)?$/ {
         if (incli && !inserted) { print "use_leader = true"; inserted = 1 }
         incli = ($0 ~ /^[ \t]*\[[ \t]*cli[ \t]*\][ \t\r]*(#.*)?$/)
@@ -104,10 +110,16 @@ agmsg_grok_use_leader_enable() {
       END {
         if (incli && !inserted) { print "use_leader = true"; inserted = 1 }
         if (!found_cli) { print ""; print "[cli]"; print "use_leader = true" }
+        exit !found_cli
       }
-    ' "$path" > "$tmp"
+    ' "$path" > "$tmp"; then
+      created_table=""
+    else
+      created_table="table"
+    fi
   else
     printf '[cli]\nuse_leader = true\n' > "$tmp"
+    created_table="table"
   fi
   if ! mv "$tmp" "$path"; then
     rm -f "$tmp"
@@ -117,7 +129,7 @@ agmsg_grok_use_leader_enable() {
   local marker
   marker="$(_agmsg_grok_use_leader_marker "$skill_dir" "$path")"
   mkdir -p "$(dirname "$marker")" 2>/dev/null || true
-  : > "$marker" 2>/dev/null || true
+  printf '%s' "$created_table" > "$marker" 2>/dev/null || true
   printf 'added\n'
 }
 
@@ -133,12 +145,19 @@ agmsg_grok_use_leader_enable() {
 # Prints one of: removed, left_user_owned, nothing_to_do.
 agmsg_grok_use_leader_disable() {
   local skill_dir="$1" path="$2"
-  local marker
+  local marker owned_table
   marker="$(_agmsg_grok_use_leader_marker "$skill_dir" "$path")"
   if [ ! -f "$marker" ]; then
     printf 'nothing_to_do\n'
     return 0
   fi
+  # Read BEFORE removing: "table" means this install's own earlier write
+  # also created the [cli] header itself, not only the key (see
+  # agmsg_grok_use_leader_enable) -- only that case ever removes the
+  # header too, and only when the table is empty besides the key being
+  # removed here. A table that already existed (ours from an earlier,
+  # different key, or the user's own) is never touched.
+  owned_table="$(cat "$marker" 2>/dev/null || true)"
   rm -f "$marker" 2>/dev/null || true
   local current
   current="$(agmsg_grok_use_leader_scan "$path")"
@@ -148,8 +167,8 @@ agmsg_grok_use_leader_disable() {
     printf 'left_user_owned\n'
     return 0
   fi
-  local tmp
-  tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-grok-config.XXXXXX")" || { printf 'nothing_to_do\n'; return 0; }
+  local tmp1
+  tmp1="$(mktemp "${TMPDIR:-/tmp}/agmsg-grok-config.XXXXXX")" || { printf 'nothing_to_do\n'; return 0; }
   awk '
     /^[ \t]*\[[^]]*\][ \t\r]*(#.*)?$/ {
       incli = ($0 ~ /^[ \t]*\[[ \t]*cli[ \t]*\][ \t\r]*(#.*)?$/)
@@ -157,11 +176,39 @@ agmsg_grok_use_leader_disable() {
     }
     incli && /^[ \t]*use_leader[ \t]*=[ \t]*true[ \t\r]*(#.*)?$/ { next }
     { print }
-  ' "$path" > "$tmp"
-  if mv "$tmp" "$path"; then
+  ' "$path" > "$tmp1"
+  local final="$tmp1"
+  if [ "$owned_table" = table ]; then
+    # This install also created the [cli] header itself; drop it too, but
+    # ONLY if the table is now otherwise empty (just blank lines until the
+    # next header or EOF) -- a table the user added keys to since, or that
+    # pre-existed for some other key, is left exactly as it is.
+    local tmp2
+    tmp2="$(mktemp "${TMPDIR:-/tmp}/agmsg-grok-config.XXXXXX")" || { rm -f "$tmp1"; printf 'nothing_to_do\n'; return 0; }
+    awk '
+      function flush_drop() { pending = ""; buf = "" }
+      function flush_keep() { print pending; printf "%s", buf; pending = ""; buf = "" }
+      /^[ \t]*\[[^]]*\][ \t\r]*(#.*)?$/ {
+        if (pending != "") flush_drop()
+        if ($0 ~ /^[ \t]*\[[ \t]*cli[ \t]*\][ \t\r]*(#.*)?$/) { pending = $0; buf = ""; next }
+        print; next
+      }
+      {
+        if (pending != "") {
+          if ($0 ~ /^[ \t]*$/) { buf = buf $0 "\n"; next }
+          flush_keep(); print; next
+        }
+        print
+      }
+      END { if (pending != "") flush_drop() }
+    ' "$tmp1" > "$tmp2"
+    rm -f "$tmp1"
+    final="$tmp2"
+  fi
+  if mv "$final" "$path"; then
     printf 'removed\n'
   else
-    rm -f "$tmp"
+    rm -f "$final"
     printf 'nothing_to_do\n'
   fi
 }
