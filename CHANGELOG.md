@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-11-15
+
+### Fixed
+- send: a failed write says why and exits non-zero instead of failing silently; the quarantine cleanup is bounded by time so it no longer holds off other writers (#1975)
+
+[1.7.4]: https://github.com/fujibee/agmsg/compare/v1.7.3...v1.7.4
+
 ## [1.7.3] - 2026-11-14
 
 ### Added
