@@ -20,13 +20,13 @@
 //   - a changed path is a tracked file the map does not know and that is not
 //     plainly outside the suite (app/, server/, docs/, site/, *.md): a new or
 //     never-exercised file is treated as an input of everything.
-// The table was traced at one commit. A file whose content has changed since
-// (its blob differs from the "H" row), has no "H" row, or branches on the
-// platform (the trace is Linux only) may now depend on files the trace never
-// saw it use. For those files every tracked path they mention (by full path or
-// base name) is added to the inputs of each test that reads them, so a later
-// change to a newly mentioned file still runs that test. A table going stale
-// therefore costs skipping, never correctness.
+// The table was traced at one commit, on Linux. A test that is itself changed
+// since (its blob differs from the "H" row, or it has none), or that reads a
+// file changed since or absent from the table, may now depend on files the
+// trace never saw, so it is not skipped; regenerating the table (bats-trace.yml)
+// makes it skippable again, and a stale table only ever runs more. A file that
+// names Darwin has the paths it mentions added to its readers' inputs (the
+// trace never ran its macOS branch).
 //
 // A test file that is itself in the diff always runs. Any error exits non-zero
 // with no output, and the caller runs everything.
@@ -114,7 +114,15 @@ function main() {
     }
   }
 
-  // Files whose traced dependencies cannot be trusted, and what they mention.
+  // Two kinds of file the table cannot vouch for.
+  //  - Changed since the trace (blob differs), absent from it, gone, or
+  //    unreadable: its dependencies are unknown, so any test that reads it, or
+  //    is it, is not skipped.
+  //  - Naming Darwin: the trace is Linux only, so a macOS branch was never seen
+  //    running. Every tracked path or base name such a file mentions is counted
+  //    as an input of each test that reads it (transitively). This follows
+  //    literal references only; a path assembled at run time in a macOS-only
+  //    branch is not seen.
   const byBase = new Map();
   for (const p of tracked) {
     const b = basename(p);
@@ -122,32 +130,40 @@ function main() {
     if (!byBase.has(b)) byBase.set(b, []);
     byBase.get(b).push(p);
   }
-  const mentions = new Map(); // suspect path -> Set(tracked paths it mentions)
-  const clean = new Set();
-  const suspect = (p) => {
-    if (mentions.has(p)) return true;
-    if (clean.has(p) || !cur.has(p)) return false;
-    let text = '';
-    try { text = readFileSync(join(o.root, p), 'utf8'); } catch { text = ''; }
-    const stale = traced.get(p) !== cur.get(p);
-    if (!stale && !/\b(Darwin|darwin)\b/.test(text)) { clean.add(p); return false; }
-    const m = new Set();
-    for (const tok of text.match(/[A-Za-z0-9_.\/-]+/g) || []) {
-      if (cur.has(tok)) m.add(tok);
-      const b = tok.slice(tok.lastIndexOf('/') + 1);
-      for (const q of byBase.get(b) || []) m.add(q);
+  const state = new Map(); // path -> { stale, mentions }
+  const inspect = (p) => {
+    if (state.has(p)) return state.get(p);
+    let r = { stale: false, mentions: null };
+    if (p === '\0copied') { state.set(p, r); return r; }
+    if (!cur.has(p) || traced.get(p) !== cur.get(p)) r = { stale: true, mentions: null };
+    else {
+      let text = null;
+      try { text = readFileSync(join(o.root, p), 'utf8'); } catch { r = { stale: true, mentions: null }; }
+      if (text !== null && /\b(Darwin|darwin)\b/.test(text)) {
+        const m = new Set();
+        for (const tok of text.match(/[A-Za-z0-9_.\/-]+/g) || []) {
+          if (cur.has(tok)) m.add(tok);
+          for (const q of byBase.get(tok.slice(tok.lastIndexOf('/') + 1)) || []) m.add(q);
+        }
+        r = { stale: false, mentions: m };
+      }
     }
-    mentions.set(p, m);
-    return true;
+    state.set(p, r);
+    return r;
   };
-  const reach = (t) => {
+  // The inputs of a test, or null when its dependencies cannot be vouched for.
+  const inputs = (t) => {
+    if (inspect(t).stale) return null;
     const set = new Set(files.get(t) || []);
-    set.add(t);
     const todo = [...set];
     while (todo.length) {
-      const p = todo.pop();
-      if (!suspect(p)) continue;
-      for (const q of mentions.get(p)) if (!set.has(q)) { set.add(q); todo.push(q); }
+      const r = inspect(todo.pop());
+      if (r.stale) return null;
+      for (const q of r.mentions || []) {
+        if (set.has(q)) continue;
+        set.add(q);
+        todo.push(q);
+      }
     }
     return set;
   };
@@ -157,8 +173,9 @@ function main() {
     let why = '';
     if (!mapped.has(t)) why = 'is not in the input map';
     else if (changed.includes(t)) why = 'is itself changed';
+    else if (inputs(t) === null) why = 'depends on a file changed since the input table was traced';
     else {
-      const f = reach(t);
+      const f = inputs(t);
       if (files.has(t) && files.get(t).has('\0copied')) f.add('\0copied');
       const d = dirs.get(t) || [];
       for (const c of changed) {

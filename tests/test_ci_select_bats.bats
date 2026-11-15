@@ -28,6 +28,7 @@ setup() {
     printf 'D\ttests/c.bats\tscripts/drivers\n'
     printf 'C\ttests/d.bats\n'
   } > "$FIX/.github-map.tsv"
+  freshen_map
 }
 
 select_for() {
@@ -44,8 +45,7 @@ freshen_map() {
   done
 }
 
-@test "a test changed after the trace so it now reads another script runs when that script changes" {
-  freshen_map
+@test "a test changed after the trace so it now reads another script is not skipped" {
   # test a, traced as reading only x.sh, is later edited to source y.sh.
   printf 'source ../scripts/y.sh\n' > "$FIX/tests/a.bats"
   git -C "$FIX" add -A
@@ -54,12 +54,19 @@ freshen_map() {
   local out="$output"
   run grep -cxF tests/a.bats <<< "$out"
   [ "$output" = 0 ]
-  # b reads y.sh by the trace, so it runs too; c is still skipped.
   printf '%s\n' "$out" | grep -qxF tests/c.bats
 }
 
+@test "a test whose dependency is assembled at run time after the trace is not skipped" {
+  printf 'name=y; source "../scripts/${name}.sh"\n' > "$FIX/tests/a.bats"
+  git -C "$FIX" add -A
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  run grep -cxF tests/a.bats <<< "$output"
+  [ "$output" = 0 ]
+}
+
 @test "a script changed after the trace that now calls another script runs that script's readers" {
-  freshen_map
   printf 'exec scripts/y.sh\n' > "$FIX/scripts/x.sh"
   git -C "$FIX" add -A
   # x.sh is read by a; it now mentions y.sh, so changing y.sh must run a too.
@@ -70,7 +77,6 @@ freshen_map() {
 }
 
 @test "a fresh map still skips the tests that do not read the change" {
-  freshen_map
   select_for scripts/y.sh
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -qxF tests/a.bats
@@ -79,8 +85,7 @@ freshen_map() {
   [ "$output" = 0 ]
 }
 
-@test "a script with a macOS branch is treated as possibly reading what it names" {
-  freshen_map
+@test "a test reading a file with an explicit macOS branch is not skipped, even when the table is fresh" {
   printf 'case "$(uname)" in Darwin) . scripts/y.sh ;; esac\n' > "$FIX/scripts/x.sh"
   git -C "$FIX" add -A
   # Even though x.sh was just edited anyway, check the Darwin path on its own:
