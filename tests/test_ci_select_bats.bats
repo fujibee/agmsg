@@ -57,6 +57,31 @@ freshen_map() {
   printf '%s\n' "$out" | grep -qxF tests/c.bats
 }
 
+@test "a fresh test file that names Darwin and mentions a script runs when that script changes" {
+  printf 'case "$(uname)" in Darwin) . scripts/y.sh ;; esac\n' > "$FIX/tests/a.bats"
+  git -C "$FIX" add -A
+  freshen_map
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  run grep -cxF tests/a.bats <<< "$output"
+  [ "$output" = 0 ]
+}
+
+@test "a test reading a file that only branches on uname is not skipped either" {
+  printf 'if [ "$(uname)" = Linux ]; then :; fi\n' > "$FIX/scripts/x.sh"
+  git -C "$FIX" add -A
+  freshen_map
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  run grep -cxF tests/a.bats <<< "$output"
+  [ "$output" = 0 ]
+  # b does not read x.sh and is still skipped? no: it reads y.sh, which changed.
+  run grep -cxF tests/b.bats <<< "$output"
+  [ "$output" = 0 ]
+  select_for scripts/u.sh
+  [ -z "$output" ]
+}
+
 @test "a test whose dependency is assembled at run time after the trace is not skipped" {
   printf 'name=y; source "../scripts/${name}.sh"\n' > "$FIX/tests/a.bats"
   git -C "$FIX" add -A

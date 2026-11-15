@@ -20,20 +20,18 @@
 //   - a changed path is a tracked file the map does not know and that is not
 //     plainly outside the suite (app/, server/, docs/, site/, *.md): a new or
 //     never-exercised file is treated as an input of everything.
-// The table was traced at one commit, on Linux. A test that is itself changed
-// since (its blob differs from the "H" row, or it has none), or that reads a
-// file changed since or absent from the table, may now depend on files the
-// trace never saw, so it is not skipped; regenerating the table (bats-trace.yml)
-// makes it skippable again, and a stale table only ever runs more. A file that
-// names Darwin has the paths it mentions added to its readers' inputs (the
-// trace never ran its macOS branch).
+// The table was traced at one commit, on Linux. A test that is itself, or reads
+// a file that is, changed since the trace (blob differs from the "H" row, or no
+// row), gone, unreadable, or branching on the platform (Darwin, uname, OSTYPE)
+// is not skipped: its dependencies cannot be established from the trace, and
+// unknown means run. Regenerating the table (bats-trace.yml) makes the changed
+// ones skippable again.
 //
 // A test file that is itself in the diff always runs. Any error exits non-zero
 // with no output, and the caller runs everything.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
 import { join } from 'node:path';
 
 const OUTSIDE = [/^app\//, /^server\//, /^docs\//, /^site\//, /\.md$/, /^llms(-full)?\.txt$/, /^LICENSE$/];
@@ -114,58 +112,22 @@ function main() {
     }
   }
 
-  // Two kinds of file the table cannot vouch for.
-  //  - Changed since the trace (blob differs), absent from it, gone, or
-  //    unreadable: its dependencies are unknown, so any test that reads it, or
-  //    is it, is not skipped.
-  //  - Naming Darwin: the trace is Linux only, so a macOS branch was never seen
-  //    running. Every tracked path or base name such a file mentions is counted
-  //    as an input of each test that reads it (transitively). This follows
-  //    literal references only; a path assembled at run time in a macOS-only
-  //    branch is not seen.
-  const byBase = new Map();
-  for (const p of tracked) {
-    const b = basename(p);
-    if (b.length < 4) continue;
-    if (!byBase.has(b)) byBase.set(b, []);
-    byBase.get(b).push(p);
-  }
-  const state = new Map(); // path -> { stale, mentions }
-  const inspect = (p) => {
-    if (state.has(p)) return state.get(p);
-    let r = { stale: false, mentions: null };
-    if (p === '\0copied') { state.set(p, r); return r; }
-    if (!cur.has(p) || traced.get(p) !== cur.get(p)) r = { stale: true, mentions: null };
+  // A file the table cannot vouch for makes every test that reads it (or is it)
+  // run. Either its content changed since the trace (blob differs, no row, gone,
+  // unreadable), or it branches on the platform (Darwin, uname, OSTYPE): the
+  // trace is Linux only, so what a macOS branch reads was never observed, and a
+  // path built at run time cannot be recovered from the text. Unknown means run.
+  const untrusted = new Map();
+  const isUntrusted = (p) => {
+    if (untrusted.has(p)) return untrusted.get(p);
+    let bad = false;
+    if (p === '\0copied') bad = false;
+    else if (!cur.has(p) || traced.get(p) !== cur.get(p)) bad = true;
     else {
-      let text = null;
-      try { text = readFileSync(join(o.root, p), 'utf8'); } catch { r = { stale: true, mentions: null }; }
-      if (text !== null && /\b(Darwin|darwin)\b/.test(text)) {
-        const m = new Set();
-        for (const tok of text.match(/[A-Za-z0-9_.\/-]+/g) || []) {
-          if (cur.has(tok)) m.add(tok);
-          for (const q of byBase.get(tok.slice(tok.lastIndexOf('/') + 1)) || []) m.add(q);
-        }
-        r = { stale: false, mentions: m };
-      }
+      try { bad = /\b(Darwin|darwin|uname|OSTYPE)\b/.test(readFileSync(join(o.root, p), 'utf8')); } catch { bad = true; }
     }
-    state.set(p, r);
-    return r;
-  };
-  // The inputs of a test, or null when its dependencies cannot be vouched for.
-  const inputs = (t) => {
-    if (inspect(t).stale) return null;
-    const set = new Set(files.get(t) || []);
-    const todo = [...set];
-    while (todo.length) {
-      const r = inspect(todo.pop());
-      if (r.stale) return null;
-      for (const q of r.mentions || []) {
-        if (set.has(q)) continue;
-        set.add(q);
-        todo.push(q);
-      }
-    }
-    return set;
+    untrusted.set(p, bad);
+    return bad;
   };
 
   const skip = [];
@@ -173,9 +135,9 @@ function main() {
     let why = '';
     if (!mapped.has(t)) why = 'is not in the input map';
     else if (changed.includes(t)) why = 'is itself changed';
-    else if (inputs(t) === null) why = 'depends on a file changed since the input table was traced';
+    else if (isUntrusted(t) || [...(files.get(t) || [])].some(isUntrusted)) why = 'itself or a file it reads changed since the table was traced, or branches on the platform';
     else {
-      const f = inputs(t);
+      const f = files.get(t) || new Set();
       if (files.has(t) && files.get(t).has('\0copied')) f.add('\0copied');
       const d = dirs.get(t) || [];
       for (const c of changed) {
