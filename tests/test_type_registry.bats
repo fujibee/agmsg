@@ -464,6 +464,39 @@ EOF
   echo "$output" | grep -q "type=claude-code"
 }
 
+@test "type-registry: agmsg_resolve_grok_type reads an explicit 'codex' back as grok-build when GROK_SESSION_ID is set (#846)" {
+  # Grok Build reads the shared, Codex-flavored skill and that skill's own
+  # text tells it to identify as "codex" literally; measured live (Mac, grok
+  # 1.0.77, 2026-11-15): grok's own tool-call process always carries
+  # GROK_SESSION_ID, so that combination is read back as grok-build.
+  run bash -c "source '$SCRIPTS/lib/detect-cli-type.sh'; GROK_SESSION_ID=sid agmsg_resolve_grok_type codex"
+  [ "$status" -eq 0 ]
+  [ "$output" = grok-build ]
+}
+
+@test "type-registry: agmsg_resolve_grok_type leaves every other type/env combination unchanged" {
+  run bash -c "source '$SCRIPTS/lib/detect-cli-type.sh'; agmsg_resolve_grok_type codex"
+  [ "$output" = codex ]   # no GROK_SESSION_ID: codex really is codex
+  run bash -c "source '$SCRIPTS/lib/detect-cli-type.sh'; GROK_SESSION_ID=sid agmsg_resolve_grok_type claude-code"
+  [ "$output" = claude-code ]   # not the literal 'codex': never rewritten
+  run bash -c "source '$SCRIPTS/lib/detect-cli-type.sh'; GROK_SESSION_ID=sid agmsg_resolve_grok_type grok-build"
+  [ "$output" = grok-build ]   # already grok-build: unaffected
+}
+
+@test "type-registry: whoami.sh rewrites an explicit 'codex' type to grok-build end-to-end under GROK_SESSION_ID" {
+  bash "$SCRIPTS/join.sh" myteam bob grok-build "$BATS_TEST_TMPDIR" >/dev/null
+  run env -i PATH="$PATH" GROK_SESSION_ID=sid bash "$SCRIPTS/whoami.sh" "$BATS_TEST_TMPDIR" codex
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "type=grok-build"
+}
+
+@test "type-registry: join.sh registers an explicit 'codex' type as grok-build under GROK_SESSION_ID" {
+  run env -i PATH="$PATH" GROK_SESSION_ID=sid bash "$SCRIPTS/join.sh" myteam carol codex "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 0 ]
+  run env -i PATH="$PATH" bash "$SCRIPTS/team.sh" myteam
+  echo "$output" | grep -q "carol.*grok-build\|grok-build.*carol"
+}
+
 @test "type-registry: refactored scripts hardcode no per-type branch" {
   # join.sh and spawn.sh must be fully data-driven; whoami.sh is allowed only its
   # default fallback (echo "claude-code"). Any other type literal on a non-comment

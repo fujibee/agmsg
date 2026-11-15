@@ -201,7 +201,7 @@ const probeSocket = async (socketPath, timeoutMs = 2000) => (await queryDaemon(s
 export async function readSeatsFromDaemon(owner, alive, timeoutMs = 2000) {
   if (owner?.state !== "ready" || !owner.socket || alive === false) return { state: "daemon_not_running" };
   const response = await queryDaemon(owner.socket, "seats", timeoutMs);
-  if (response !== null) return { state: "ok", codex: response.codex, claude_code: response.claude_code, terminal_poke: response.terminal_poke };
+  if (response !== null) return { state: "ok", codex: response.codex, claude_code: response.claude_code, terminal_poke: response.terminal_poke, grok_queue: response.grok_queue };
   // No answer from a process that is known to be alive is "did not answer"; if
   // even its liveness cannot be confirmed (an old record without a boot id),
   // that is what is reported, not "stopped".
@@ -216,7 +216,7 @@ function formatSeatsNotice(seats) {
   if (seats.state === "daemon_not_running") return "Seats: agmsgd is not running; there is no seat state to show.\n";
   if (seats.state === "no_answer") return "Seats: agmsgd is running but did not answer in time; there is no seat state to show.\n";
   if (seats.state === "liveness_unconfirmed") return "Seats: agmsgd's process could not be confirmed to be running, so its seat state was not fetched.\n";
-  const channelKeys = ["codex", "claude_code", "terminal_poke"];
+  const channelKeys = ["codex", "claude_code", "terminal_poke", "grok_queue"];
   const unpolled = channelKeys.filter((key) => seats[key]?.polled === false);
   if (unpolled.length === channelKeys.length) return "Seats: agmsgd has not finished its first poll yet; seat state appears after it.\n";
   return "";
@@ -248,6 +248,7 @@ async function main() {
   const codexSeats = inventoryOf(seatState, "codex");
   const claudeCodeSeats = inventoryOf(seatState, "claude_code");
   const terminalPokeSeats = inventoryOf(seatState, "terminal_poke");
+  const grokQueueSeats = inventoryOf(seatState, "grok_queue");
 
   // The CLI suppresses Node's ExperimentalWarning category for managed SQLite
   // usage. Ordinary warnings and errors are still surfaced.
@@ -267,7 +268,7 @@ async function main() {
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, terminal_poke_seats: terminalPokeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSeatsNotice(seatState)}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatSkippedTeams("Terminal poke", terminalPokeSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatTerminalPokeSeats(terminalPokeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, terminal_poke_seats: terminalPokeSeats, grok_queue_seats: grokQueueSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSeatsNotice(seatState)}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatSkippedTeams("Terminal poke", terminalPokeSeats)}${formatSkippedTeams("Grok queue", grokQueueSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatTerminalPokeSeats(terminalPokeSeats, all)}${formatGrokQueueSeats(grokQueueSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
 }
@@ -431,6 +432,60 @@ function formatTerminalPokeSeats(inventory, all) {
     lines.push(`Terminal poke ${label}: last daemon observation: ${seat.state}${seat.reason ? ` (${seat.reason})` : ""}`);
   }
   if (omitted) lines.push(`Terminal poke seats: ${omitted} unavailable destination records hidden. View them with: agmsg daemon status --all`);
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+function formatGrokQueueSeats(inventory, all) {
+  let omitted = 0;
+  const lines = [];
+  for (const seat of inventory?.seats ?? []) {
+    if (/^team_roster_/.test(seat.reason ?? "") && seat.seat.endsWith(',""]')) continue;
+    let label;
+    try { label = JSON.parse(seat.seat).join("/"); } catch { label = "unidentified seat"; }
+    const chosen = /^delivery_chosen_([a-z]+)$/.exec(seat.reason ?? "")?.[1];
+    if (chosen) {
+      lines.push(`Grok queue ${label}: ${chosen === "monitor" ? "monitor (legacy)" : chosen} chosen; agmsgd does not deliver here`);
+      continue;
+    }
+    // Observational socket-permission warning (never a refusal reason, see
+    // the channel's own comment, §10/2026-10-31): rides alongside the
+    // normal notified/addressable reason text rather than its own state.
+    const permsSuffix = seat.reason === "socket_dir_perms_lax"
+      ? " (warning: the leader socket's directory is readable/writable by group or other -- recommend chmod 700 on it)"
+      : "";
+    if (seat.state === "notified") {
+      lines.push(`Grok queue ${label}: notified via grok queue${permsSuffix}`);
+      continue;
+    }
+    if (seat.reason === "not_registered_for_agmsgd" || seat.reason === "seat_registration_missing") {
+      if (!all) { omitted += 1; continue; }
+      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat yet (not on agmsgd delivery, or no SessionStart has run)`);
+      continue;
+    }
+    if (seat.reason === "process_gone") {
+      lines.push(`Grok queue ${label}: session process gone`);
+      continue;
+    }
+    if (seat.reason === "first_turn_pending") {
+      lines.push(`Grok queue ${label}: pending: first turn not complete yet`);
+      continue;
+    }
+    if (seat.reason === "leader_socket_unknown") {
+      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat (leader socket unknown)`);
+      continue;
+    }
+    if (seat.state === "pending") {
+      lines.push(`Grok queue ${label}: pending: ${seat.reason || "unknown"}`);
+      continue;
+    }
+    if (!all && seat.state === "addressable" && !permsSuffix) { omitted += 1; continue; }
+    if (seat.state === "addressable") {
+      lines.push(`Grok queue ${label}: addressable${permsSuffix}`);
+      continue;
+    }
+    lines.push(`Grok queue ${label}: last daemon observation: ${seat.state}${seat.reason ? ` (${seat.reason})` : ""}`);
+  }
+  if (omitted) lines.push(`Grok queue seats: ${omitted} unavailable destination records hidden. View them with: agmsg daemon status --all`);
   return lines.length ? `${lines.join("\n")}\n` : "";
 }
 

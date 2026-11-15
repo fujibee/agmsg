@@ -1256,15 +1256,40 @@ EOF
   [[ "$2" =~ grokCamelSID ]]
 }
 
-@test "session-start: falls back to GROK_SESSION_ID env when stdin lacks a session id" {
+@test "session-start: GROK_SESSION_ID in the environment exits 0 silently, even when TYPE is claude-code (#846: grok also fires Claude Code's own hooks)" {
+  # Grok Build executes ~/.claude/settings.json and <project>/.claude/settings*.json
+  # hooks IN ADDITION to its own grok-build hook/delivery path, so this script
+  # fires for a grok session too -- with TYPE still "claude-code" (baked into
+  # settings.json at delivery.sh set time, not something the hook invocation
+  # itself can tell apart). Running the Claude Code SessionStart logic for that
+  # invocation would consume Claude Code's own one-time state for this project
+  # (agmsgd-intro, the down-notice shown-once marker, the cc-instance dedup
+  # record) on behalf of a session that was never the real Claude Code session
+  # those belong to -- so the REAL Claude Code SessionStart, firing later, would
+  # then see them as already consumed and stay silent (2026-11-15 decision,
+  # superseding the GROK_SESSION_ID session-id fallback this test asserted
+  # previously).
   env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
   run env AGMSG_RESOLVE_PROJECT=0 GROK_SESSION_ID=grokEnvSID bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
-  local cmdline
-  cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
-  eval "set -- $cmdline"
-  [[ "$2" =~ grokEnvSID ]]
+  [ -z "$output" ]
+}
+
+@test "session-start: GROK_HOOK_EVENT in the environment exits 0 silently too, even with no GROK_SESSION_ID" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 GROK_HOOK_EVENT=SessionStart bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "session-end: GROK_SESSION_ID in the environment exits 0 without touching Claude Code's own session-end state" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 GROK_SESSION_ID=grokEnvSID bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "session-start: snake_case session_id still wins over camelCase (claude-code unaffected)" {
@@ -3841,6 +3866,60 @@ JSON
   bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [[ "$output" =~ "mode: turn" ]]
+}
+
+@test "delivery set agmsgd (grok-build): writes SessionStart/Stop real hooks, not the rule file" {
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_PROJECT/.grok/rules/agmsg.md" ]
+  [ -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  grep -q "grok-session-start.sh" "$TEST_PROJECT/.grok/hooks/agmsg.json"
+  grep -q "grok-stop.sh" "$TEST_PROJECT/.grok/hooks/agmsg.json"
+}
+
+@test "delivery set agmsgd (grok-build): enables use_leader in config.toml, owned by this install" {
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qx "use_leader = true" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+}
+
+@test "delivery set agmsgd (grok-build): never overwrites a use_leader the user already set" {
+  mkdir -p "$BATS_TEST_TMPDIR/grokhome"
+  printf '[cli]\nuse_leader = false\n' > "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qx "use_leader = false" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+}
+
+@test "delivery status (grok-build): reports agmsgd when its real hooks are present" {
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  [[ "$output" =~ "mode: agmsgd" ]]
+}
+
+@test "delivery set agmsgd then turn (grok-build): tears down the real hooks AND relinquishes use_leader it added" {
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  grep -qx "use_leader = true" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
+  [ ! -s "$TEST_PROJECT/.grok/hooks/agmsg.json" ] || ! grep -q "grok-session-start.sh" "$TEST_PROJECT/.grok/hooks/agmsg.json"
+  ! grep -q "use_leader" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+}
+
+@test "delivery set agmsgd then off (grok-build): leaves a user-set use_leader alone on the way out" {
+  mkdir -p "$BATS_TEST_TMPDIR/grokhome"
+  printf '[cli]\nuse_leader = true\n' > "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  # agmsg never WROTE this value (it was already true), so it never owns it.
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set off grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qx "use_leader = true" "$BATS_TEST_TMPDIR/grokhome/config.toml"
+}
+
+@test "delivery set both (grok-build): still rejected with agmsgd also in delivery_modes" {
+  run bash "$SCRIPTS/delivery.sh" set both grok-build "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
 }
 
 @test "delivery status (codex): a recorded seat makes \"not running\" mean the process (#579)" {

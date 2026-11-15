@@ -5,6 +5,17 @@ export AGMSG_DAEMON_NOTICE_SKIP=1
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 
+# See the matching guard in session-start.sh: Grok Build also executes
+# Claude Code's own hooks, so this script can fire for a grok session even
+# though grok-build has its own separate delivery/hook path. Running the
+# Claude Code SessionEnd cleanup on its behalf would kill/clear state
+# (watcher pidfile, cc-instance record) that actually belongs to a real
+# Claude Code session for this project. Either env var means this is a grok
+# session, not a Claude Code one, no matter what $1 claims.
+if [ -n "${GROK_SESSION_ID:-}" ] || [ -n "${GROK_HOOK_EVENT:-}" ]; then
+  exit 0
+fi
+
 # SessionEnd hook — symmetric counterpart of session-start.sh.
 #
 # Usage: session-end.sh <type> <project_path>

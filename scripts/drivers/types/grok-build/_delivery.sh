@@ -33,6 +33,15 @@
 # records which mode wrote it so status can tell turn from monitor.
 # Uses resolve_hooks_file + SKILL_DIR + RUN_DIR from delivery.sh's sourced context.
 
+# .grok/hooks/agmsg.json -- the real-hooks path agmsgd mode uses, distinct
+# from .grok/rules/agmsg.md (hooks_file=, turn/monitor's own self-poll rule).
+# A literal, project-relative constant, not a manifest key: there is exactly
+# one grok-build native-hooks path, and it is never user-configurable the
+# way hooks_file is documented to be elsewhere.
+_agmsg_grok_hooks_json() {
+  printf '%s/.grok/hooks/agmsg.json\n' "$1"
+}
+
 agmsg_delivery_apply() {
   local type="$1"
   local project="$2"
@@ -42,8 +51,28 @@ agmsg_delivery_apply() {
   # file first -- an unreadable value must never be treated as "nothing to
   # preserve" (#1234 review).
   [ -n "${SKILL_DIR:-}" ] || { echo "agmsg_delivery_apply (grok-build): SKILL_DIR is not set; refusing rather than writing a broken rule file" >&2; return 1; }
-  local rule_file
+  # Sourced here, not at file-scope: this file is sourced directly (with no
+  # SCRIPT_DIR) by the #1234-review tests above that exercise the SKILL_DIR
+  # guard in isolation, and a file-scope `${SCRIPT_DIR:?}` would abort before
+  # that guard's own, more specific message ever runs.
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR:?SCRIPT_DIR is not set}/lib/grok-config.sh"
+  local rule_file hooks_json
   rule_file=$(resolve_hooks_file "$type" "$project")
+  hooks_json="$(_agmsg_grok_hooks_json "$project")"
+
+  # agmsgd is mutually exclusive with turn/monitor's rule AND with its own
+  # hooks file -- leaving agmsgd for any other mode tears both down, and
+  # relinquishes use_leader if this install is the one that added it (never
+  # touches a value the user set themselves; see grok-config.sh).
+  if [ "$mode" != agmsgd ]; then
+    if [ -f "$hooks_json" ]; then
+      strip_agmsg_event_file "$hooks_json" "SessionStart"
+      strip_agmsg_event_file "$hooks_json" "Stop"
+      prune_empty_hooks_file "$hooks_json"
+    fi
+    agmsg_grok_use_leader_disable "$SKILL_DIR" "$(agmsg_grok_config_path)" >/dev/null
+  fi
 
   # Always start clean; turn/monitor rewrite the rule, off leaves it absent.
   rm -f "$rule_file"
@@ -155,6 +184,22 @@ EOF
     off)
       : # rule file already removed
       ;;
+    agmsgd)
+      # agmsgd mode: no rule file (the rm -f above already removed any), no
+      # self-poll/watcher instruction in the agent's own context at all --
+      # delivery is entirely the daemon's grok-queue channel nudging this
+      # seat's leader over ACP, the same shape terminal-poke and codex-queue
+      # already use for their own native/fallback channels.
+      mkdir -p "$(dirname "$hooks_json")"
+      [ -f "$hooks_json" ] || printf '{}\n' > "$hooks_json"
+      strip_agmsg_event_file "$hooks_json" "SessionStart" || true
+      strip_agmsg_event_file "$hooks_json" "Stop" || true
+      add_event_entry_file "$hooks_json" "SessionStart" \
+        "$(_agmsg_shq "$SKILL_DIR/scripts/internal/grok-session-start.sh") $(_agmsg_shq "$project")"
+      add_event_entry_file "$hooks_json" "Stop" \
+        "$(_agmsg_shq "$SKILL_DIR/scripts/internal/grok-stop.sh") $(_agmsg_shq "$project")"
+      agmsg_grok_use_leader_enable "$SKILL_DIR" "$(agmsg_grok_config_path)" >/dev/null
+      ;;
   esac
 }
 
@@ -183,9 +228,12 @@ EOF
 # => monitor; anything else (a present rule) => turn.
 agmsg_delivery_status() {
   local type="$1" project="$2"
-  local rule_file
+  local rule_file hooks_json
   rule_file="$(resolve_hooks_file "$type" "$project")"
-  if [ ! -f "$rule_file" ]; then
+  hooks_json="$(_agmsg_grok_hooks_json "$project")"
+  if [ -f "$hooks_json" ] && grep -q "grok-session-start.sh" "$hooks_json" 2>/dev/null; then
+    echo "mode: agmsgd"
+  elif [ ! -f "$rule_file" ]; then
     echo "mode: off"
   elif grep -q "agmsg-delivery-mode: monitor" "$rule_file" 2>/dev/null; then
     echo "mode: monitor"

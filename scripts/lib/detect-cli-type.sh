@@ -134,3 +134,29 @@ agmsg_detect_cli_type() {
   _AGMSG_DETECT_CLI_TYPE_OUT="claude-code"
   echo "claude-code"
 }
+
+# agmsg_resolve_grok_type <type>
+#
+# Grok Build's own TUI reads the generic, shared skill written for Codex (not
+# a grok-build-specific one), and that skill's own instructions tell it to
+# identify itself with the literal type string "codex" -- there is no way for
+# the skill's own text to know which CLI is actually reading it. So every
+# entry point that takes an EXPLICIT type argument from that skill (whoami.sh,
+# join.sh) sees "codex" even when the real process is grok, and registers/
+# resolves the wrong type (#846).
+#
+# Measured live (2026-11-15, Mac, grok 1.0.77): grok's own tool-call process
+# always has GROK_SESSION_ID set in its environment (along with GROK_AGENT /
+# GROK_LEADER_SOCKET) -- Codex's own tool-call process never does. So an
+# explicit "codex" arriving alongside a non-empty GROK_SESSION_ID is read back
+# as "grok-build" instead; any other type string, or an empty GROK_SESSION_ID,
+# passes through unchanged. Prints the (possibly rewritten) type; always
+# succeeds.
+agmsg_resolve_grok_type() {
+  local t="$1"
+  if [ "$t" = codex ] && [ -n "${GROK_SESSION_ID:-}" ]; then
+    printf '%s\n' grok-build
+  else
+    printf '%s\n' "$t"
+  fi
+}

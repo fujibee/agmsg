@@ -303,6 +303,7 @@ test('a running main answers a seats request from the channels it holds, per cha
         { name: 'codex', seatKind: 'codex', seats: () => ({ polled: true, seats: [{ seat: '["t","a"]', state: 'bridged', reason: 'bridge_running' }] }), pollOnce: async () => { process.send('polling'); }, stop: async () => {} },
         { name: 'claude-code', seatKind: 'claude_code', seats: () => ({ polled: false, seats: [] }), pollOnce: async () => {}, stop: async () => {} },
         { name: 'terminal-poke', seatKind: 'terminal_poke', seats: () => ({ polled: true, seats: [{ seat: '["t","agy1"]', state: 'notified', reason: '' }] }), pollOnce: async () => {}, stop: async () => {} },
+        { name: 'grok-queue', seatKind: 'grok_queue', seats: () => ({ polled: true, seats: [{ seat: '["t","ga1"]', state: 'notified', reason: '' }] }), pollOnce: async () => {}, stop: async () => {} },
       ] });
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
@@ -323,5 +324,6 @@ test('a running main answers a seats request from the channels it holds, per cha
   assert.deepEqual(answer.codex, { polled: true, seats: [{ seat: '["t","a"]', state: 'bridged', reason: 'bridge_running' }] });
   assert.deepEqual(answer.claude_code, { polled: false, seats: [] });
   assert.deepEqual(answer.terminal_poke, { polled: true, seats: [{ seat: '["t","agy1"]', state: 'notified', reason: '' }] });
+  assert.deepEqual(answer.grok_queue, { polled: true, seats: [{ seat: '["t","ga1"]', state: 'notified', reason: '' }] });
   child.kill('SIGTERM');
 });
