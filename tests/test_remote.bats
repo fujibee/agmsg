@@ -66,63 +66,46 @@ cleanup_sync_engines() {
   return "$cleanup_status"
 }
 
-# The #1941 test below starts a launcher, a control subshell and a sleep of its
-# own. Their pids are written to files as soon as they exist, so teardown can
-# stop them even when an assertion ends the test early. Each one is checked to
-# still be this test's own before it is signalled: a recorded number alone is
-# not enough on a shared machine.
+# The #1941 test below runs a launcher in a control subshell. The subshell owns
+# everything it starts: when it ends for any reason (its normal end, a signal
+# from here, or this test stopping early) its EXIT trap signals the process
+# group of each of its own jobs and waits for them. So no process number is
+# looked up later and compared with anything; the only number kept here is the
+# control subshell's own, and it is a child of this shell that has not been
+# waited for, so it cannot belong to anybody else.
 _start_1941_launcher() {
-  local dir="$TEST_SKILL_DIR" nonce="agmsg-1941-$$-$RANDOM"
-  printf '%s\n' "$nonce" > "$dir/1941.nonce"
+  _N1941="agmsg-1941-$$-$RANDOM"
+  local dir="$TEST_SKILL_DIR"
   (
     set -m
-    bash -c 'bash "$1" sync start testteam; sleep 120 & echo "$!" > "$3"; wait' \
-      launcher "$SCRIPTS/remote.sh" "$nonce" "$dir/1941.sleep.pid" &
+    trap 'for job in $(jobs -p); do kill -TERM -- "-$job" 2>/dev/null || true; done; wait' EXIT
+    trap 'exit 143' TERM
+    # The sleeper is a shell of its own so that it carries the nonce too, and a
+    # leak of it is visible to _count_1941_survivors. The command after the
+    # sleep keeps bash from replacing itself with the sleep.
+    bash -c 'bash "$1" sync start testteam; bash -c "sleep 120; : \"\$1\"" sleeper "$2" & wait' \
+      launcher "$SCRIPTS/remote.sh" "$_N1941" &
     echo "$!" > "$dir/1941.launcher.pid"
     wait
   ) &
-  echo "$!" > "$dir/1941.control.pid"
-}
-
-wait_for_gone() {   # <pid>; fails if the process is still there after 5 s
-  local n=0
-  while kill -0 "$1" 2>/dev/null; do
-    n=$((n + 1))
-    [ "$n" -le 50 ] || return 1
-    sleep 0.1
-  done
+  _C1941=$!
 }
 
 _reap_1941_launcher() {
-  local dir="${TEST_SKILL_DIR:-}" nonce launcher control sleeper line
-  [ -n "$dir" ] && [ -f "$dir/1941.nonce" ] || return 0
-  nonce="$(cat "$dir/1941.nonce")"
-  launcher="$(cat "$dir/1941.launcher.pid" 2>/dev/null || true)"
-  control="$(cat "$dir/1941.control.pid" 2>/dev/null || true)"
-  sleeper="$(cat "$dir/1941.sleep.pid" 2>/dev/null || true)"
-  # The sleep is the launcher's child, the launcher carries the nonce, the
-  # control subshell is a child of this shell. Anything that does not match is
-  # left alone.
-  if [ -n "$sleeper" ] && [ -n "$launcher" ]; then
-    line="$(ps -o ppid=,command= -p "$sleeper" 2>/dev/null || true)"
-    if [ "$(awk '{print $1}' <<<"$line")" = "$launcher" ] && [[ "$line" == *"sleep 120"* ]]; then
-      kill -TERM "$sleeper" 2>/dev/null || true
-    fi
-  fi
-  if [ -n "$launcher" ]; then
-    line="$(ps -o command= -p "$launcher" 2>/dev/null || true)"
-    if [[ "$line" == *"$nonce"* ]]; then
-      kill -TERM "$launcher" 2>/dev/null || true
-    fi
-  fi
-  if [ -n "$control" ]; then
-    line="$(ps -o ppid= -p "$control" 2>/dev/null || true)"
-    if [ "$(tr -d ' ' <<<"$line")" = "$$" ]; then
-      kill -TERM "$control" 2>/dev/null || true
-      wait "$control" 2>/dev/null || true
-    fi
-  fi
-  return 0
+  [ -n "${_C1941:-}" ] || return 0
+  local began=$SECONDS
+  kill -TERM "$_C1941" 2>/dev/null || true
+  wait "$_C1941" 2>/dev/null || true
+  _C1941=""
+  # The trap waits for its jobs. If it failed to signal one, that wait lasts as
+  # long as the job does (the sleeper's 120 s), so the time taken is part of
+  # what the tests below check.
+  _R1941=$((SECONDS - began))
+}
+
+# How many processes still carry the launcher's nonce in their arguments.
+_count_1941_survivors() {
+  ps -axo command= | awk -v n="$_N1941" 'index($0, n) && !/awk/ { c++ } END { print c + 0 }'
 }
 
 teardown() {
@@ -1184,9 +1167,7 @@ _capability_endpoint() {
   # test can prove is its own. A group id taken from a process that has already
   # exited can be reused by anybody on a shared machine.
   _start_1941_launcher
-  local nonce control_pid
-  nonce="$(cat "$TEST_SKILL_DIR/1941.nonce")"
-  control_pid="$(cat "$TEST_SKILL_DIR/1941.control.pid")"
+  local nonce="$_N1941" control_pid="$_C1941"
   wait_for_file "$TEST_SKILL_DIR/1941.launcher.pid"
   local launcher_pid
   launcher_pid="$(cat "$TEST_SKILL_DIR/1941.launcher.pid")"
@@ -1206,7 +1187,7 @@ _capability_endpoint() {
   [ "$(awk '{print $1}' <<<"$leader")" = "$launcher_pid" ]
   [ "$(awk '{print $2}' <<<"$leader")" = "$control_pid" ]
   kill -TERM -- "-$launcher_pid"
-  wait "$control_pid" 2>/dev/null || true
+  _reap_1941_launcher
   sleep 0.3
   kill -0 "$engine_pid" 2>/dev/null
   [ "$(cat "$pidfile")" = "$engine_pid" ]
@@ -1215,46 +1196,30 @@ _capability_endpoint() {
 
 @test "the #1941 launcher is reaped by teardown even when a check ends the test early" {
   skip_on_windows "#1941: no process-group claim on native Windows"
-  # Start the same launcher, then stop exactly where a failing wait or check
-  # would, and run what teardown runs. Nothing it started may be left.
+  # Start the launcher and stop at once, before it has had time to start its
+  # sleep and before anything has been recorded about it -- the earliest point
+  # a failing check could end the test. What teardown runs must leave nothing.
+  _start_1941_launcher
+  _reap_1941_launcher
+  [ "$_R1941" -lt 10 ]
+  [ "$(_count_1941_survivors)" = 0 ]
+
+  # And again after the launcher has got as far as sleeping, which is the state
+  # a later failing check would leave behind.
   _start_1941_launcher
   wait_for_file "$TEST_SKILL_DIR/1941.launcher.pid"
-  wait_for_file "$TEST_SKILL_DIR/1941.sleep.pid"
-  local control launcher sleeper
-  control="$(cat "$TEST_SKILL_DIR/1941.control.pid")"
-  launcher="$(cat "$TEST_SKILL_DIR/1941.launcher.pid")"
-  sleeper="$(cat "$TEST_SKILL_DIR/1941.sleep.pid")"
-  kill -0 "$control"
-  kill -0 "$launcher"
-  kill -0 "$sleeper"
-
+  local n=0
+  while [ "$(_count_1941_survivors)" -lt 2 ] && [ "$n" -lt 100 ]; do
+    n=$((n + 1))
+    sleep 0.1
+  done
+  [ "$(_count_1941_survivors)" -ge 1 ]
   _reap_1941_launcher
-  wait_for_gone "$control"
-  wait_for_gone "$launcher"
-  wait_for_gone "$sleeper"
+  [ "$_R1941" -lt 10 ]
+  [ "$(_count_1941_survivors)" = 0 ]
 
   # And it is what teardown actually calls.
   declare -f teardown | grep -q '_reap_1941_launcher'
-}
-
-@test "the #1941 reaper leaves a recorded pid alone when it is not the test's own" {
-  skip_on_windows "#1941: no process-group claim on native Windows"
-  # A pid file that names somebody else's process (a reused number) must not be
-  # signalled: the nonce, the parent and the command are what prove ownership.
-  # Not a child of this shell either, so the parent check has to be the one to
-  # refuse it: started in a subshell that exits, it is handed to init.
-  ( sleep 30 </dev/null >/dev/null 2>&1 & echo "$!" > "$TEST_SKILL_DIR/stranger.pid" )
-  wait_for_file "$TEST_SKILL_DIR/stranger.pid"
-  local stranger
-  stranger="$(cat "$TEST_SKILL_DIR/stranger.pid")"
-  printf '%s\n' "agmsg-1941-not-this-one" > "$TEST_SKILL_DIR/1941.nonce"
-  printf '%s\n' "$stranger" > "$TEST_SKILL_DIR/1941.launcher.pid"
-  printf '%s\n' "$stranger" > "$TEST_SKILL_DIR/1941.sleep.pid"
-  printf '%s\n' "$stranger" > "$TEST_SKILL_DIR/1941.control.pid"
-
-  _reap_1941_launcher
-  kill -0 "$stranger"
-  kill "$stranger"
 }
 
 @test "connect: starts a background sync engine that disconnect stops (Done-when 4)" {
