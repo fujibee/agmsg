@@ -2178,6 +2178,28 @@ _1966_cursor_only() {
   [ "$before" -eq 0 ]
 }
 
+@test "quarantine cleanup: past its deadline a call visits no candidate rows (#1966)" {
+  _1966_page 1 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  # 2,000 rows the cleanup must keep (malformed): each batch would walk all of them.
+  _1966_sql "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
+    INSERT INTO sync_quarantine
+    SELECT local_team,server_instance_id,remote_team_id,protocol_version,driver_generation,
+           CAST(900000+i AS TEXT),'keep-'||i,'2026-07-21T06:00:00.000000Z',1,'none',NULL,'e30=',
+           'malformed','0','0',NULL
+      FROM n, (SELECT * FROM sync_messages LIMIT 1);" >/dev/null
+  local db steps_none steps_all
+  db="$(agmsg_db_path demo)"
+  # SQLite's own count of the work each statement did, not a clock.
+  steps_none="$(_sqlite_sync_quarantine_sweep_sql 0 | sqlite3 -cmd '.stats vmstep' "$db" 2>&1 | awk '/VM-steps/ {n+=$2} END {print n+0}')"
+  steps_all="$(_sqlite_sync_quarantine_sweep_sql 600000 | sqlite3 -cmd '.stats vmstep' "$db" 2>&1 | awk '/VM-steps/ {n+=$2} END {print n+0}')"
+  [ "$steps_none" -lt 500 ]
+  [ "$steps_all" -gt 100000 ]
+  # And the call itself treats running out of time as the end of the call, not a failure.
+  AGMSG_SYNC_SWEEP_MS=0 run _1966_cursor_only 1
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"could not clean up"* ]]
+}
+
 @test "quarantine cleanup: a cleanup that fails is reported, does not fail the pull, and is retried (#1966)" {
   _1966_page 1 2 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
   _1966_restore_rows
