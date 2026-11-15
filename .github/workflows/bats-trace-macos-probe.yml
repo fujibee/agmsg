@@ -1,0 +1,48 @@
+name: bats-trace-macos-probe
+
+# One-off probe: which file-access tracers work on a GitHub macOS runner, and
+# what do they report (pid? parent pid? full paths?). Feeds the macOS half of
+# the bats input table (see bats-trace.yml and build-bats-inputs.mjs).
+on:
+  push:
+    branches: ['ci/mac-trace-probe']
+    paths: ['.github/workflows/bats-trace-macos-probe.yml']
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        run: |
+          sw_vers
+          csrutil status || true
+          for t in fs_usage eslogger dtruss dtrace opensnoop; do printf '%s: ' "$t"; command -v "$t" || echo missing; done
+      - name: fs_usage
+        run: |
+          sudo fs_usage -w -f pathname > "$RUNNER_TEMP/fsu.txt" 2> "$RUNNER_TEMP/fsu.err" &
+          fp=$!
+          sleep 3
+          bash -c 'echo $$ > "$RUNNER_TEMP/child.pid"; cat /etc/hosts > /dev/null; ls /usr/bin > /dev/null; sleep 1; /bin/cat "$GITHUB_WORKSPACE/README.md" >/dev/null'
+          sleep 3
+          sudo kill "$fp" || true
+          echo "child pid: $(cat "$RUNNER_TEMP/child.pid")"
+          echo "--- fs_usage stderr"; head -5 "$RUNNER_TEMP/fsu.err"
+          echo "--- total lines: $(wc -l < "$RUNNER_TEMP/fsu.txt")"
+          echo "--- lines naming README.md"; grep -m5 'README.md' "$RUNNER_TEMP/fsu.txt" || true
+          echo "--- lines naming /etc/hosts"; grep -m5 'hosts' "$RUNNER_TEMP/fsu.txt" || true
+        continue-on-error: true
+      - name: eslogger
+        run: |
+          sudo eslogger exec fork open > "$RUNNER_TEMP/es.json" 2> "$RUNNER_TEMP/es.err" &
+          ep=$!
+          sleep 4
+          bash -c 'echo $$ > "$RUNNER_TEMP/child2.pid"; cat /etc/hosts > /dev/null; /bin/cat "$GITHUB_WORKSPACE/README.md" >/dev/null'
+          sleep 3
+          sudo kill "$ep" || true
+          echo "child pid: $(cat "$RUNNER_TEMP/child2.pid")"
+          echo "--- eslogger stderr"; head -5 "$RUNNER_TEMP/es.err"
+          echo "--- total lines: $(wc -l < "$RUNNER_TEMP/es.json")"
+          grep -m3 'README.md' "$RUNNER_TEMP/es.json" | cut -c1-700 || true
+        continue-on-error: true
