@@ -66,9 +66,9 @@ agmsg_grok_resolve_seat() {
 # session record is assumed flat, no nested object/array values; accepted
 # risk, flagged for the next real-machine round if active_sessions.json
 # turns out to nest), find the one containing this session id as a quoted
-# string, and print its whole text verbatim so the caller's own tolerant
-# field patterns (camelCase pidStart vs snake_case pid_start -- the exact
-# spelling was not confirmed live) can extract from it.
+# string, and print its whole text verbatim so the caller can pull
+# cwd/pid/pid_start out of it (confirmed live, 2026-11-15: the element's
+# keys are exactly cwd, opened_at, pid, pid_start, session_id).
 #
 # Prints the matched object's raw text (one line, newlines stripped) on
 # success; nothing, rc 1, if the file is absent/unreadable or no object

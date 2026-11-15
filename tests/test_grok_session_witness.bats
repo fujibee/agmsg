@@ -7,10 +7,10 @@
 # check-inbox.sh's own decision=block contract.
 #
 # Real-machine round (2026-11-15, NG1): the hook's own $$ is not the real
-# session process; the pid (and start time) comes from
-# GROK_HOME/active_sessions.json, keyed by session id. Every test that
-# expects a witness to be written sets one up via write_active_sessions
-# below.
+# session process; the pid, pid_start, and cwd come from
+# GROK_HOME/active_sessions.json, keyed by session id -- confirmed live
+# keys: cwd, opened_at, pid, pid_start, session_id. Every test that expects
+# a witness to be written sets one up via write_active_sessions below.
 
 load test_helper
 
@@ -24,12 +24,12 @@ setup() {
 }
 teardown() { teardown_test_env; }
 
-# write_active_sessions <session_id> <pid> [pid_start]
+# write_active_sessions <session_id> <pid> [pid_start] [cwd]
 write_active_sessions() {
-  local sid="$1" pid="$2" pid_start="${3:-1794767213378370}"
+  local sid="$1" pid="$2" pid_start="${3:-1794767213378370}" cwd="${4:-/somewhere/else}"
   cat > "$GROK_HOME/active_sessions.json" <<EOF
 [
-  {"sessionId": "$sid", "pid": $pid, "pidStart": $pid_start, "cwd": "/somewhere/else"}
+  {"session_id": "$sid", "pid": $pid, "pid_start": $pid_start, "cwd": "$cwd", "opened_at": "2026-11-15T00:00:00Z"}
 ]
 EOF
 }
@@ -96,14 +96,24 @@ EOF
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   cat > "$GROK_HOME/active_sessions.json" <<'EOF'
 [
-  {"sessionId": "other-session", "pid": 99999, "pidStart": 1},
-  {"sessionId": "sess1", "pid": 17031, "pidStart": 1794767213378370}
+  {"session_id": "other-session", "pid": 99999, "pid_start": 1, "cwd": "/x"},
+  {"session_id": "sess1", "pid": 17031, "pid_start": 1794767213378370, "cwd": "/a/project"}
 ]
 EOF
   run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
   local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
   grep -q '"pid": "17031"' "$f"
+}
+
+@test "grok-session-start.sh: cwd comes from active_sessions.json's own entry, never the hook's \$PWD (2026-11-15 review: macOS /tmp symlink broke session/resume)" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031 1794767213378370 /the/real/canonical/path
+  run env GROK_SESSION_ID=sess1 bash -c "cd '$TEST_PROJECT' && '$SCRIPTS/internal/grok-session-start.sh' '$TEST_PROJECT' <<<'{}'"
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"cwd": "/the/real/canonical/path"' "$f"
+  ! grep -q "\"cwd\": \"$TEST_PROJECT\"" "$f"
 }
 
 @test "grok-stop.sh: marks first_turn_done true on the matching session's witness, and still runs the inbox check" {

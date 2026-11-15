@@ -41,22 +41,23 @@ GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
 # Measured live, 2026-11-15: a hook invocation DOES inherit GROK_LEADER_SOCKET
 # (comment corrected from an earlier "not yet confirmed" note).
 LEADER_SOCKET="${GROK_LEADER_SOCKET:-$GROK_HOME_RESOLVED/leader.sock}"
-CWD="${PWD:-$PROJECT}"
 
 # NG1 (2026-11-15 real-machine round): $$ is this HOOK SCRIPT's own pid,
 # which is gone the instant this script exits -- the channel's pid-liveness
 # check then always read the seat as process_gone. There is no
-# GROK_AGENT_PID env var. The session's real process (and its start time,
-# recorded for a future PID-reuse guard the channel does not check yet) is
-# in GROK_HOME/active_sessions.json, keyed by this SESSION_ID.
+# GROK_AGENT_PID env var. The session's real process (its start time, kept
+# for a future PID-reuse guard the channel does not check yet, and its own
+# cwd) is in GROK_HOME/active_sessions.json, keyed by this SESSION_ID.
+# Confirmed live (2026-11-15): the element's keys are exactly
+# cwd, opened_at, pid, pid_start, session_id.
 PID=""
 PID_START=""
+CWD=""
 _session_obj="$(agmsg_grok_active_session_lookup "$GROK_HOME_RESOLVED/active_sessions.json" "$SESSION_ID" 2>/dev/null || true)"
 if [ -n "$_session_obj" ]; then
   PID="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
-  # Exact key spelling not confirmed live -- tries both camelCase and
-  # snake_case; whichever the real file uses, one of these matches.
-  PID_START="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid[Ss]tart[A-Za-z]*"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+  PID_START="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+  CWD="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi
 # No active_sessions.json entry found (unexpected shape, or the lookup's
 # own flat-object assumption did not hold): fail toward "no witness" rather
@@ -66,6 +67,20 @@ fi
 if [ -z "$PID" ]; then
   echo "agmsg: grok-session-start.sh: could not find session $SESSION_ID in $GROK_HOME_RESOLVED/active_sessions.json; no witness written" >&2
   exit 0
+fi
+# NG2 follow-up (2026-11-15): session/resume's cwd must be grok's own
+# recorded (already-canonical) path, not the hook's $PWD -- on macOS /tmp
+# is itself a symlink to /private/tmp, so a hook running under
+# /tmp/<project> sent a cwd the real leader rejected outright
+# (-32603 FS_NOT_FOUND, "Path not found."), even though it was the
+# project's real directory. active_sessions.json's own cwd is already
+# resolved the way the leader itself expects. A still-empty CWD here
+# (the matched object had no cwd field after all) falls back to a
+# locally-canonicalized PWD/PROJECT as a last resort, better than sending
+# nothing.
+if [ -z "$CWD" ]; then
+  CWD="$(cd "${PWD:-$PROJECT}" 2>/dev/null && pwd -P)"
+  [ -n "$CWD" ] || CWD="${PWD:-$PROJECT}"
 fi
 
 SEAT="$(agmsg_grok_resolve_seat "$PROJECT" 2>/dev/null || true)"
