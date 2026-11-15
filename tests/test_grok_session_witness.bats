@@ -50,10 +50,27 @@ EOF
   grep -q '"first_turn_done": false' "$f"
 }
 
-@test "grok-session-start.sh: falls back to GROK_HOME/leader.sock when GROK_LEADER_SOCKET is unset" {
+@test "grok-session-start.sh: leader_socket is EMPTY when GROK_LEADER_SOCKET is unset, never a guessed default (real-machine review, finding A)" {
+  # A plain (non-leader) TUI never sets GROK_LEADER_SOCKET. Defaulting to
+  # grok's documented leader.sock path here used to record a socket
+  # nothing was listening on -- the channel then spawned the ACP client
+  # against it anyway, and the client itself started a brand-new,
+  # resident leader process against the user's real ~/.grok. An empty
+  # leader_socket is what makes the channel's own connect probe refuse to
+  # spawn anything for this seat at all.
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   write_active_sessions sess1 17031
   run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"leader_socket": ""' "$f"
+  ! grep -q '\.sock"' "$f"
+}
+
+@test "grok-session-start.sh: leader_socket is recorded verbatim when GROK_LEADER_SOCKET IS set (a real leader TUI)" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET="$GROK_HOME/leader.sock" bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
   local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
   grep -q "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$f"

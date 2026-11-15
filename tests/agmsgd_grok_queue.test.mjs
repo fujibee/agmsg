@@ -51,6 +51,7 @@ function channelFixture(t, overrides = {}) {
     }),
     readOwnMarker: () => String(state.sequence),
     checkSocketPerms: () => state.socketLax ?? false,
+    checkLeaderListening: async () => state.leaderListening ?? true,
     nudge: async () => {
       state.nudgeCalls += 1;
       return { kind: state.nudgeKind, reason: state.nudgeReason ?? '' };
@@ -96,6 +97,26 @@ test('a witness missing cwd (needed for session/resume) is unaddressable, never 
   await channel.pollOnce();
   assert.equal(state.nudgeCalls, 0);
   assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'cwd_unknown' });
+  await channel.stop();
+});
+
+test('a leader socket nothing is listening on is pending leader_not_running, the nudge is never attempted (real-machine review, finding A)', async (t) => {
+  const { channel, state } = channelFixture(t);
+  state.leaderListening = false;
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 0, 'spawning the ACP client against a socket nothing listens on would itself start a resident leader process');
+  assert.deepEqual(seatBrief(channel), { state: 'pending', reason: 'leader_not_running:/tmp/fake.sock' });
+  await channel.stop();
+});
+
+test('a leader socket that starts listening again (seat restarted in leader mode) is attempted on the very next poll', async (t) => {
+  const { channel, state } = channelFixture(t);
+  state.leaderListening = false;
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 0);
+  state.leaderListening = true;
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 1);
   await channel.stop();
 });
 

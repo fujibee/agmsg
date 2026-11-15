@@ -216,6 +216,15 @@ EOF
         write_failed)
           echo "agmsg: could not write use_leader to $(agmsg_grok_config_path); the grok-queue channel will not reach this seat until it is set there (set use_leader = true under [cli] yourself, or retry)" >&2
           ;;
+        already_set:*)
+          # The user already has use_leader set to something other than
+          # true -- never overwritten (agmsg_grok_use_leader_enable's own
+          # contract), but a silent "mode set" here reads as "it's working
+          # now" when delivery in fact cannot reach this seat until the
+          # user's own value changes (real-machine review, finding B,
+          # 2026-11-15).
+          echo "agmsg: $(agmsg_grok_config_path) already sets use_leader = ${_agmsg_grok_use_leader_result#already_set:} -- kept as-is; the grok-queue channel will not reach this seat until it is true there" >&2
+          ;;
       esac
       ;;
   esac

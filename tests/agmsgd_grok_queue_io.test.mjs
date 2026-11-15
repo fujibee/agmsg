@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import net from 'node:net';
 
-import { runGrokNudge, createGrokPromptTracker } from '../scripts/daemon/channels/grok-queue-io.mjs';
+import { runGrokNudge, createGrokPromptTracker, probeLeaderListening } from '../scripts/daemon/channels/grok-queue-io.mjs';
 
 function temporaryDirectory(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-grok-queue-io-'));
@@ -76,6 +77,33 @@ rl.on('line', (line) => {
   }
 });
 `;
+
+test('probeLeaderListening: true when something is actually listening on the socket', async (t) => {
+  const dir = temporaryDirectory(t);
+  const sockPath = path.join(dir, 'leader.sock');
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(sockPath, resolve));
+  t.after(() => server.close());
+  assert.equal(await probeLeaderListening(sockPath, 1000), true);
+});
+
+test('probeLeaderListening: false when nothing is listening (ENOENT) -- no process is spawned to find this out', async (t) => {
+  const dir = temporaryDirectory(t);
+  const sockPath = path.join(dir, 'no-such-leader.sock');
+  assert.equal(await probeLeaderListening(sockPath, 1000), false);
+});
+
+test('probeLeaderListening: false when a stale socket file refuses the connection (ECONNREFUSED)', async (t) => {
+  const dir = temporaryDirectory(t);
+  const sockPath = path.join(dir, 'stale.sock');
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(sockPath, resolve));
+  await new Promise((resolve) => server.close(resolve));
+  // The socket FILE can survive its listener's exit on some platforms,
+  // connecting to it then fails with ECONNREFUSED rather than ENOENT --
+  // both must report "nothing is listening", not just the ENOENT case.
+  assert.equal(await probeLeaderListening(sockPath, 1000), false);
+});
 
 test('createGrokPromptTracker: armed, matches a genuinely new entry or running prompt by text', () => {
   const t1 = createGrokPromptTracker('sess-1', 'hello');

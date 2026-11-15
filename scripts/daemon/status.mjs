@@ -21,6 +21,7 @@
 import { readPollTimeout } from './log.mjs';
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAlive } from "./executor.mjs";
@@ -471,7 +472,13 @@ function formatGrokQueueSeats(inventory, all) {
       continue;
     }
     if (seat.reason === "leader_socket_unknown") {
-      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat (leader socket unknown)`);
+      const grokConfig = join(process.env.GROK_HOME || join(homedir(), ".grok"), "config.toml");
+      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
+      continue;
+    }
+    const notRunning = /^leader_not_running:(.+)$/.exec(seat.reason ?? "")?.[1];
+    if (notRunning) {
+      lines.push(`Grok queue ${label}: pending: grok's leader is not running at ${notRunning} (restart the grok session)`);
       continue;
     }
     if (seat.state === "pending") {

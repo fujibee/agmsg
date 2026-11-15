@@ -31,6 +31,7 @@
 // already seen (so a notification observed before arming -- stale state --
 // can never later be mistaken for this attempt's own acceptance).
 import { spawn } from "node:child_process";
+import net from "node:net";
 
 export const ACP_PROTOCOL_VERSION = 1;
 const MAX_BUFFER_CHARS = 64 * 1024;
@@ -55,6 +56,44 @@ function signalProcessGroup(child, signal) {
   } catch {
     // The close event remains the authority for whether the child exited.
   }
+}
+
+// probeLeaderListening <socketPath> [timeoutMs]
+//
+// In-process connect only -- no process spawned to find this out. Real-
+// machine review (2026-11-15, finding A): spawning
+// `grok agent --leader --leader-socket <path> stdio` against a socket
+// nothing is listening on does not just fail -- the bridge itself STARTS
+// a brand-new, resident `grok agent leader` process (PPID 1, outside this
+// client's own process group, so the channel's own SIGTERM/SIGKILL can
+// never reach it) and resumes the session there. That happens whenever a
+// seat's TUI was never started with `--leader` in the first place
+// (use_leader absent/false, or this install's own config edit was
+// unsupported/write_failed) -- silently running a second agent against
+// the user's REAL ~/.grok, against their own choice. This probe is what
+// keeps the channel from ever reaching that spawn when nothing is really
+// listening.
+export async function probeLeaderListening(socketPath, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let socket;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket?.destroy(); } catch { /* already gone */ }
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    try {
+      socket = net.createConnection({ path: socketPath });
+    } catch {
+      finish(false);
+      return;
+    }
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
 }
 
 // createGrokPromptTracker(sessionId, text)

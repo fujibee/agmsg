@@ -3891,6 +3891,15 @@ JSON
   grep -qx "use_leader = false" "$BATS_TEST_TMPDIR/grokhome/config.toml"
 }
 
+@test "delivery set agmsgd (grok-build): a kept-as-is use_leader is reported, not silently 'mode set' (real-machine review, finding B)" {
+  mkdir -p "$BATS_TEST_TMPDIR/grokhome"
+  printf '[cli]\nuse_leader = false\n' > "$BATS_TEST_TMPDIR/grokhome/config.toml"
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "already sets use_leader = false"
+  echo "$output" | grep -q "will not reach this seat"
+}
+
 @test "delivery status (grok-build): reports agmsgd when its real hooks are present" {
   env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
   run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"

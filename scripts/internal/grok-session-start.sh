@@ -32,15 +32,17 @@ if [ -z "$SESSION_ID" ] && [ -n "$INPUT" ]; then
 fi
 [ -n "$SESSION_ID" ] || exit 0   # nothing to attach a witness to
 
-# Measured live (2026-11-15): grok's own tool-call process carries
-# GROK_LEADER_SOCKET. Whether the hook's own process inherits it is NOT yet
-# confirmed the same way -- so a hook invocation missing it falls back to
-# grok's documented default, exactly as a real leader does when launched with
-# no --leader-socket override.
 GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
 # Measured live, 2026-11-15: a hook invocation DOES inherit GROK_LEADER_SOCKET
-# (comment corrected from an earlier "not yet confirmed" note).
-LEADER_SOCKET="${GROK_LEADER_SOCKET:-$GROK_HOME_RESOLVED/leader.sock}"
+# when the TUI was actually started with --leader. NO FALLBACK to grok's
+# documented default path: a plain (non-leader) TUI leaves GROK_LEADER_SOCKET
+# unset, and defaulting to that path anyway recorded a leader_socket nothing
+# was listening on -- the channel's own spawn of the ACP client against it
+# then had the client itself START a brand-new, resident `grok agent leader`
+# process there against the user's REAL ~/.grok (real-machine review, finding
+# A, 2026-11-15). An empty leader_socket here is what makes the channel's own
+# in-process connect probe refuse to spawn anything for this seat at all.
+LEADER_SOCKET="${GROK_LEADER_SOCKET:-}"
 
 # NG1 (2026-11-15 real-machine round): $$ is this HOOK SCRIPT's own pid,
 # which is gone the instant this script exits -- the channel's pid-liveness

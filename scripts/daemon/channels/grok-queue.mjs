@@ -25,7 +25,7 @@ import {
 } from "./codex-queue-store.mjs";
 import { leaderSocketDirIsLax, listGrokRegistrations, readGrokWitness } from "./grok-queue-store.mjs";
 import { pokeNudgeText } from "./terminal-poke-types.mjs";
-import { runGrokNudge } from "./grok-queue-io.mjs";
+import { probeLeaderListening, runGrokNudge } from "./grok-queue-io.mjs";
 
 const NUDGE_TIMEOUT_MS = 10_000;
 // Same shape as terminal-poke's own backoff (review precedent, #1973): a
@@ -162,6 +162,7 @@ export function createGrokQueueChannel({
   readSnapshot = readUnreadSnapshot,
   readOwnMarker = readOwnUnreadMarker,
   nudge = (args) => runGrokNudge(args),
+  checkLeaderListening = (path) => probeLeaderListening(path),
   checkSocketPerms = leaderSocketDirIsLax,
   grokExecutable = (callEnv) => resolveGrokExecutable(callEnv),
   cmdName = installRoot.split(/[\\/]/).filter(Boolean).pop() ?? "agmsg",
@@ -202,6 +203,22 @@ export function createGrokQueueChannel({
     const witnessResult = classifyWitness(readWitness(team, agent));
     if (!witnessResult.ok) {
       saveSeat(book, { seat: key, state: "unaddressable", reason: witnessResult.reason });
+      return;
+    }
+
+    // In-process connect probe only -- no process spawned to find this out
+    // (real-machine review, finding A, 2026-11-15): a seat whose TUI was
+    // never started with --leader (use_leader absent/false, or this
+    // install's own config edit was unsupported/write_failed) has a
+    // leader_socket recorded that nothing is listening on. Spawning the
+    // bridge against it anyway does not just fail -- it starts a brand
+    // new, resident `grok agent leader` process outside this channel's own
+    // control and resumes the session there, a second agent running
+    // alongside the user's own TUI, against their own choice. Retried next
+    // cycle (class A): the seat's own next SessionStart (restarting grok
+    // in leader mode) clears this.
+    if (!(await checkLeaderListening(witnessResult.witness.leader_socket))) {
+      saveSeat(book, { seat: key, state: "pending", reason: `leader_not_running:${witnessResult.witness.leader_socket}` });
       return;
     }
 
