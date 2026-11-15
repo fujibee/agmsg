@@ -66,9 +66,10 @@
     "emptyState": "아직 메시지가 없습니다."
   },
   "pane": {
-    "monitorTip": {
-      "native": "자체 모니터링 — 이 유형은 agmsg 메시지를 직접 전달합니다",
-      "app": "앱 모니터 — agmsg 메시지가 이 창의 표준 입력(stdin)으로 주입됩니다"
+    "deliveryTip": {
+      "agmsgd": "agmsgd가 이 에이전트에 메시지를 전달합니다",
+      "native": "이 CLI는 agmsg 메시지를 직접 받습니다",
+      "app": "앱이 메시지 알림을 이 터미널에 입력합니다"
     },
     "closeTitle": "창 닫기",
     "closeGlyph": "×",

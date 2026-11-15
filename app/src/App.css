@@ -1359,10 +1359,8 @@ body.resizing-row {
   right: 0;
   width: 50%;
 }
-/* Slow pulse shows which delivery path is watching this pane — see
-   Pane.native. Green = the type self-delivers (its own agmsg Monitor);
-   accent (blue) = the app's universal stdin-inject monitor is doing it.
-   The dot itself stays 7px, but the hoverable box is bigger (16px) so it's
+/* The dot of an agent pane says which delivery path serves it — see
+   Pane.delivery. The dot itself stays 7px, but the hoverable box is bigger (16px) so it's
    easy to land on; the tooltip is a real element (not `title`) so it shows
    reliably and instantly instead of depending on the OS's native-tooltip
    delay/behavior. */
@@ -1382,25 +1380,17 @@ body.resizing-row {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  animation: monitor-pulse 2.2s ease-in-out infinite;
-  animation-delay: var(--pulse-delay, 0s);
 }
+/* Who delivers messages to this pane: the CLI itself (green), agmsgd (teal, between green and blue), or the app
+   typing into the terminal (blue). A fixed dot: it states a setting, nothing here is live. */
 .monitor-dot.native::before {
   background: var(--green);
 }
+.monitor-dot.agmsgd::before {
+  background: color-mix(in srgb, var(--green) 55%, var(--accent));
+}
 .monitor-dot.app::before {
   background: var(--accent);
-}
-@keyframes monitor-pulse {
-  0%,
-  100% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
 }
 .monitor-tip {
   display: none;

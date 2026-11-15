@@ -345,7 +345,10 @@ prepare_push() {
   [ "$(printf '%s\n' "$result" | jq -sr '[.[]|select(.status=="imported")]|length')" -eq 1 ]
   [ "$(storage_history demo | jq -s '[.[]|select(.body=="opened later")]|length')" -eq 1 ]
   db=$(agmsg_db_path demo)
-  [ "$(agmsg_sqlite "$db" "SELECT status FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440020';" | tr -d '\r')" = imported ]
+  # Imported and stored under its wire id; the quarantine row that only repeated
+  # it is cleaned up (#1966).
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_messages WHERE wire_id='550e8400-e29b-41d4-a716-446655440020';" | tr -d '\r')" -eq 1 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440020';" | tr -d '\r')" -eq 0 ]
 }
 
 @test "sync contract: reprocess acknowledges a roster projection without making a message" {
@@ -432,8 +435,11 @@ prepare_push() {
   [ "$(storage_history demo |
     jq -s '[.[]|select(.body=="recovered by the newer parser")]|length')" -eq 1 ]
   db=$(agmsg_db_path demo)
+  # Recovered and stored; its quarantine row only repeated it and is cleaned up (#1966).
   [ "$(agmsg_sqlite "$db" \
-    "SELECT status FROM sync_quarantine WHERE wire_id='$malformed_wire';" | tr -d '\r')" = imported ]
+    "SELECT COUNT(*) FROM sync_messages WHERE wire_id='$malformed_wire';" | tr -d '\r')" -eq 1 ]
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT COUNT(*) FROM sync_quarantine WHERE wire_id='$malformed_wire';" | tr -d '\r')" -eq 0 ]
   [ "$(agmsg_sqlite "$db" \
     "SELECT status FROM sync_quarantine WHERE wire_id='$auth_wire';" | tr -d '\r')" = authentication_failed ]
 
@@ -1993,4 +1999,183 @@ bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per li
     | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
   [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = "$good" ]
   [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+}
+
+# ---- #1966: imported and reconciled quarantine rows that only repeat a stored message ----
+
+_1966_page() {
+  # A pull page of importable messages to bob at the given server sequences.
+  local page="" i=0 seq last
+  for seq in "$@"; do
+    i=$((i+1))
+    page="${page}$(jq -nc --arg s "$seq" --arg n "$i" '
+      {type:"sync_pull_message",server_seq:$s,
+       id:("550e8400-e29b-41d4-a716-4466554409"+(if ($n|length)==1 then "0"+$n else $n end)),
+       server_received_at:"2026-07-21T06:00:00.000000Z",
+       envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+       policy_revision:"0",local_security_revision:"0",
+       projection:{body:("msg "+$n),created_at:"2026-07-21T06:00:00.000000Z",
+                   from_agent:"alice",to_agent:"bob"}}')
+"
+  done
+  last="${!#}"
+  printf '%s{"type":"sync_pull_cursor","next_after":"%s"}\n' "$page" "$last"
+}
+
+_1966_sql() { agmsg_sqlite "$(agmsg_db_path demo)" "$1" | tr -d '\r'; }
+
+_1966_restore_rows() {
+  # Put back the quarantine rows the cleanup removed, as a store that has not
+  # been cleaned yet holds them.
+  _1966_sql "INSERT OR IGNORE INTO sync_quarantine
+    SELECT local_team,server_instance_id,remote_team_id,protocol_version,
+           driver_generation,server_seq,wire_id,'2026-07-21T06:00:00.000000Z',
+           envelope_v,cipher,key_id,blob,
+           CASE WHEN direction='pull' THEN 'imported' ELSE 'reconciled' END,
+           '0','0',NULL FROM sync_messages;" >/dev/null
+}
+
+_1966_cursor_only() {
+  printf '%s\n' "{\"type\":\"sync_pull_cursor\",\"next_after\":\"$1\"}" |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+}
+
+@test "quarantine cleanup: a page that imports messages leaves no duplicate of them in quarantine (#1966)" {
+  _1966_page 1 2 3 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_messages;")" -eq 3 ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM events WHERE type='message_sent';")" -eq 3 ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+}
+
+@test "quarantine cleanup: only imported/reconciled rows with no reason and an identical mapping go (#1966)" {
+  _1966_page 1 2 3 4 5 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  _1966_restore_rows
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 5 ]
+  local w
+  w() { _1966_sql "SELECT wire_id FROM sync_messages WHERE server_seq='$1';"; }
+  _1966_sql "UPDATE sync_quarantine SET reason='kept for review' WHERE wire_id='$(w 2)';
+    UPDATE sync_quarantine SET status='corrupt_state' WHERE wire_id='$(w 3)';
+    UPDATE sync_quarantine SET blob='e31=' WHERE wire_id='$(w 4)';
+    UPDATE sync_quarantine SET status='reconciled' WHERE wire_id='$(w 5)';
+    INSERT INTO sync_quarantine SELECT local_team,server_instance_id,remote_team_id,
+      protocol_version,driver_generation,'90','aaaaaaaa-0000-4000-8000-000000000090',
+      server_received_at,envelope_v,cipher,key_id,blob,'imported','0','0',NULL
+      FROM sync_quarantine WHERE server_seq='1';
+    INSERT INTO sync_quarantine SELECT local_team,server_instance_id,remote_team_id,
+      protocol_version,driver_generation,'91','aaaaaaaa-0000-4000-8000-000000000091',
+      server_received_at,envelope_v,cipher,key_id,blob,'malformed','0','0','bad'
+      FROM sync_quarantine WHERE server_seq='1';" >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 7 ]
+  _1966_cursor_only 5
+  # Gone: seq 1 (imported) and seq 5 (reconciled). Kept: the reason row, the
+  # corrupt_state row, the row whose envelope differs from its mapping, the row
+  # with no mapping, and the malformed one.
+  [ "$(_1966_sql "SELECT group_concat(server_seq) FROM (SELECT server_seq FROM sync_quarantine ORDER BY CAST(server_seq AS INTEGER));")" = 2,3,4,90,91 ]
+}
+
+@test "quarantine cleanup: pulling the same page again after the cleanup imports nothing twice and finds no conflict (#1966)" {
+  _1966_page 1 2 3 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+  local before
+  before=$(_1966_sql "SELECT (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM messages),
+    (SELECT COUNT(*) FROM sync_messages), (SELECT group_concat(wire_id||':'||server_seq) FROM sync_messages);")
+  # The same page delivered again, with the rows gone ...
+  _1966_page 1 2 3 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM messages),
+    (SELECT COUNT(*) FROM sync_messages), (SELECT group_concat(wire_id||':'||server_seq) FROM sync_messages);")" = "$before" ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_conflicts;")" -eq 0 ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+  # ... and with the rows still there (a store not cleaned yet).
+  _1966_restore_rows
+  _1966_page 1 2 3 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM messages),
+    (SELECT COUNT(*) FROM sync_messages), (SELECT group_concat(wire_id||':'||server_seq) FROM sync_messages);")" = "$before" ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_conflicts;")" -eq 0 ]
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 3 ]
+}
+
+@test "quarantine cleanup: a server sequence already mapped still conflicts with another wire id after the cleanup (#1966)" {
+  _1966_page 1 2 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+  # Sequence 2 arrives again under a different wire id, and wire id 1 under a
+  # different envelope: both must still be refused, answered by the mapping.
+  local other
+  other=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"2",id:"550e8400-e29b-41d4-a716-4466554409ff",
+     server_received_at:"2026-07-21T06:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+     policy_revision:"0",local_security_revision:"0",
+     projection:{body:"impostor",created_at:"2026-07-21T06:00:00.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  printf '%s\n%s\n' "$other" '{"type":"sync_pull_cursor","next_after":"2"}' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_conflicts WHERE wire_id='550e8400-e29b-41d4-a716-4466554409ff';")" -eq 1 ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM events WHERE type='message_sent';")" -eq 2 ]
+  local changed
+  changed=$(_1966_page 1 | sed 's/"blob":"e30="/"blob":"e31="/')
+  printf '%s\n' "$changed" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_conflicts WHERE wire_id='550e8400-e29b-41d4-a716-446655440901';")" -eq 1 ]
+  [ "$(_1966_sql "SELECT COUNT(*) FROM events WHERE type='message_sent';")" -eq 2 ]
+}
+
+@test "quarantine cleanup: the read frontier is the same with the rows removed as with them there (#1966)" {
+  _968_apply_messages 3 4 5 6
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+  local cleaned with_rows
+  cleaned=$(_968_prepare 6 '["1","2"]')
+  [ "$(_968_frontier "$cleaned")" = 6 ]
+  _1966_restore_rows
+  with_rows=$(_968_prepare 6 '["1","2"]')
+  [ "$cleaned" = "$with_rows" ]
+  # A message that never arrived still pins it, cleaned or not.
+  _1966_sql "DELETE FROM sync_quarantine; DELETE FROM sync_messages WHERE server_seq='4';" >/dev/null
+  [ "$(_968_frontier "$(_968_prepare 6 '["1","2"]')")" = 3 ]
+}
+
+@test "quarantine cleanup: a read frontier from the server marks cleaned messages read (#1966)" {
+  _1966_page 1 2 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 2 ]
+  printf '%s\n' '{"type":"sync_read_context","min_available_seq":"0","current_seq":"2","local_agents":["bob"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"}]}' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"2"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"2"}' |
+    storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 0 ]
+}
+
+@test "quarantine cleanup: a backlog is taken in batches, at most 10,000 rows per pull (#1966)" {
+  _1966_page 1 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  _1966_sql "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10500)
+    INSERT INTO sync_messages
+      (local_team,server_instance_id,remote_team_id,protocol_version,driver_generation,
+       local_position,local_id,wire_id,envelope_v,cipher,key_id,blob,server_seq,direction)
+    SELECT m.local_team,m.server_instance_id,m.remote_team_id,m.protocol_version,
+           m.driver_generation,1000000+i,'bulk-'||i,'bulk-wire-'||i,1,'none',NULL,'e30=',
+           CAST(1000+i AS TEXT),'pull'
+      FROM n, (SELECT * FROM sync_messages LIMIT 1) m;
+    INSERT INTO sync_quarantine
+    SELECT local_team,server_instance_id,remote_team_id,protocol_version,driver_generation,
+           server_seq,wire_id,'2026-07-21T06:00:00.000000Z',1,'none',NULL,'e30=','imported','0','0',NULL
+      FROM sync_messages WHERE wire_id LIKE 'bulk-wire-%';" >/dev/null
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 10500 ]
+  _1966_cursor_only 1
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 500 ]
+  _1966_cursor_only 1
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
+}
+
+@test "quarantine cleanup: a cleanup that fails is reported, does not fail the pull, and is retried (#1966)" {
+  _1966_page 1 2 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  _1966_restore_rows
+  _1966_sql "CREATE TRIGGER no_delete BEFORE DELETE ON sync_quarantine
+    BEGIN SELECT RAISE(ABORT,'no delete'); END;" >/dev/null
+  run _1966_cursor_only 2
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "could not clean up imported quarantine rows"
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 2 ]
+  _1966_sql "DROP TRIGGER no_delete;" >/dev/null
+  _1966_cursor_only 2
+  [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
 }

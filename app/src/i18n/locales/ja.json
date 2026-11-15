@@ -68,9 +68,10 @@
     "emptyState": "メッセージはまだありません。"
   },
   "pane": {
-    "monitorTip": {
-      "native": "セルフモニタリング — このタイプは自身でagmsgメッセージを配信します",
-      "app": "アプリモニター — agmsgメッセージはこのペインの標準入力に注入されます"
+    "deliveryTip": {
+      "agmsgd": "agmsgd がこのエージェントにメッセージを届けます",
+      "native": "この CLI は agmsg のメッセージを自分で受け取ります",
+      "app": "アプリがメッセージの通知をこのターミナルに入力します"
     },
     "closeTitle": "ペインを閉じる",
     "closeGlyph": "×",

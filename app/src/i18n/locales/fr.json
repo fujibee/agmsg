@@ -66,9 +66,10 @@
     "emptyState": "Aucun message pour l'instant."
   },
   "pane": {
-    "monitorTip": {
-      "native": "Auto-surveillance — ce type délivre les messages agmsg par lui-même",
-      "app": "Moniteur de l'app — les messages agmsg sont injectés dans l'entrée standard de ce panneau"
+    "deliveryTip": {
+      "agmsgd": "agmsgd délivre les messages à cet agent",
+      "native": "Cette CLI reçoit les messages agmsg par elle-même",
+      "app": "L'app saisit les notifications de messages dans ce terminal"
     },
     "closeTitle": "fermer le panneau",
     "closeGlyph": "×",

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classify } from "../scripts/daemon/status.mjs";
+import { mkdtempSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { classify, readOwnerAndIntentReadOnly } from "../scripts/daemon/status.mjs";
+import { openInstallDb } from "../scripts/daemon/db.mjs";
 
 const baseOwner = { gen: 1, version: "1.6.0", socket: "/tmp/x.sock" };
 
@@ -118,4 +122,28 @@ test("none + intent on + normal stop -> exit 1, distinct from no-recorded-intent
 
   // Never collapse a real problem into exit 0.
   assert.notEqual(r.exitCode, 0);
+});
+
+test("a start refusal from before the current owner's claim is not the last attempt (read-only status)", () => {
+  const root = mkdtempSync(join(tmpdir(), "agmsgd-status-"));
+  mkdirSync(join(root, "run"));
+  const db = openInstallDb(join(root, "run", "install.db"));
+  try {
+    db.prepare("INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (?, ?, ?)")
+      .run("2000-01-01T00:00:00.000Z", "intent changed since the launcher read it", 1);
+    // A running owner: claimed after that refusal, never ended.
+    db.prepare("UPDATE daemon_owner SET gen = 1, state = 'ready', executor_pid = ?, started_at = ?, executor_started_at = ?, last_end_at = NULL")
+      .run(process.pid, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+  } finally {
+    db.close();
+  }
+  assert.equal(readOwnerAndIntentReadOnly(root).lastAttempt, undefined);
+  const again = openInstallDb(join(root, "run", "install.db"));
+  try {
+    again.prepare("INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (?, ?, ?)")
+      .run("2026-06-01T00:00:00.000Z", "no usable Node found", 2);
+  } finally {
+    again.close();
+  }
+  assert.equal(readOwnerAndIntentReadOnly(root).lastAttempt.reason, "no usable Node found");
 });

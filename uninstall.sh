@@ -21,6 +21,10 @@ set -euo pipefail
 # which this does not move). Unset, this is $HOME, byte-for-byte the prior
 # behavior for those destinations.
 INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
+# How the messages below name a location under INSTALL_HOME: "~" when it is the
+# default (the text these messages always had), the real path once
+# AGMSG_INSTALL_HOME relocates it.
+INSTALL_HOME_SHOWN="${AGMSG_INSTALL_HOME:-~}"
 AGENTS_DIR="$INSTALL_HOME/.agents"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGMSG_INSTALL_OP_RECOVERY_SOURCE=""
@@ -93,7 +97,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --yes, -y       Remove without confirmation"
       echo "  --keep-data     Remove skill but keep DB and team configs"
       echo "  --all           Remove every agmsg install on the machine"
-      echo "  --cmd <name>    Select one installation under ~/.agents/skills"
+      echo "  --cmd <name>    Select one installation under $INSTALL_HOME_SHOWN/.agents/skills"
       echo "  --recover <id>  Clear a verified incomplete operation, then continue uninstall"
       exit 0
       ;;
@@ -432,7 +436,7 @@ _uninstall_one() {
   local CC_CMD="$INSTALL_HOME/.claude/commands/$SKILL_NAME.md"
   if [ -f "$CC_CMD" ]; then
     _uninstall_checked_rm "$CC_CMD" || return 1
-    echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
+    echo "  - removed /$SKILL_NAME from $INSTALL_HOME_SHOWN/.claude/commands/"
     REMOVED=true
   fi
 
@@ -440,7 +444,7 @@ _uninstall_one() {
   local COPILOT_SKILL="$INSTALL_HOME/.copilot/skills/$SKILL_NAME"
   if [ -d "$COPILOT_SKILL" ]; then
     _uninstall_checked_rm -rf "$COPILOT_SKILL" || return 1
-    echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
+    echo "  - removed /$SKILL_NAME skill from $INSTALL_HOME_SHOWN/.copilot/skills/"
     REMOVED=true
   fi
 
@@ -448,7 +452,7 @@ _uninstall_one() {
   local ANTIGRAVITY_SKILL="$INSTALL_HOME/.gemini/config/skills/$SKILL_NAME"
   if [ -d "$ANTIGRAVITY_SKILL" ]; then
     _uninstall_checked_rm -rf "$ANTIGRAVITY_SKILL" || return 1
-    echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
+    echo "  - removed /$SKILL_NAME skill from $INSTALL_HOME_SHOWN/.gemini/config/skills/"
     REMOVED=true
   fi
 

@@ -66,9 +66,10 @@
     "emptyState": "暂无消息。"
   },
   "pane": {
-    "monitorTip": {
-      "native": "自我监控 — 该类型自行投递 agmsg 消息",
-      "app": "应用监控 — agmsg 消息将注入此面板的标准输入"
+    "deliveryTip": {
+      "agmsgd": "agmsgd 会将消息投递给此智能体",
+      "native": "此 CLI 自行接收 agmsg 消息",
+      "app": "应用会将消息通知输入到此终端"
     },
     "closeTitle": "关闭面板",
     "closeGlyph": "×",

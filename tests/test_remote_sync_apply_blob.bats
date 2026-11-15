@@ -60,8 +60,9 @@ capture_apply_sql() {
     db=$(agmsg_db_path demo)
     actual=$(agmsg_sqlite "$db" "SELECT json_group_array(blob) FROM (SELECT blob FROM sync_messages ORDER BY server_seq);" | tr -d '\r')
     [ "$actual" = "$expected" ]
-    actual=$(agmsg_sqlite "$db" "SELECT json_group_array(blob) FROM (SELECT blob FROM sync_quarantine ORDER BY server_seq);" | tr -d '\r')
-    [ "$actual" = "$expected" ]
+    # The quarantine rows repeated those same blobs and are cleaned up after the
+    # page (#1966); the cleanup only removes a row whose blob equals the mapping's.
+    [ "$(agmsg_sqlite "$db" "SELECT count(*) FROM sync_quarantine;" | tr -d '\r')" -eq 0 ]
     [ "$(agmsg_sqlite "$db" "SELECT count(*) FROM events e JOIN messages m ON m.id=e.legacy_id WHERE e.body=m.body AND e.body='body-'||e.seq;" | tr -d '\r')" -eq 3 ]
     [ "$(agmsg_sqlite "$db" "SELECT count(*) FROM messages;" | tr -d '\r')" -eq 3 ]
     [ "$(agmsg_sqlite "$db" "SELECT count(*) FROM sqlite_master WHERE name='sync_apply_envelope';" | tr -d '\r')" -eq 0 ]
