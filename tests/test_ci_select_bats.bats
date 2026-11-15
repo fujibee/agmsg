@@ -35,6 +35,64 @@ select_for() {
   run node "$SELECT" --root "$FIX" --map "$FIX/.github-map.tsv" --changed "$BATS_TEST_TMPDIR/changed.txt"
 }
 
+# Append "H path blob" rows for the fixture's current files, i.e. a map that is
+# exactly as fresh as the tree.
+freshen_map() {
+  local f
+  for f in tests/a.bats tests/b.bats tests/c.bats tests/d.bats scripts/x.sh scripts/y.sh scripts/u.sh; do
+    printf 'H\t%s\t%s\n' "$f" "$(git -C "$FIX" hash-object "$f")" >> "$FIX/.github-map.tsv"
+  done
+}
+
+@test "a test changed after the trace so it now reads another script runs when that script changes" {
+  freshen_map
+  # test a, traced as reading only x.sh, is later edited to source y.sh.
+  printf 'source ../scripts/y.sh\n' > "$FIX/tests/a.bats"
+  git -C "$FIX" add -A
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  local out="$output"
+  run grep -cxF tests/a.bats <<< "$out"
+  [ "$output" = 0 ]
+  # b reads y.sh by the trace, so it runs too; c is still skipped.
+  printf '%s\n' "$out" | grep -qxF tests/c.bats
+}
+
+@test "a script changed after the trace that now calls another script runs that script's readers" {
+  freshen_map
+  printf 'exec scripts/y.sh\n' > "$FIX/scripts/x.sh"
+  git -C "$FIX" add -A
+  # x.sh is read by a; it now mentions y.sh, so changing y.sh must run a too.
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  run grep -cxF tests/a.bats <<< "$output"
+  [ "$output" = 0 ]
+}
+
+@test "a fresh map still skips the tests that do not read the change" {
+  freshen_map
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qxF tests/a.bats
+  printf '%s\n' "$output" | grep -qxF tests/c.bats
+  run grep -cxF tests/b.bats <<< "$output"
+  [ "$output" = 0 ]
+}
+
+@test "a script with a macOS branch is treated as possibly reading what it names" {
+  freshen_map
+  printf 'case "$(uname)" in Darwin) . scripts/y.sh ;; esac\n' > "$FIX/scripts/x.sh"
+  git -C "$FIX" add -A
+  # Even though x.sh was just edited anyway, check the Darwin path on its own:
+  # re-freshen so only the content rule can fire.
+  grep -v '^H.*scripts/x.sh' "$FIX/.github-map.tsv" > "$FIX/.m" && mv "$FIX/.m" "$FIX/.github-map.tsv"
+  printf 'H\tscripts/x.sh\t%s\n' "$(git -C "$FIX" hash-object scripts/x.sh)" >> "$FIX/.github-map.tsv"
+  select_for scripts/y.sh
+  [ "$status" -eq 0 ]
+  run grep -cxF tests/a.bats <<< "$output"
+  [ "$output" = 0 ]
+}
+
 @test "a change only one test reads skips the tests that do not read it" {
   select_for scripts/x.sh
   [ "$status" -eq 0 ]

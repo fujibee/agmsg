@@ -249,3 +249,14 @@ GIT
   grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
   grep -Fq '::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN' "$workflow"
 }
+
+@test "CI: a diff that skips every file is a result, and a partial-tree record is only trusted when it is this tree's own" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+  # grep -c exits 1 on a count of 0; under set -e that must not fail the verify step.
+  grep -Fq "count=\"\$(printf '%s\\n' \"\$expected\" | grep -c . || true)\"" "$workflow"
+  # The record must name this tree, carry one run id, one sha, one skipped line,
+  # and only tests/<name>.bats files that exist; anything else runs everything.
+  grep -Fq '"$(sed -n '"'"'s/^tree //p'"'"' "$m")" = "$tree"' "$workflow"
+  grep -Fq "'^sha [0-9a-f]\\{40\\}\$'" "$workflow"
+  grep -Fq 'tests/*.bats) [ -f "$f" ] || todo="" ;;' "$workflow"
+}

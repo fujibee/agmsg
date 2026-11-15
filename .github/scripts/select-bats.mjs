@@ -20,11 +20,20 @@
 //   - a changed path is a tracked file the map does not know and that is not
 //     plainly outside the suite (app/, server/, docs/, site/, *.md): a new or
 //     never-exercised file is treated as an input of everything.
+// The table was traced at one commit. A file whose content has changed since
+// (its blob differs from the "H" row), has no "H" row, or branches on the
+// platform (the trace is Linux only) may now depend on files the trace never
+// saw it use. For those files every tracked path they mention (by full path or
+// base name) is added to the inputs of each test that reads them, so a later
+// change to a newly mentioned file still runs that test. A table going stale
+// therefore costs skipping, never correctness.
+//
 // A test file that is itself in the diff always runs. Any error exits non-zero
 // with no output, and the caller runs everything.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { join } from 'node:path';
 
 const OUTSIDE = [/^app\//, /^server\//, /^docs\//, /^site\//, /\.md$/, /^llms(-full)?\.txt$/, /^LICENSE$/];
@@ -51,8 +60,12 @@ function args(argv) {
 function main() {
   const o = args(process.argv.slice(2));
   const explain = o.mode === 'explain';
-  const tracked = execFileSync('git', ['-C', o.root, 'ls-files', '-z'], { encoding: 'utf8', maxBuffer: 1 << 26 })
-    .split('\0').filter(Boolean);
+  const cur = new Map(); // tracked path -> blob id at the head
+  for (const e of execFileSync('git', ['-C', o.root, 'ls-files', '-s', '-z'], { encoding: 'utf8', maxBuffer: 1 << 26 }).split('\0').filter(Boolean)) {
+    const tab = e.indexOf('\t');
+    cur.set(e.slice(tab + 1), e.slice(0, tab).split(' ')[1]);
+  }
+  const tracked = [...cur.keys()];
   const trackedSet = new Set(tracked);
   const tests = tracked.filter((p) => /^tests\/[^/]+\.bats$/.test(p)).sort();
   if (tests.length === 0) throw new Error('no tests/*.bats found');
@@ -62,6 +75,7 @@ function main() {
   const dirs = new Map();  // test -> [dir]
   const known = new Set(); // every path some test touches
   const mapped = new Set();
+  const traced = new Map(); // path -> blob id when traced
   for (const line of readFileSync(o.map, 'utf8').split('\n')) {
     if (!line || line.startsWith('#')) continue;
     const c = line.split('\t');
@@ -74,6 +88,8 @@ function main() {
       mapped.add(c[1]);
       if (!dirs.has(c[1])) dirs.set(c[1], []);
       dirs.get(c[1]).push(c[2]);
+    } else if (c[0] === 'H' && c.length === 3) {
+      traced.set(c[1], c[2]);
     } else if (c[0] === 'C' && c.length === 2) {
       mapped.add(c[1]);
       if (!files.has(c[1])) files.set(c[1], new Set());
@@ -98,13 +114,52 @@ function main() {
     }
   }
 
+  // Files whose traced dependencies cannot be trusted, and what they mention.
+  const byBase = new Map();
+  for (const p of tracked) {
+    const b = basename(p);
+    if (b.length < 4) continue;
+    if (!byBase.has(b)) byBase.set(b, []);
+    byBase.get(b).push(p);
+  }
+  const mentions = new Map(); // suspect path -> Set(tracked paths it mentions)
+  const clean = new Set();
+  const suspect = (p) => {
+    if (mentions.has(p)) return true;
+    if (clean.has(p) || !cur.has(p)) return false;
+    let text = '';
+    try { text = readFileSync(join(o.root, p), 'utf8'); } catch { text = ''; }
+    const stale = traced.get(p) !== cur.get(p);
+    if (!stale && !/\b(Darwin|darwin)\b/.test(text)) { clean.add(p); return false; }
+    const m = new Set();
+    for (const tok of text.match(/[A-Za-z0-9_.\/-]+/g) || []) {
+      if (cur.has(tok)) m.add(tok);
+      const b = tok.slice(tok.lastIndexOf('/') + 1);
+      for (const q of byBase.get(b) || []) m.add(q);
+    }
+    mentions.set(p, m);
+    return true;
+  };
+  const reach = (t) => {
+    const set = new Set(files.get(t) || []);
+    set.add(t);
+    const todo = [...set];
+    while (todo.length) {
+      const p = todo.pop();
+      if (!suspect(p)) continue;
+      for (const q of mentions.get(p)) if (!set.has(q)) { set.add(q); todo.push(q); }
+    }
+    return set;
+  };
+
   const skip = [];
   for (const t of tests) {
     let why = '';
     if (!mapped.has(t)) why = 'is not in the input map';
     else if (changed.includes(t)) why = 'is itself changed';
     else {
-      const f = files.get(t) || new Set();
+      const f = reach(t);
+      if (files.has(t) && files.get(t).has('\0copied')) f.add('\0copied');
       const d = dirs.get(t) || [];
       for (const c of changed) {
         if (f.has(c)) { why = `reads ${c}`; break; }

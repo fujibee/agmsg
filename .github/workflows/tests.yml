@@ -438,10 +438,27 @@ jobs:
                && curl -fsSL --max-time 60 -H "Authorization: Bearer $GH_TOKEN" \
                     "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$pid/zip" -o "$RUNNER_TEMP/partial.zip" \
                && unzip -p "$RUNNER_TEMP/partial.zip" green-tree.txt > "$RUNNER_TEMP/partial.txt"; then
-              todo="$(sed -n 's/^skipped //p' "$RUNNER_TEMP/partial.txt" | head -1)"
-              case "$todo" in
-                ''|*[!A-Za-z0-9_./,-]*) todo="" ;;
-              esac
+              # The record must be this tree's own and well formed, and every
+              # file it names must exist here as tests/<name>.bats; otherwise
+              # it is not trusted and everything runs.
+              todo=""
+              m="$RUNNER_TEMP/partial.txt"
+              if [ "$(grep -c '^tree ' "$m" || true)" = 1 ] && [ "$(sed -n 's/^tree //p' "$m")" = "$tree" ] \
+                 && [ "$(grep -c '^run [0-9][0-9]*$' "$m" || true)" = 1 ] \
+                 && [ "$(grep -c '^sha [0-9a-f]\{40\}$' "$m" || true)" = 1 ] \
+                 && [ "$(grep -c '^skipped ' "$m" || true)" = 1 ]; then
+                todo="$(sed -n 's/^skipped //p' "$m")"
+                case "$todo" in
+                  ''|*[!A-Za-z0-9_./,-]*) todo="" ;;
+                esac
+                for f in $(printf '%s' "$todo" | tr ',' ' '); do
+                  case "$f" in
+                    tests/*/*|tests/../*) todo="" ;;
+                    tests/*.bats) [ -f "$f" ] || todo="" ;;
+                    *) todo="" ;;
+                  esac
+                done
+              fi
               if [ -n "$todo" ]; then
                 bats_skip="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort \
                   | grep -vxF -f <(printf '%s' "$todo" | tr ',' '\n') | paste -sd, - || true)"
@@ -761,9 +778,11 @@ jobs:
           fi
           # The other green, named the same way (#798): how many files the
           # shards ran, so a full pass and a skip never read alike.
-          count="$(printf '%s\n' "$expected" | grep -c .)"
+          # grep -c exits 1 on a count of 0, which a diff that skips every file
+          # legitimately produces; that is a result, not a failure.
+          count="$(printf '%s\n' "$expected" | grep -c . || true)"
           if [ -n "$AGMSG_BATS_SKIP" ]; then
-            skipped="$(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n' | grep -c .)"
+            skipped="$(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n' | grep -c . || true)"
             printf '%s\n' "## bats: suite ran, $skipped file(s) skipped" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed. $skipped more file(s) were not run because nothing they read was changed by this diff (inputs traced per file, see .github/scripts/select-bats.mjs); a push of this exact tree runs those." >> "$GITHUB_STEP_SUMMARY"
           else
             printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
