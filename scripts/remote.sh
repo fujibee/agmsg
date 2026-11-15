@@ -2035,6 +2035,41 @@ _remote_sync_engine_start() {
   return "$rc"
 }
 
+# Starts a command detached from THIS shell's session, so a command that
+# itself runs inside another process's whole process group (a Codex shell
+# command, for one -- #1941) does not take the engine down with it when that
+# group is reaped at the command's end. `nohup ... & disown` alone keeps the
+# engine alive across a hangup but leaves it in the caller's process group,
+# which is a different thing: the group itself can still be killed as a
+# unit, engine included, with no SIGHUP involved at all.
+#
+# setsid (Linux, most Unix) makes the given command its own session leader
+# WITHOUT forking -- by default it execs in place, so the pid setsid starts
+# with is the pid the final command keeps; $! read right after this returns
+# still names the engine itself, not a wrapper around it. macOS ships no
+# setsid binary; `perl -MPOSIX` does the identical thing (POSIX::setsid()
+# then exec, which replaces the process image in place, same pid) and perl
+# is standard on macOS. Git Bash on Windows reliably ships neither, so when
+# both are absent this falls back to the exact prior nohup-only start --
+# no new stop or refusal behavior for that case; that would need its own
+# decision, not a side effect of this fix.
+#
+# $1 is the logfile both stdout and stderr are appended to; the rest is the
+# command to run. fds 3 and 4 are closed explicitly in every branch for the
+# same reason the plain nohup call already closed them: under bats, fd 3 is
+# the TAP pipe, and a daemon inheriting it keeps the whole test file open
+# until the CI timeout.
+_remote_sync_engine_spawn() {   # <logfile> <cmd...>
+  local logfile="$1"; shift
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" >> "$logfile" 2>&1 3>&- 4>&- &
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- "$@" >> "$logfile" 2>&1 3>&- 4>&- &
+  else
+    nohup "$@" >> "$logfile" 2>&1 3>&- 4>&- &
+  fi
+}
+
 _remote_sync_engine_start_locked() {
   local team="$1" startup_nonce="${2:-}" pidfile logfile old_pid old_state rundir
   pidfile="$(_remote_sync_engine_pidfile "$team")"
@@ -2148,14 +2183,13 @@ _remote_sync_engine_start_locked() {
       "its start marker could not be written"
     return 1
   fi
-  # nohup so the engine outlives this connect; remote-sync.sh execs node, so $!
-  # stays the engine's own pid and is exactly what _remote_sync_engine_stop signals.
-  # fds 3 and 4 are closed explicitly: under bats, fd 3 is the TAP pipe, and a
-  # daemon inheriting it keeps the whole test file open until the CI timeout —
-  # the last-ok-then-orphan hang this repo has met before, this time spawned by
-  # production code rather than a test.
+  # Detached (own session when setsid/perl are available -- see
+  # _remote_sync_engine_spawn above, #1941) so the engine outlives both a
+  # hangup and the process group of whatever command started it;
+  # remote-sync.sh execs node, so $! stays the engine's own pid and is
+  # exactly what _remote_sync_engine_stop signals.
   AGMSG_SYNC_START_NONCE="$startup_nonce" \
-    nohup bash "$SCRIPT_DIR/remote-sync.sh" run --team "$team" >> "$logfile" 2>&1 3>&- 4>&- &
+    _remote_sync_engine_spawn "$logfile" bash "$SCRIPT_DIR/remote-sync.sh" run --team "$team"
   REMOTE_SYNC_ENGINE_PID=$!
   if ! echo "$REMOTE_SYNC_ENGINE_PID" > "$pidfile" 2>/dev/null; then
     # The engine is already running at this point. Leaving it without a pidfile
