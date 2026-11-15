@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 
-import { runGrokNudge, queueChangedAccepts } from '../scripts/daemon/channels/grok-queue-io.mjs';
+import { runGrokNudge, createGrokPromptTracker } from '../scripts/daemon/channels/grok-queue-io.mjs';
 
 function temporaryDirectory(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-grok-queue-io-'));
@@ -77,14 +77,69 @@ rl.on('line', (line) => {
 });
 `;
 
-test('queueChangedAccepts matches by text in queued entries or the running prompt text', () => {
-  assert.equal(queueChangedAccepts({ entries: [{ id: 'a', text: 'hello' }] }, 'hello'), true);
-  assert.equal(queueChangedAccepts({ entries: [{ id: 'a', text: 'other' }] }, 'hello'), false);
-  assert.equal(queueChangedAccepts({ entries: [], runningText: 'hello' }, 'hello'), true);
-  assert.equal(queueChangedAccepts({ entries: [], runningText: 'other' }, 'hello'), false);
-  assert.equal(queueChangedAccepts({ entries: [], runningPromptId: 'a' }, 'hello'), false);
-  assert.equal(queueChangedAccepts(null, 'hello'), false);
-  assert.equal(queueChangedAccepts({}, 'hello'), false);
+test('createGrokPromptTracker: armed, matches a genuinely new entry or running prompt by text', () => {
+  const t1 = createGrokPromptTracker('sess-1', 'hello');
+  t1.arm();
+  assert.equal(t1.observe({ sessionId: 'sess-1', entries: [{ id: 'a', text: 'hello' }] }), true);
+
+  const t2 = createGrokPromptTracker('sess-1', 'hello');
+  t2.arm();
+  assert.equal(t2.observe({ sessionId: 'sess-1', entries: [{ id: 'a', text: 'other' }] }), false);
+
+  const t3 = createGrokPromptTracker('sess-1', 'hello');
+  t3.arm();
+  assert.equal(t3.observe({ sessionId: 'sess-1', entries: [], runningPromptId: 'r1', runningText: 'hello' }), true);
+
+  const t4 = createGrokPromptTracker('sess-1', 'hello');
+  t4.arm();
+  assert.equal(t4.observe({ sessionId: 'sess-1', entries: [], runningText: 'other' }), false);
+  assert.equal(t4.observe(null), false);
+  assert.equal(t4.observe({ sessionId: 'sess-1' }), false);
+});
+
+test('createGrokPromptTracker: a notification for a DIFFERENT sessionId never counts, even with matching text (review on #1979)', () => {
+  const tracker = createGrokPromptTracker('sess-1', 'hello');
+  tracker.arm();
+  assert.equal(tracker.observe({ sessionId: 'sess-OTHER', entries: [{ id: 'a', text: 'hello' }] }), false);
+});
+
+test('createGrokPromptTracker: a notification observed before arm() is pre-existing state, never counted as acceptance even if armed later', () => {
+  const tracker = createGrokPromptTracker('sess-1', 'hello');
+  // Arrives (e.g. right after initialize) before session/prompt is sent.
+  assert.equal(tracker.observe({ sessionId: 'sess-1', entries: [{ id: 'a', text: 'hello' }] }), false);
+  tracker.arm();
+  // The SAME entry, still sitting there -- never freshly matched.
+  assert.equal(tracker.observe({ sessionId: 'sess-1', entries: [{ id: 'a', text: 'hello' }] }), false);
+});
+
+test('createGrokPromptTracker: a PREVIOUS attempt\'s own already-seen entry (same literal text) never counts for a later one', () => {
+  // The nudge text is the same fixed string every attempt, so two
+  // different unread-transition attempts for the same seat can produce
+  // identical queue/changed text. A tracker instance is per-attempt
+  // (grok-queue-io.mjs makes a fresh one per runGrokNudge call), so this
+  // models the handoff: the first attempt's tracker having already seen
+  // entry "p1" must not let a SECOND attempt's fresh tracker treat that
+  // same still-queued entry as its own new acceptance.
+  const first = createGrokPromptTracker('sess-1', 'hello');
+  first.arm();
+  assert.equal(first.observe({ sessionId: 'sess-1', entries: [{ id: 'p1', text: 'hello' }] }), true);
+
+  const second = createGrokPromptTracker('sess-1', 'hello');
+  // The second attempt's tracker observes the SAME leftover entry before
+  // arming (its own initialize/session/resume phase) -- recorded as seen.
+  second.observe({ sessionId: 'sess-1', entries: [{ id: 'p1', text: 'hello' }] });
+  second.arm();
+  assert.equal(second.observe({ sessionId: 'sess-1', entries: [{ id: 'p1', text: 'hello' }] }), false);
+  // A genuinely NEW entry for the second attempt still matches.
+  assert.equal(second.observe({ sessionId: 'sess-1', entries: [{ id: 'p1', text: 'hello' }, { id: 'p2', text: 'hello' }] }), true);
+});
+
+test('createGrokPromptTracker: a running prompt already seen as running does not re-match on a later identical notification', () => {
+  const tracker = createGrokPromptTracker('sess-1', 'hello');
+  tracker.observe({ sessionId: 'sess-1', entries: [], runningPromptId: 'r1', runningText: 'hello' });
+  tracker.arm();
+  assert.equal(tracker.observe({ sessionId: 'sess-1', entries: [], runningPromptId: 'r1', runningText: 'hello' }), false);
+  assert.equal(tracker.observe({ sessionId: 'sess-1', entries: [], runningPromptId: 'r2', runningText: 'hello' }), true);
 });
 
 test('a queued prompt accepted via queue/changed entries reports ok, and the client is torn down right after', async (t) => {
@@ -116,6 +171,67 @@ test('a prompt already running (queue/changed runningText, entries empty) also r
     spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
   });
   assert.equal(result.kind, 'ok');
+});
+
+test('runGrokNudge end to end: a queue/changed with matching text that arrives BEFORE session/prompt is sent is never mistaken for acceptance (review on #1979)', async (t) => {
+  const dir = temporaryDirectory(t);
+  // Sends a stale-looking queue/changed with our exact text right after
+  // initialize -- before session/resume has even been answered -- then
+  // only answers for real once session/prompt actually arrives.
+  const scriptPath = writeFakeLeaderClient(dir, `
+    const readline = require('node:readline');
+    const rl = readline.createInterface({ input: process.stdin });
+    let promptSeen = false;
+    rl.on('line', (line) => {
+      let msg; try { msg = JSON.parse(line); } catch { return; }
+      if (msg.method === 'initialize') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', method: '_x.ai/queue/changed',
+          params: { sessionId: 'sess-1', entries: [{ id: 'stale', text: 'agmsg: you have new messages.' }] },
+        }) + '\\n');
+      } else if (msg.method === 'session/resume') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+      } else if (msg.method === 'session/prompt') {
+        promptSeen = true;
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', method: '_x.ai/queue/changed',
+          params: { sessionId: 'sess-1', entries: [{ id: 'stale', text: 'agmsg: you have new messages.' }, { id: 'fresh', text: msg.params.prompt[0].text }] },
+        }) + '\\n');
+      }
+    });
+    process.on('exit', () => { if (!promptSeen) process.stderr.write('session/prompt never arrived\\n'); });
+  `);
+  const result = await runGrokNudge({
+    executable: process.execPath,
+    leaderSocket: '/tmp/fake.sock',
+    sessionId: 'sess-1',
+    cwd: '/a/project',
+    text: 'agmsg: you have new messages.',
+    timeoutMs: 5000,
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
+  });
+  assert.equal(result.kind, 'ok');
+});
+
+test('runGrokNudge: an unresponsive client that ignores SIGTERM is SIGKILLed after the grace period, not left running', async (t) => {
+  const dir = temporaryDirectory(t);
+  const scriptPath = writeFakeLeaderClient(dir, `
+    process.on('SIGTERM', () => {}); // ignore it
+    process.stdin.resume();
+  `);
+  const result = await runGrokNudge({
+    executable: process.execPath,
+    leaderSocket: '/tmp/fake.sock',
+    sessionId: 'sess-1',
+    cwd: '/a/project',
+    text: 'x',
+    timeoutMs: 200,
+    spawnProcess: (exe, args, opts) => callDefault(exe, args, opts, scriptPath),
+  });
+  assert.equal(result.kind, 'timeout');
+  // runGrokNudge only returns once the child has actually been confirmed
+  // closed (SIGKILL after the grace period here) -- not merely signaled.
 });
 
 test('session/resume sends cwd and mcpServers (a leader that rejects a request missing them would otherwise report an unexplained timeout)', async (t) => {

@@ -145,6 +145,52 @@ test('a project that opted out of agmsgd delivery is reported, never attempted',
   await channel.stop();
 });
 
+test('real roster + real delivery-choice: a seat that opted out is never nudged via a stale witness (review on #1979)', async (t) => {
+  // Deliberately NOT stubbing listSeats here -- finding (1): the review found that
+  // listGrokRegistrations itself never returned a project at all, so
+  // optedOutOfAgmsgd(installRoot, "grok-build", seat.project) was always
+  // called with undefined and could never match the recorded choice. A
+  // stub that already supplies `project` (every other test in this file)
+  // cannot reproduce that; this one goes through the real roster file and
+  // the real delivery-choice file end to end.
+  const root = temporaryDirectory(t);
+  mkdirSync(path.join(root, 'run'));
+  const db = openInstallDb(path.join(root, 'run', 'install.db'));
+  ensureGrokQueueChannelSchema(db);
+  db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
+  t.after(() => db.close());
+
+  const teamsDir = path.join(root, 'teams', 'test');
+  mkdirSync(teamsDir, { recursive: true });
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(path.join(teamsDir, 'config.json'), JSON.stringify({
+    agents: { ga1: { registrations: [{ type: 'grok-build', project: root }] } },
+  }));
+  writeFileSync(path.join(root, 'run', 'delivery-choice'), `grok-build\t${root}\tturn\n`);
+  // A witness that WOULD be attempted if the opt-out check were bypassed
+  // -- proving the opt-out, not a missing witness, is what stops this.
+  writeFileSync(path.join(root, 'run', `grok-seat.stale-placeholder.json`), '{}');
+
+  let nudgeCalls = 0;
+  const channel = createGrokQueueChannel({
+    db, installRoot: root, expectedOpGen: 1, env: {},
+    now: () => Date.UTC(2026, 10, 15),
+    log: () => {},
+    readWitness: () => ({ state: 'ok', witness: { session_id: 'sess-1', pid: process.pid, leader_socket: '/tmp/fake.sock', cwd: root, first_turn_done: true } }),
+    nudgeText: () => 'agmsg: you have new messages. Run /agmsg to check your inbox.',
+    readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
+    openStore: () => ({ close() {} }),
+    readSnapshot: () => ({ state: 'ok', unread: true, upTo: JSON.stringify({ eventSeq: 1, legacyId: 0 }) }),
+    readOwnMarker: () => '1',
+    nudge: async () => { nudgeCalls += 1; return { kind: 'ok' }; },
+  });
+  await channel.pollOnce();
+  assert.equal(nudgeCalls, 0, 'the real roster carried this seat\'s real project, so the real opt-out choice must be found and honored');
+  const row = channel.seats().seats.find((item) => item.seat === JSON.stringify(['test', 'ga1']));
+  assert.equal(row?.reason, 'delivery_chosen_turn');
+  await channel.stop();
+});
+
 test('a lax leader-socket directory permission is surfaced as a warning, delivery still proceeds', async (t) => {
   const { channel, state } = channelFixture(t);
   state.socketLax = true;

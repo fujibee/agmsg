@@ -46,6 +46,23 @@ function readJson(path) {
   }
 }
 
+// The most recent registration of type grok-build, scanning from the END
+// of the array -- same shape as terminal-poke-store.mjs's own
+// latestNonNativeRegistration. A seat can carry more than one historical
+// registration (re-joins for a different project), and the LATEST one's
+// project is the one that is actually live -- an older entry's project is
+// not what optedOutOfAgmsgd (keyed by exact project path) should be asked
+// about (the review on #1979: listGrokRegistrations never returned a
+// project at all, so an opted-out seat's choice never matched and it kept
+// getting delivered to via a stale witness).
+function latestGrokRegistration(registrations) {
+  if (!Array.isArray(registrations)) return null;
+  for (let index = registrations.length - 1; index >= 0; index -= 1) {
+    if (registrations[index]?.type === "grok-build") return registrations[index];
+  }
+  return null;
+}
+
 // Enumerates only roles whose current registration explicitly names
 // grok-build. Mirrors listCodexRegistrations's own malformed-team handling
 // (#1973 review precedent): one bad team is reported under `skipped`, every
@@ -74,8 +91,9 @@ export function listGrokRegistrations(teamsDir) {
     }
     for (const [agent, value] of Object.entries(config.agents)) {
       const regs = value && Array.isArray(value.registrations) ? value.registrations : [];
-      if (regs.some((registration) => registration?.type === "grok-build")) {
-        seats.push({ team: entry.name, agent, teamConfig: config });
+      const registration = latestGrokRegistration(regs);
+      if (registration) {
+        seats.push({ team: entry.name, agent, project: registration.project ?? "", teamConfig: config });
       }
     }
   }

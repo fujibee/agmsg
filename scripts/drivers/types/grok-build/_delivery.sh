@@ -46,6 +46,7 @@ agmsg_delivery_apply() {
   local type="$1"
   local project="$2"
   local mode="$3"
+  local _agmsg_grok_use_leader_result
   # Refuse before any write: an empty SKILL_DIR would render broken guidance
   # paths into the rule file, and the rm -f below removes the existing rule
   # file first -- an unreadable value must never be treated as "nothing to
@@ -72,7 +73,15 @@ agmsg_delivery_apply() {
     # behind (real-machine review, 2026-11-15: a stale hooks/agmsg.json
     # survived a switch to turn, sitting alongside rules/agmsg.md).
     rm -f "$hooks_json"
-    agmsg_grok_use_leader_disable "$SKILL_DIR" "$(agmsg_grok_config_path)" >/dev/null
+    _agmsg_grok_use_leader_result="$(agmsg_grok_use_leader_disable "$SKILL_DIR" "$(agmsg_grok_config_path)")" || true
+    case "$_agmsg_grok_use_leader_result" in
+      unsupported:*)
+        echo "agmsg: $(agmsg_grok_config_path)'s [cli] table (or its use_leader key) is written in a form this cannot safely edit (${_agmsg_grok_use_leader_result#unsupported:}); leaving use_leader as-is -- remove it there yourself if it should no longer be set" >&2
+        ;;
+      write_failed)
+        echo "agmsg: could not remove use_leader from $(agmsg_grok_config_path); it is still set there (remove it yourself under [cli], or retry)" >&2
+        ;;
+    esac
   fi
 
   # Always start clean; turn/monitor rewrite the rule, off leaves it absent.
@@ -199,7 +208,15 @@ EOF
         "$(_agmsg_shq "$SKILL_DIR/scripts/internal/grok-session-start.sh") $(_agmsg_shq "$project")"
       add_event_entry_file "$hooks_json" "Stop" \
         "$(_agmsg_shq "$SKILL_DIR/scripts/internal/grok-stop.sh") $(_agmsg_shq "$project")"
-      agmsg_grok_use_leader_enable "$SKILL_DIR" "$(agmsg_grok_config_path)" >/dev/null
+      _agmsg_grok_use_leader_result="$(agmsg_grok_use_leader_enable "$SKILL_DIR" "$(agmsg_grok_config_path)")" || true
+      case "$_agmsg_grok_use_leader_result" in
+        unsupported:*)
+          echo "agmsg: $(agmsg_grok_config_path)'s [cli] table (or its use_leader key) is written in a form this cannot safely edit (${_agmsg_grok_use_leader_result#unsupported:}); leaving it as-is -- set use_leader = true there yourself for the grok-queue channel to reach this seat" >&2
+          ;;
+        write_failed)
+          echo "agmsg: could not write use_leader to $(agmsg_grok_config_path); the grok-queue channel will not reach this seat until it is set there (set use_leader = true under [cli] yourself, or retry)" >&2
+          ;;
+      esac
       ;;
   esac
 }

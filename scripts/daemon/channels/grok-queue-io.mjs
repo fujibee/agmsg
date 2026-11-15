@@ -19,10 +19,22 @@
 //      our own prompt either queued (entries[].text === our text) or
 //      already running (runningText === our text, entries empty) -- killing
 //      the client right after does not cancel an already-accepted prompt.
+//
+// the review on #1979 (2026-11-15) found acceptance detection matched ANY
+// queue/changed showing our fixed nudge TEXT, from ANY session, at ANY
+// point -- including one that arrived right after initialize, before
+// session/prompt was even sent, or one left over from this exact seat's
+// PREVIOUS attempt (the nudge text is the same literal string every time).
+// createGrokPromptTracker below fixes this: it is armed only once
+// session/prompt has actually been sent, scopes every notification to our
+// OWN sessionId, and only accepts an entry/running-prompt it has not
+// already seen (so a notification observed before arming -- stale state --
+// can never later be mistaken for this attempt's own acceptance).
 import { spawn } from "node:child_process";
 
 export const ACP_PROTOCOL_VERSION = 1;
 const MAX_BUFFER_CHARS = 64 * 1024;
+const KILL_GRACE_MS = 1000;
 
 function appendBounded(current, chunk) {
   if (current.length >= MAX_BUFFER_CHARS) return current;
@@ -45,26 +57,57 @@ function signalProcessGroup(child, signal) {
   }
 }
 
-// True when a queue/changed notification's payload shows OUR prompt text
-// already accepted -- either queued (entries) or already running
-// (runningText, entries empty in that case). Matching by TEXT, not an id
-// agmsg generated itself: session/prompt's own response (which would
-// normally carry one) does not arrive until the turn ends, so there is
-// nothing else to match on by the time acceptance needs to be decided
-// (measured live).
-export function queueChangedAccepts(payload, promptText) {
-  if (!payload || typeof payload !== "object") return false;
-  const entries = Array.isArray(payload.entries) ? payload.entries : [];
-  for (const entry of entries) {
-    if (entry && typeof entry === "object" && entry.text === promptText) return true;
-  }
-  if (payload.runningText === promptText) return true;
-  return false;
+// createGrokPromptTracker(sessionId, text)
+//
+// observe(params) must be called for EVERY "_x.ai/queue/changed"
+// notification received over the whole lifetime of the client (before and
+// after arm()), so entries/running state that existed before THIS attempt
+// sent its own session/prompt are recorded as already-seen and can never
+// later read as a fresh acceptance. Returns true the first time, after
+// arm() was called, that a genuinely NEW entry or running-prompt matching
+// `text` appears under this exact `sessionId`.
+export function createGrokPromptTracker(sessionId, text) {
+  const seenEntryIds = new Set();
+  let seenRunningId;
+  let armed = false;
+  return {
+    arm() { armed = true; },
+    observe(params) {
+      if (!params || typeof params !== "object" || params.sessionId !== sessionId) return false;
+      const entries = Array.isArray(params.entries) ? params.entries : [];
+      let accepted = false;
+      if (armed) {
+        for (const entry of entries) {
+          if (entry && typeof entry === "object" && !seenEntryIds.has(entry.id) && entry.text === text) {
+            accepted = true;
+            break;
+          }
+        }
+        if (!accepted && params.runningPromptId && params.runningPromptId !== seenRunningId && params.runningText === text) {
+          accepted = true;
+        }
+      }
+      // Always update what has been seen, armed or not, so this exact
+      // same state is never read as new again on a later notification.
+      for (const entry of entries) {
+        if (entry && typeof entry === "object" && entry.id != null) seenEntryIds.add(entry.id);
+      }
+      if (params.runningPromptId) seenRunningId = params.runningPromptId;
+      return accepted;
+    },
+  };
 }
 
 // Runs one grok-queue nudge: spawn the leader-socket stdio bridge, speak
 // ACP long enough to get the prompt accepted, then disconnect -- the
-// client's own process is never kept alive past acceptance.
+// client's own process is never kept alive past acceptance. Termination is
+// confirmed, not assumed: SIGTERM, then SIGKILL after a grace period if the
+// process (or an unresponsive leader holding its pipes open) has not
+// actually exited, mirroring codex-queue-io.mjs's own shutdown shape --
+// `timeoutMs` bounds the ATTEMPT via the result promise, not the child
+// process's own lifetime, so without this a client that ignores SIGTERM
+// (or a slow leader) could still be running when the NEXT attempt for the
+// same seat starts.
 export async function runGrokNudge({
   executable = "grok",
   leaderSocket,
@@ -98,6 +141,25 @@ export async function runGrokNudge({
 
   let stderr = "";
   child.stderr?.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
+  // An EPIPE/ECONNRESET writing to a closed/broken stdin must fail this
+  // ATTEMPT, never the daemon process -- Node emits it as an 'error' event
+  // on the stream, which is otherwise an unhandled rejection source.
+  child.stdin?.on("error", () => { /* surfaced via close/timeout below */ });
+
+  let settleClosed;
+  let closedSettled = false;
+  const closed = new Promise((resolveClose) => {
+    const settle = (value) => {
+      if (closedSettled) return;
+      closedSettled = true;
+      resolveClose(value);
+    };
+    settleClosed = settle;
+    child.once("error", (error) => settle({ error }));
+    child.once("close", (code) => settle({ code }));
+  });
+
+  const tracker = createGrokPromptTracker(sessionId, text);
 
   let settle;
   const result = new Promise((resolveResult) => { settle = resolveResult; });
@@ -138,7 +200,7 @@ export async function runGrokNudge({
         continue; // a non-JSON line (e.g. stray log output) is not fatal here
       }
       if (msg.method === "_x.ai/queue/changed") {
-        if (queueChangedAccepts(msg.params, text)) {
+        if (tracker.observe(msg.params)) {
           accepted = true;
           finish({ kind: "ok", state: "notified" });
         }
@@ -191,6 +253,11 @@ export async function runGrokNudge({
       // leader -- omitting them was NG2's first half.
       await request("session/resume", { sessionId, cwd, mcpServers: [] });
       if (settled) return;
+      // Armed HERE, immediately before actually sending session/prompt --
+      // any queue/changed observed up to this exact point (including ones
+      // that arrived while initialize/session/resume were in flight) is
+      // recorded as pre-existing state, never a match for THIS attempt.
+      tracker.arm();
       // An id-bearing REQUEST, not a notification (measured live: a
       // notification never reached the leader's own queue at all) --
       // and prompt is an array of content blocks, never a bare string.
@@ -210,7 +277,23 @@ export async function runGrokNudge({
   const outcome = await result;
   clearTimeout(timer);
   signal?.removeEventListener("abort", onAbort);
-  signalProcessGroup(child, "SIGTERM");
-  child.stdin?.end();
+
+  // Confirm the client process has actually exited before returning --
+  // SIGTERM, then SIGKILL (plus pipe teardown) after a grace period if it
+  // has not, so an unresponsive client never survives into the next
+  // attempt for this same seat (review on #1979).
+  if (!closedSettled) {
+    signalProcessGroup(child, "SIGTERM");
+    child.stdin?.end();
+    const hardKill = setTimeout(() => {
+      signalProcessGroup(child, "SIGKILL");
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.unref?.();
+      settleClosed({ deadline: true });
+    }, KILL_GRACE_MS);
+    await closed;
+    clearTimeout(hardKill);
+  }
   return outcome;
 }
