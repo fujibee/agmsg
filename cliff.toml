@@ -141,6 +141,10 @@ commit_parsers = [
   { message = "^Do not report a never-bound local team as connected but not syncing", group = "<!-- 1 -->Fixed" },
   { message = "^install --update: stop a running agmsgd and confirm it is gone", group = "<!-- 1 -->Fixed" },
   { message = "^Add a shared record for a component that is down or degraded", group = "<!-- 0 -->Added" },
+  # 1.7.3: core changes squashed without a Conventional prefix.
+  { message = "^daemon state: do not offer an old start refusal as the reason", group = "<!-- 1 -->Fixed" },
+  { message = "^install\\.sh / uninstall\\.sh: name the real location when AGMSG_INSTALL_HOME is set", group = "<!-- 1 -->Fixed" },
+  { message = "^Remove sync_quarantine rows that only repeat a stored message", group = "<!-- 1 -->Fixed" },
   { message = ".*", skip = true },
 ]
 protect_breaking_commits = true

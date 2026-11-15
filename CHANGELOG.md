@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] - 2026-11-14
+
+### Added
+- install.sh / uninstall.sh: AGMSG_INSTALL_HOME relocates per-agent writes off $HOME (#1951)
+
+### Fixed
+- Remove sync_quarantine rows that only repeat a stored message (#1968)
+- install.sh / uninstall.sh: name the real location when AGMSG_INSTALL_HOME is set (#1958)
+- Daemon state: do not offer an old start refusal as the reason, and name the evidence (#1972)
+
+[1.7.3]: https://github.com/fujibee/agmsg/compare/v1.7.2...v1.7.3
+
 ## [1.7.2] - 2026-11-10
 
 ### Added
