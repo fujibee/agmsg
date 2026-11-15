@@ -3,8 +3,14 @@
 import { assertPollActive, pollSignal, withDeadline, SEAT_DEADLINE_MS, PollDeadlineError } from './poll-deadline.mjs';
 import { deliveryEvent, recordPollTimeout } from './log.mjs';
 
+// One queue-table prefix per channel name (adding a channel means adding its
+// entry here, or it silently shares another channel's table -- a real bug,
+// not just a naming mismatch, since this prefix names the SQL table a
+// channel's own rows are read back from).
+const QUEUE_TABLE_PREFIX = { codex: 'beta_codex', 'claude-code': 'beta_claude', terminal_poke: 'beta_terminal_poke' };
+
 export function createSeatPoller({ db, book, installRoot, channel, saveTimeout, log, timeoutMs = SEAT_DEADLINE_MS }) {
-  const prefix = channel === 'codex' ? 'beta_codex' : 'beta_claude';
+  const prefix = QUEUE_TABLE_PREFIX[channel] ?? 'beta_claude';
   let current;
   let cancelled = false;
   const lifetime = new AbortController();

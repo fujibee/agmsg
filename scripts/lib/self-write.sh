@@ -261,7 +261,7 @@ _sw_rename_confirm_count() {   # <id> <confirm_prefix> <expected>
 
 # The session cell. Prints "attempt=... readback=...".
 _sw_cell_session() {   # <id> <team> <agent> <type>
-  local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why rename_confirm marker boxed
+  local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why rename_confirm marker boxed placeholder_style
   if [ "${_SW_KIND:-}" = plain ]; then
     printf 'attempt=skipped:unsupported:plain_record_only readback=not_attempted\n'; return 0
   fi
@@ -288,6 +288,7 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
   . "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/safe-poke.sh" 2>/dev/null || true
   marker="$(agmsg_type_get "$type" input_prompt_marker 2>/dev/null || true)"
   boxed="$(agmsg_type_get "$type" input_prompt_boxed 2>/dev/null || true)"
+  placeholder_style="$(agmsg_type_get "$type" input_placeholder_style 2>/dev/null || true)"
 
   # A rename_confirm type (codex) cannot be pre-read: its name is not on the
   # title, and the one header that carries it ("Thread name: ...") scrolls away
@@ -303,7 +304,7 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
       printf 'attempt=skipped:baseline_unreadable readback=not_attempted\n'; return 0
     }
     rc=0
-    agmsg_safe_poke "$id" "$rename_cmd $expected" "$marker" "$boxed" "$team" "$agent" >/dev/null 2>&1 || rc=$?
+    agmsg_safe_poke "$id" "$rename_cmd $expected" "$marker" "$boxed" "$team" "$agent" --placeholder-style "$placeholder_style" >/dev/null 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then printf 'attempt=failed:%s readback=not_attempted\n' "$rc"; return 0; fi
     local tries=0 after_count=""
     while [ "$tries" -lt 20 ]; do
@@ -323,7 +324,7 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
 
   before="$(_sw_title_now "$id" "$type")"      # a BASELINE for the delta, never a reason to skip
   rc=0
-  agmsg_safe_poke "$id" "$rename_cmd $expected" "$marker" "$boxed" "$team" "$agent" >/dev/null 2>&1 || rc=$?
+  agmsg_safe_poke "$id" "$rename_cmd $expected" "$marker" "$boxed" "$team" "$agent" --placeholder-style "$placeholder_style" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then printf 'attempt=failed:%s readback=not_attempted\n' "$rc"; return 0; fi
   after="$(_sw_title_now "$id" "$type")"
   case "$after" in
