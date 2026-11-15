@@ -1624,11 +1624,22 @@ storage_sync_apply_pull() {
 #
 # One sqlite3 process runs the batches as separate statements, so the writer
 # lock is taken once per batch of 100 rows and released between them, never held
-# for the backlog. At most 100 batches run per call; the rest is taken on the
-# next pull. A failure is reported and retried on the next pull, never fatal:
+# for the backlog. The process takes the lock again the moment it lets go, so
+# another writer is not let in between the batches: it waits for the whole call,
+# however many batches there are. What bounds that wait is the time the call may
+# run: before each batch a guard statement checks that less than 200 ms have
+# passed since the call began, and past that it fails a CHECK on a temp table,
+# which `.bail on` turns into the end of the script. Nothing after it runs, so a
+# call past its deadline scans nothing (a test inside the DELETE would not do:
+# SQLite visits every candidate row and tests it per row). 100 batches are the
+# outer limit and the rest is taken on the next pull. On a store with a
+# 43,000-row backlog one call of 100 batches took up to 2.1 s here; the cause of
+# the failed writes that led to this is not established (they were not
+# reproduced), so this bounds what the cleanup can add rather than removing a
+# known cause. A failure is reported and retried on the next pull, never fatal:
 # the page it follows has already been applied.
-_sqlite_sync_quarantine_sweep() {
-  local db="$1" batch sql="" n=0
+_sqlite_sync_quarantine_sweep_sql() {   # <deadline-ms>
+  local batch n=0
   batch="DELETE FROM sync_quarantine WHERE rowid IN (
     SELECT q.rowid FROM sync_quarantine q
      WHERE q.status IN ('imported','reconciled') AND COALESCE(q.reason,'')=''
@@ -1640,12 +1651,29 @@ _sqlite_sync_quarantine_sweep() {
            AND m.cipher=q.cipher AND COALESCE(m.key_id,'')=COALESCE(q.key_id,'')
            AND m.blob=q.blob)
      LIMIT 100);"
-  while [ "$n" -lt 100 ]; do sql="$sql$batch"$'\n'; n=$((n + 1)); done
+  # The clock and the guard live in sqlite's temp database, so they take no lock
+  # on the store.
+  printf '.bail on\nCREATE TEMP TABLE sweep_clock AS SELECT julianday('"'"'now'"'"') AS t0;\n'
+  printf 'CREATE TEMP TABLE sweep_guard(sweep_deadline_ok INTEGER CHECK(sweep_deadline_ok=1));\n'
+  while [ "$n" -lt 100 ]; do
+    printf "INSERT INTO temp.sweep_guard SELECT CASE WHEN (julianday('now')-(SELECT t0 FROM temp.sweep_clock))*86400000 < %s THEN 1 ELSE 0 END;\n%s\n" "$1" "$batch"
+    n=$((n + 1))
+  done
+}
+
+_sqlite_sync_quarantine_sweep() {
+  local db="$1" deadline_ms="${AGMSG_SYNC_SWEEP_MS:-200}" err rc=0
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=200 ;; esac
   agmsg_sqlite_warm
-  printf '.bail on\n%s' "$sql" | agmsg_sqlite "$db" >/dev/null 2>&1 || {
+  err="$(_sqlite_sync_quarantine_sweep_sql "$deadline_ms" | agmsg_sqlite "$db" 2>&1 >/dev/null)" || rc=$?
+  # Running out of time is the guard's CHECK failing: the intended end of a call.
+  if [ "$rc" -ne 0 ]; then
+    case "$err" in
+      *sweep_deadline_ok*) return 0 ;;
+    esac
     echo "agmsg: storage sync could not clean up imported quarantine rows (#1966); it is retried on the next pull" >&2
     return 1
-  }
+  fi
 }
 
 # Emits durable blocking envelopes for explicit decrypt/import reprocessing.

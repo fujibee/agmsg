@@ -407,7 +407,8 @@ _agmsg_sqlite_err_is_busy() {
   printf '%s\n' "$_err" | grep -Eq \
     '^Error: (in prepare|stepping), database is locked( \([0-9]+\))?$'\
 '|^(Error|Parse error) in [0-9]+(st|nd|rd|th) command line argument: database is locked( \([0-9]+\))?$'\
-'|^(Error|Parse error) near line [0-9]+: database is locked( \([0-9]+\))?$'
+'|^(Error|Parse error) near line [0-9]+: database is locked( \([0-9]+\))?$'\
+'|^Runtime error( near line [0-9]+)?: database is locked( \([0-9]+\))?$'
 }
 
 agmsg_sqlite() {

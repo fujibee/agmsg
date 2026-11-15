@@ -201,6 +201,40 @@ await_barrier_reached() {
   [ "$(unread_count alice)" -eq 0 ]
 }
 
+@test "send.sh: a store another writer holds is said, not exit 1 in silence" {
+  local db holder held=0
+  db="$(cd "$TEST_SKILL_DIR" && bash -c '. scripts/lib/storage.sh; agmsg_storage_load; agmsg_db_path testteam' 2>/dev/null)"
+  [ -n "$db" ] && [ -f "$db" ]
+  mkfifo "$TEST_SKILL_DIR/hold.release"
+  ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; cat "$TEST_SKILL_DIR/hold.release"; printf 'COMMIT;\n' ) \
+    | sqlite3 -cmd '.timeout 5000' "$db" >/dev/null &
+  holder=$!
+  local _
+  for _ in $(seq 1 100); do
+    if ! sqlite3 -cmd '.timeout 20' "$db" 'BEGIN IMMEDIATE; COMMIT;' >/dev/null 2>&1; then held=1; break; fi
+    sleep 0.05
+  done
+  if [ "$held" -ne 1 ]; then
+    : > "$TEST_SKILL_DIR/hold.release"
+    wait "$holder"
+    false
+  fi
+  local st=0
+  AGMSG_BUSY_TIMEOUT=200 bash "$SCRIPTS/send.sh" testteam alice bob "held message" --force \
+    > "$TEST_SKILL_DIR/send.out" 2> "$TEST_SKILL_DIR/send.err" || st=$?
+  : > "$TEST_SKILL_DIR/hold.release"
+  wait "$holder"
+  [ "$st" -ne 0 ]
+  grep -q 'the message store is busy' "$TEST_SKILL_DIR/send.err"
+  grep -q 'was not stored; nothing was sent' "$TEST_SKILL_DIR/send.err"
+  [ ! -s "$TEST_SKILL_DIR/send.out" ]
+  # Nothing was stored, and once the lock is gone the same send goes through.
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM messages WHERE body='held message';")" -eq 0 ]
+  run bash "$SCRIPTS/send.sh" testteam alice bob "held message" --force
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM messages WHERE body='held message';")" -eq 1 ]
+}
+
 
 # Make ONE team's store unreadable without touching any other team's.
 #
