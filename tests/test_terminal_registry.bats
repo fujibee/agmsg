@@ -97,8 +97,6 @@ elif [ "\$1" = agent ] && [ "\$2" = get ]; then
   if [ "\${HERDR_AGENT_GET_FAIL:-}" = 1 ]; then echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; fi
   if [ -n "\${HERDR_AGENT_GET_JSON:-}" ]; then printf '%s\n' "\$HERDR_AGENT_GET_JSON"; exit 0; fi
   printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\${HERDR_AGENT_NAME:-}"
-elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
-  printf '{"id":"x","result":{"process_info":{"pane_id":"%s","shell_pid":%s},"type":"pane_process_info"}}\n' "\$4" "\${FAKE_HERDR_SHELL_PID:-0}"
 elif [ "\$1" = pane ] && [ "\$2" = get ]; then
   echo '{"result":{"pane":{"terminal_id":"term_naming"}}}'
 elif [ "\$1" = tab ] && [ "\$2" = create ]; then
@@ -113,6 +111,12 @@ elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
   # questions and only the first one had a control.
   exit "\${HERDR_AGENT_RENAME_RC:-0}"
 elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
+  # Nested-terminal tests (#1981) steer this answer: fail / garbage / spaced JSON, or
+  # a chosen shell pid (default 7, which is never an ancestor of the test).
+  [ "\${FAKE_HERDR_PI_MODE:-}" = fail ] && exit 1
+  [ "\${FAKE_HERDR_PI_MODE:-}" = garbage ] && { echo '{"result":{"process_info":{"shell_pid":"x"}}}'; exit 0; }
+  [ "\${FAKE_HERDR_PI_MODE:-}" = spaced ] && { printf '{ "result" : { "process_info" : { "shell_pid" : %s } } }\n' "\${FAKE_HERDR_SHELL_PID:-7}"; exit 0; }
+  [ -n "\${FAKE_HERDR_SHELL_PID:-}" ] && { printf '{"result":{"process_info":{"shell_pid":%s,"foreground_process_group_id":%s}}}\n' "\$FAKE_HERDR_SHELL_PID" "\$FAKE_HERDR_SHELL_PID"; exit 0; }
   # requirement 1 gate: a READY pane (foreground pgid == shell pid) so terminal_spawn
   # proceeds to type. Overridable per test via HERDR_PROCESS_INFO_RESPONSE.
   if [ -n "\${HERDR_PROCESS_INFO_RESPONSE:-}" ]; then printf '%s\n' "\$HERDR_PROCESS_INFO_RESPONSE"
@@ -531,6 +535,7 @@ EOF
   # #1981) is located by tmux even though it carries the herdr environment too.
   touch "$TEST_SKILL_DIR/herdr.sock"
   _install_fake_tmux
+  _install_fake_herdr "x"
   export PATH="$FAKEBIN:$PATH" FAKE_TMUX_PANE_PID="$$"
   export TMUX="/tmp/tmux-self,321,0" TMUX_PANE='%4'
   export HERDR_ENV=1 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock" HERDR_PANE_ID='w1:p2'
@@ -4085,6 +4090,8 @@ _fake_herdr_labels() {   # <pane_id=label> ...
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 if [ "\$1" = pane ] && [ "\$2" = list ]; then
   printf '%s\n' '{"id":"cli:pane:list","result":{"panes":[$entries]}}'
+elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
+  printf '{"result":{"process_info":{"pane_id":"%s","shell_pid":%s}}}\n' "\$4" "\${FAKE_HERDR_SHELL_PID:-7}"
 elif [ "\$1" = pane ] && [ "\$2" = get ]; then
   # terminal_team_observe reads label from here; answer from the same fixture so
   # the confirmation step cannot disagree with the listing by construction.
@@ -5213,4 +5220,28 @@ _nested_env() {   # <tmux pane pid the fake reports>
   export FAKE_HERDR_SHELL_PID=999998
   run agmsg_terminal_resolve_name ""
   [ "$output" = "$(printf 'tmux\t/tmp/fake:%%1')" ]
+}
+
+@test "nested (#1981): herdr's shell pid is read from valid JSON whatever its spacing" {
+  _nested_env "$PPID"
+  export FAKE_HERDR_SHELL_PID="$$" FAKE_HERDR_PI_MODE=spaced
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'*":wC:p4") ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "nested (#1981): when herdr cannot say where its pane's shell is, nothing is chosen on tmux's word alone" {
+  local mode
+  for mode in fail garbage; do
+    _nested_env "$PPID"
+    export FAKE_HERDR_PI_MODE="$mode"
+    run --separate-stderr agmsg_terminal_resolve_name ""
+    [ "$status" -eq 1 ] || { echo "mode=$mode status=$status output=$output"; return 1; }
+    grep -q 'both a tmux and a herdr environment' <<<"$stderr"
+  done
+  # herdr not on PATH at all
+  _nested_env "$PPID"
+  rm -f "$FAKEBIN/herdr"
+  PATH="$FAKEBIN:/usr/bin:/bin" run --separate-stderr agmsg_terminal_resolve_name ""
+  [ "$status" -eq 1 ]
 }

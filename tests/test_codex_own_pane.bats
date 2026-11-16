@@ -398,6 +398,8 @@ _actas_record() {   # runs the real script for a joined codex seat
 case "$*" in *'#{pane_pid}'*) echo 91001 ;; esac
 EOT
   chmod +x "$FAKEBIN/tmux"
+  printf '#!/usr/bin/env bash\necho "{\\"result\\":{\\"process_info\\":{\\"shell_pid\\":7}}}"\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
   _seat t-aaa
   run agmsg_terminal_self_env
   [ "$status" -eq 0 ]
@@ -415,6 +417,8 @@ EOT
 case "$*" in *'/tmp/ts'*'#{pane_pid}'*) echo 91001 ;; esac
 EOT
   chmod +x "$FAKEBIN/tmux"
+  printf '#!/usr/bin/env bash\necho "{\\"result\\":{\\"process_info\\":{\\"shell_pid\\":7}}}"\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
   _seat t-aaa
   export TMUX=/tmp/daemon-stale,9,0 TMUX_PANE=%0     # what the daemon's tool shell inherited
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
