@@ -66,40 +66,43 @@ cleanup_sync_engines() {
   return "$cleanup_status"
 }
 
-# The #1941 test below runs a launcher in a control subshell. The subshell owns
-# everything it starts: when it ends for any reason (its normal end, a signal
-# from here, or this test stopping early) its EXIT trap signals the process
-# group of each of its own jobs and waits for them. So no process number is
-# looked up later and compared with anything; the only number kept here is the
-# control subshell's own, and it is a child of this shell that has not been
-# waited for, so it cannot belong to anybody else.
+# The #1941 tests below run a launcher in a session of its own, started with perl's
+# setsid (the same tool remote.sh itself uses on macOS): the launcher is its own
+# session and process-group leader, so signalling its group reaches exactly what it
+# started. There is no bash job control, no trap and no control subshell here: an
+# earlier version had those, and one ubuntu run of it spun a shell at 100% CPU for
+# the 30-minute job limit.
+#
+# The launcher is a child of this shell that has not been waited for, so its pid
+# (also its group id) cannot belong to anybody else until _reap_1941_launcher waits
+# for it. That is why the group can be signalled without looking the pid up again.
 _start_1941_launcher() {
   _N1941="agmsg-1941-$$-$RANDOM"
   local dir="$TEST_SKILL_DIR"
-  (
-    set -m
-    trap 'for job in $(jobs -p); do kill -TERM -- "-$job" 2>/dev/null || true; done; wait' EXIT
-    trap 'exit 143' TERM
-    # The sleeper is a shell of its own so that it carries the nonce too, and a
-    # leak of it is visible to _count_1941_survivors. The command after the
-    # sleep keeps bash from replacing itself with the sleep.
+  # The sleeper is a shell of its own so that it carries the nonce too, and a
+  # leak of it is visible to _count_1941_survivors. The command after the
+  # sleep keeps bash from replacing itself with the sleep.
+  perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; exec @ARGV' \
     bash -c 'bash "$1" sync start testteam; bash -c "sleep 120; : \"\$1\"" sleeper "$2" & wait' \
-      launcher "$SCRIPTS/remote.sh" "$_N1941" &
-    echo "$!" > "$dir/1941.launcher.pid"
-    wait
-  ) &
+    launcher "$SCRIPTS/remote.sh" "$_N1941" &
   _C1941=$!
+  # Until perl has called setsid the launcher is still in this shell's group, and
+  # signalling "its" group would reach nothing (or worse). Wait, bounded, for it
+  # to lead a group of its own.
+  local i=0
+  while [ "$(ps -o pgid= -p "$_C1941" 2>/dev/null | tr -d ' ')" != "$_C1941" ] && [ "$i" -lt 250 ]; do
+    i=$((i + 1))
+    sleep 0.02
+  done
+  echo "$_C1941" > "$dir/1941.launcher.pid"
 }
 
 _reap_1941_launcher() {
   [ -n "${_C1941:-}" ] || return 0
   local began=$SECONDS
-  kill -TERM "$_C1941" 2>/dev/null || true
+  kill -TERM -- "-$_C1941" 2>/dev/null || true
   wait "$_C1941" 2>/dev/null || true
   _C1941=""
-  # The trap waits for its jobs. If it failed to signal one, that wait lasts as
-  # long as the job does (the sleeper's 120 s), so the time taken is part of
-  # what the tests below check.
   _R1941=$((SECONDS - began))
 }
 
@@ -1166,8 +1169,9 @@ _capability_endpoint() {
   # a nonce in its arguments, so the group that is signalled below is one this
   # test can prove is its own. A group id taken from a process that has already
   # exited can be reused by anybody on a shared machine.
+  command -v perl >/dev/null 2>&1 || skip "#1941: needs perl to give the launcher a session of its own"
   _start_1941_launcher
-  local nonce="$_N1941" control_pid="$_C1941"
+  local nonce="$_N1941"
   wait_for_file "$TEST_SKILL_DIR/1941.launcher.pid"
   local launcher_pid
   launcher_pid="$(cat "$TEST_SKILL_DIR/1941.launcher.pid")"
@@ -1176,16 +1180,16 @@ _capability_endpoint() {
   engine_pid="$(cat "$pidfile")"
 
   # Signal the launcher's group only after checking, immediately before, that
-  # its leader is still this test's own child: its group id is its own pid, its
-  # parent is the control subshell above, and its arguments carry the nonce.
+  # its leader is still this test's own job: it is one of this shell's jobs, its
+  # group id is its own pid, and its arguments carry the nonce.
   # On unfixed code the engine still carries that group (this is #1941's own
   # repro), so sending it this signal is exactly what Codex ending the command
   # would do. On fixed code nothing else is left in the group to catch it.
   local leader
-  leader="$(ps -o pgid=,ppid=,command= -p "$launcher_pid" 2>/dev/null)"
+  leader="$(ps -o pgid=,command= -p "$launcher_pid" 2>/dev/null)"
   grep -qF -- "$nonce" <<<"$leader"
   [ "$(awk '{print $1}' <<<"$leader")" = "$launcher_pid" ]
-  [ "$(awk '{print $2}' <<<"$leader")" = "$control_pid" ]
+  jobs -p | grep -qx "$launcher_pid"
   kill -TERM -- "-$launcher_pid"
   _reap_1941_launcher
   sleep 0.3
@@ -1199,6 +1203,7 @@ _capability_endpoint() {
   # Start the launcher and stop at once, before it has had time to start its
   # sleep and before anything has been recorded about it -- the earliest point
   # a failing check could end the test. What teardown runs must leave nothing.
+  command -v perl >/dev/null 2>&1 || skip "#1941: needs perl to give the launcher a session of its own"
   _start_1941_launcher
   _reap_1941_launcher
   [ "$_R1941" -lt 10 ]
