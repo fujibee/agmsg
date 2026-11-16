@@ -220,6 +220,24 @@ EOF
   grep -q '"first_turn_done": true' "$f"
 }
 
+@test "grok-stop.sh: recovers a stale witness from a confirmed-dead old session even under a non-English locale (review on #1979 follow-up)" {
+  # On glibc (Linux), kill's own error text is translated by the active
+  # locale -- without forcing LC_ALL=C for that one command, "No such
+  # process" never matches under e.g. ja_JP.UTF-8, and recovery silently
+  # never fires there. macOS's libc does not translate it, so this is the
+  # one case that needs a non-default locale to actually exercise the bug
+  # this guards against.
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 999999999
+  env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  write_active_sessions sess-other 424242
+  run env GROK_SESSION_ID=sess-other LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  grep -q '"session_id": "sess-other"' "$f"
+  grep -q '"first_turn_done": true' "$f"
+}
+
 @test "grok-stop.sh: emits decision=block when the seat has unread messages (grok's own Stop contract)" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/join.sh" t1 sender claude-code "$TEST_PROJECT" >/dev/null

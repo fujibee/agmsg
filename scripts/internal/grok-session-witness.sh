@@ -96,7 +96,14 @@ agmsg_grok_resolve_seat() {
 agmsg_grok_pid_definitely_dead() {
   local pid="$1" err
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  err="$(kill -0 "$pid" 2>&1)" && return 1
+  # LC_ALL=C: `kill`'s own error text is matched literally below, and on
+  # glibc (Linux) that text is translated by the active locale -- a
+  # non-English LANG/LC_ALL (e.g. ja_JP.UTF-8) makes "No such process"
+  # never match, so this falls back to its safe default (not confirmed
+  # dead) and recovery silently never fires on that machine. Forcing C
+  # here only affects THIS command's own message text, not the pid check
+  # itself.
+  err="$(LC_ALL=C kill -0 "$pid" 2>&1)" && return 1
   case "$err" in
     *"No such process"*) return 0 ;;
     *) return 1 ;;
