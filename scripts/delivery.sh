@@ -803,8 +803,13 @@ do_set() {
   # Two-stage validation. First: is this even a real mode? The four mode names
   # are engine vocabulary (not type-specific), so a typo is caught here with a
   # generic message before any per-type logic.
-  case "$MODE" in monitor|turn|both|off) ;; *)
-    echo "Unknown mode: $MODE (use monitor|turn|both|off)" >&2; exit 1 ;;
+  # agmsgd: grok-build's own mode, delivered by the daemon's grok-queue
+  # channel over ACP rather than any in-agent rule/hook self-check -- added
+  # to this engine-level vocabulary alongside the other four so a type can
+  # list it in delivery_modes=; the per-type gate just below still rejects
+  # it for every type that does not.
+  case "$MODE" in monitor|turn|both|agmsgd|off) ;; *)
+    echo "Unknown mode: $MODE (use monitor|turn|both|agmsgd|off)" >&2; exit 1 ;;
   esac
   # Second: does THIS type accept the mode? A type declares the modes its CLI
   # accepts via the delivery_modes= manifest key (e.g. codex omits 'both' — the
