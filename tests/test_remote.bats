@@ -73,11 +73,28 @@ cleanup_sync_engines() {
 # earlier version had those, and one ubuntu run of it spun a shell at 100% CPU for
 # the 30-minute job limit.
 #
-# The launcher is a child of this shell that has not been waited for, so its pid
-# (also its group id) cannot belong to anybody else until _reap_1941_launcher waits
-# for it. That is why the group can be signalled without looking the pid up again.
+# A pid is NOT safe to signal just because this shell started it: bash reaps a
+# finished child on SIGCHLD, after which the number can belong to anybody. So every
+# signal is preceded by a check that the group is still the launcher's -- some live
+# process whose group id is the launcher's pid carries this test's nonce -- and a
+# group that has been signalled is not signalled again.
+_perl_for_1941() {
+  command -v perl >/dev/null 2>&1 && return 0
+  # CI must have it: a skip there would turn the guarantee into a green no-op.
+  [ -z "${CI:-}" ] || { echo "#1941: perl is required in CI to give the launcher a session of its own" >&2; return 1; }
+  skip "#1941: needs perl to give the launcher a session of its own"
+}
+
+# Is the launcher's group still alive and ours? (a nonce-carrying member in group $_C1941)
+_launcher_group_alive_1941() {
+  [ -n "${_C1941:-}" ] || return 1
+  ps -axo pgid=,command= 2>/dev/null \
+    | awk -v g="$_C1941" -v n="$_N1941" '$1 == g && index($0, n) && !/awk/ { found = 1 } END { exit found ? 0 : 1 }'
+}
+
 _start_1941_launcher() {
   _N1941="agmsg-1941-$$-$RANDOM"
+  _S1941=""
   local dir="$TEST_SKILL_DIR"
   # The sleeper is a shell of its own so that it carries the nonce too, and a
   # leak of it is visible to _count_1941_survivors. The command after the
@@ -87,20 +104,41 @@ _start_1941_launcher() {
     launcher "$SCRIPTS/remote.sh" "$_N1941" &
   _C1941=$!
   # Until perl has called setsid the launcher is still in this shell's group, and
-  # signalling "its" group would reach nothing (or worse). Wait, bounded, for it
-  # to lead a group of its own.
-  local i=0
-  while [ "$(ps -o pgid= -p "$_C1941" 2>/dev/null | tr -d ' ')" != "$_C1941" ] && [ "$i" -lt 250 ]; do
-    i=$((i + 1))
+  # signalling "its" group would reach nothing (or worse). Wait for it to lead a
+  # group of its own -- bounded in wall-clock time, not in loop counts -- and treat
+  # anything else as a failure.
+  local began=$SECONDS
+  while [ "$SECONDS" -lt $((began + 5)) ]; do
+    [ "$(ps -o pgid= -p "$_C1941" 2>/dev/null | tr -d ' ')" = "$_C1941" ] && break
     sleep 0.02
   done
+  if [ "$(ps -o pgid= -p "$_C1941" 2>/dev/null | tr -d ' ')" != "$_C1941" ]; then
+    # Not separated: clean up what is certainly ours (its argv carries the nonce)
+    # as a single process, never as a group.
+    if ps -o command= -p "$_C1941" 2>/dev/null | grep -qF -- "$_N1941"; then
+      kill -TERM "$_C1941" 2>/dev/null || true
+    fi
+    wait "$_C1941" 2>/dev/null || true
+    _C1941=""
+    echo "#1941: the launcher did not become the leader of its own group within 5 s" >&2
+    return 1
+  fi
   echo "$_C1941" > "$dir/1941.launcher.pid"
+}
+
+# Signal the launcher's group once, and only while it is verifiably still ours.
+_signal_1941_group() {
+  [ -n "${_C1941:-}" ] && [ -z "${_S1941:-}" ] || return 0
+  if _launcher_group_alive_1941; then
+    kill -TERM -- "-$_C1941" 2>/dev/null || true
+  fi
+  _S1941=1
 }
 
 _reap_1941_launcher() {
   [ -n "${_C1941:-}" ] || return 0
   local began=$SECONDS
-  kill -TERM -- "-$_C1941" 2>/dev/null || true
+  _signal_1941_group
   wait "$_C1941" 2>/dev/null || true
   _C1941=""
   _R1941=$((SECONDS - began))
@@ -1169,7 +1207,7 @@ _capability_endpoint() {
   # a nonce in its arguments, so the group that is signalled below is one this
   # test can prove is its own. A group id taken from a process that has already
   # exited can be reused by anybody on a shared machine.
-  command -v perl >/dev/null 2>&1 || skip "#1941: needs perl to give the launcher a session of its own"
+  _perl_for_1941
   _start_1941_launcher
   local nonce="$_N1941"
   wait_for_file "$TEST_SKILL_DIR/1941.launcher.pid"
@@ -1190,7 +1228,7 @@ _capability_endpoint() {
   grep -qF -- "$nonce" <<<"$leader"
   [ "$(awk '{print $1}' <<<"$leader")" = "$launcher_pid" ]
   jobs -p | grep -qx "$launcher_pid"
-  kill -TERM -- "-$launcher_pid"
+  _signal_1941_group
   _reap_1941_launcher
   sleep 0.3
   kill -0 "$engine_pid" 2>/dev/null
@@ -1203,7 +1241,7 @@ _capability_endpoint() {
   # Start the launcher and stop at once, before it has had time to start its
   # sleep and before anything has been recorded about it -- the earliest point
   # a failing check could end the test. What teardown runs must leave nothing.
-  command -v perl >/dev/null 2>&1 || skip "#1941: needs perl to give the launcher a session of its own"
+  _perl_for_1941
   _start_1941_launcher
   _reap_1941_launcher
   [ "$_R1941" -lt 10 ]
@@ -1225,6 +1263,24 @@ _capability_endpoint() {
 
   # And it is what teardown actually calls.
   declare -f teardown | grep -q '_reap_1941_launcher'
+}
+
+@test "the #1941 cleanup never signals a group that is not verifiably the launcher's" {
+  _perl_for_1941
+  # A bystander that leads a group of its own, as a recycled launcher pid could.
+  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sleep 30 &
+  local victim=$!
+  local i=0
+  while [ "$(ps -o pgid= -p "$victim" 2>/dev/null | tr -d ' ')" != "$victim" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.05; done
+  [ "$(ps -o pgid= -p "$victim" | tr -d ' ')" = "$victim" ]
+  _C1941="$victim"; _N1941="agmsg-1941-not-this-one-$RANDOM"; _S1941=""
+  _signal_1941_group
+  # the token is spent, whatever the check said, and the bystander is untouched
+  [ "$_S1941" = 1 ]
+  kill -0 "$victim"
+  _C1941=""
+  kill -TERM "$victim" 2>/dev/null || true
+  wait "$victim" 2>/dev/null || true
 }
 
 @test "connect: starts a background sync engine that disconnect stops (Done-when 4)" {
