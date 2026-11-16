@@ -203,18 +203,20 @@ export function createGrokQueueChannel({
 
     const witnessResult = classifyWitness(readWitness(team, agent));
     if (!witnessResult.ok) {
-      // Linux real-machine round (2026-11-15): a missing witness is not
-      // always "never chose agmsgd / never started a session" -- the
-      // hooks may have genuinely tried and come up empty (SessionStart's
-      // own bounded active_sessions.json retry, and grok-stop.sh's
-      // one-shot attempt at the end of the first turn, can both still
-      // find nothing). That reason, when recorded, is surfaced here
-      // instead of the generic not_registered_for_agmsgd alone.
+      // Linux real-machine round (2026-11-15): a missing OR stale witness
+      // is not always "never chose agmsgd / never started a session" --
+      // the hooks may have genuinely tried and come up empty (SessionStart's
+      // own bounded active_sessions.json retry, and grok-stop.sh's own
+      // recovery attempt at the end of the first turn -- including when a
+      // DIFFERENT, now-dead session's witness was still sitting there --
+      // can both still find nothing). Checked for EVERY failure reason
+      // here, not only the missing-witness case: a present-but-stale
+      // witness (e.g. process_gone from an old session whose own recovery
+      // attempt also failed) must not keep masking a newer, more specific
+      // reason either (review on #1979, finding (1)).
       let reason = witnessResult.reason;
-      if (reason === "not_registered_for_agmsgd") {
-        const pending = readPendingReason(team, agent);
-        if (pending) reason = `not_registered_for_agmsgd:${pending}`;
-      }
+      const pending = readPendingReason(team, agent);
+      if (pending) reason = `${reason}:${pending}`;
       saveSeat(book, { seat: key, state: "unaddressable", reason });
       return;
     }

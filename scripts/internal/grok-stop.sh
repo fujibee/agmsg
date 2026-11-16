@@ -45,16 +45,35 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
   TEAM="${SEAT%%	*}"
   AGENT="${SEAT#*	}"
   WITNESS_PATH="$(agmsg_grok_witness_path "$TEAM" "$AGENT")"
+  _pending_path="$(agmsg_grok_pending_path "$TEAM" "$AGENT")"
+  _need_recovery=0
   if [ -f "$WITNESS_PATH" ]; then
     _wsid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WITNESS_PATH" 2>/dev/null | head -1)"
-    # Only advance the witness this Stop event is actually for; a stale
-    # witness from an earlier (now-replaced) session_id is left alone, same
-    # as the equivalent check in grok-session-start.sh.
     if [ "$_wsid" = "$SESSION_ID" ]; then
+      # The witness this Stop event is actually for: advance it.
       NEW_CONTENT="$(LC_ALL=C sed 's/"first_turn_done"[[:space:]]*:[[:space:]]*false/"first_turn_done": true/' "$WITNESS_PATH" 2>/dev/null || true)"
       [ -n "$NEW_CONTENT" ] && agmsg_write_atomic "$WITNESS_PATH" "$NEW_CONTENT" || true
+    else
+      # review on #1979, finding (1): a DIFFERENT session's own witness is
+      # sitting there -- originally always left alone (a correct guard
+      # against a late-arriving Stop from an OLD, still-live session
+      # overwriting a newer one). But if SessionStart's own bounded retry
+      # ran out for THIS (newer) session and left no witness of its own,
+      # this stale one can also wrongly keep masking this session's real
+      # state forever, with no later event ever re-trying it -- UNLESS the
+      # old witness's own recorded pid is confirmed gone, in which case its
+      # old owner truly cannot be delivered to anymore and recovering for
+      # the current session is safe. Still never touched when that pid is
+      # alive, or cannot be confirmed dead (conservative, same direction as
+      # pidAlive elsewhere): that is a genuinely live different session,
+      # not a stale one.
+      _wpid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' "$WITNESS_PATH" 2>/dev/null | head -1)"
+      agmsg_grok_pid_definitely_dead "$_wpid" && _need_recovery=1
     fi
   else
+    _need_recovery=1
+  fi
+  if [ "$_need_recovery" -eq 1 ]; then
     # Linux real-machine round (2026-11-15): SessionStart can fire before
     # grok has written this session into active_sessions.json, leaving no
     # witness at all -- with nothing else ever re-trying that write, the
@@ -92,10 +111,19 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
 }
 EOF
 )"
-      agmsg_write_atomic "$WITNESS_PATH" "$_content" || true
-      rm -f "$(agmsg_grok_pending_path "$TEAM" "$AGENT")" 2>/dev/null || true
+      # review on #1979, finding (2): clearing the pending-reason file
+      # unconditionally right after a write attempt that itself used
+      # `|| true` meant a write failure (e.g. a transient mv failure) left
+      # BOTH no witness AND no pending reason -- a silent regression to
+      # the original bug this file exists to fix. Only clear it on an
+      # actual write success; record why otherwise.
+      if agmsg_write_atomic "$WITNESS_PATH" "$_content"; then
+        rm -f "$_pending_path" 2>/dev/null || true
+      else
+        agmsg_write_atomic "$_pending_path" "Stop found session $SESSION_ID but could not write the witness to $WITNESS_PATH" || true
+      fi
     else
-      agmsg_write_atomic "$(agmsg_grok_pending_path "$TEAM" "$AGENT")" \
+      agmsg_write_atomic "$_pending_path" \
         "Stop could not find session $SESSION_ID in $GROK_HOME_RESOLVED/active_sessions.json either" || true
     fi
   fi

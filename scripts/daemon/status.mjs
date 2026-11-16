@@ -458,13 +458,18 @@ function formatGrokQueueSeats(inventory, all) {
       lines.push(`Grok queue ${label}: notified via grok queue${permsSuffix}`);
       continue;
     }
-    const pendingWitnessReason = /^not_registered_for_agmsgd:(.+)$/.exec(seat.reason ?? "")?.[1];
+    // review on #1979, finding (1): any witness-failure reason can carry a
+    // recorded pending reason as a "<base>:<text>" suffix, not only
+    // not_registered_for_agmsgd -- a present-but-stale witness (e.g.
+    // process_gone from an old, now-dead session whose own recovery
+    // attempt also failed) must not keep masking a newer, more specific
+    // reason either. Shown unconditionally, never behind --all: unlike
+    // the generic "haven't chosen agmsgd yet" state just below, this is a
+    // seat whose hooks genuinely tried and came up empty (Linux
+    // real-machine round, 2026-11-15) -- an actionable finding, not a
+    // routine, expected-forever absence.
+    const pendingWitnessReason = /^(?:not_registered_for_agmsgd|process_gone|witness_malformed|witness_incomplete):(.+)$/.exec(seat.reason ?? "")?.[1];
     if (pendingWitnessReason) {
-      // Shown unconditionally, never behind --all: unlike the generic
-      // "haven't chosen agmsgd yet" state just below, this is a seat that
-      // DID choose it and whose hooks genuinely tried and came up empty
-      // (Linux real-machine round, 2026-11-15) -- an actionable finding,
-      // not a routine, expected-forever absence.
       lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: ${pendingWitnessReason}`);
       continue;
     }

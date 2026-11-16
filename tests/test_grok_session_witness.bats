@@ -174,15 +174,50 @@ EOF
   grep -q '"first_turn_done": true' "$f"
 }
 
-@test "grok-stop.sh: a Stop for a DIFFERENT (now-replaced) session_id leaves the witness's own session alone" {
+@test "grok-stop.sh: a DIFFERENT session's Stop never touches a witness whose own pid is still ALIVE, even when the new session IS in active_sessions.json" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
-  write_active_sessions sess1 17031
+  # The witness's own pid is THIS TEST's pid -- guaranteed alive, so its
+  # owning session must never be read as gone no matter what the new
+  # session's own Stop sees in active_sessions.json.
+  write_active_sessions sess1 "$$"
   env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
   local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  write_active_sessions sess-other 424242
   run env GROK_SESSION_ID=sess-other bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
   grep -q '"first_turn_done": false' "$f"
   grep -q '"session_id": "sess1"' "$f"
+}
+
+@test "grok-stop.sh: a DIFFERENT session's Stop never touches a witness whose own pid cannot be confirmed dead (e.g. permission denied), stays conservative" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  # pid 1 (launchd/init) is never ours to signal -- kill -0 answers
+  # "Operation not permitted", which must read as "cannot tell", not
+  # "confirmed dead".
+  write_active_sessions sess1 1
+  env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  write_active_sessions sess-other 424242
+  run env GROK_SESSION_ID=sess-other bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  grep -q '"session_id": "sess1"' "$f"
+}
+
+@test "grok-stop.sh: a DIFFERENT session's Stop recovers the witness when the OLD session's own pid is confirmed dead and the NEW session IS in active_sessions.json (review on #1979, finding 1)" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  # SessionStart's own bounded retry for sess-other ran out and left no
+  # witness of its own (not simulated directly here; what matters is
+  # that the OLD witness, for sess1, is confirmed abandoned).
+  write_active_sessions sess1 999999999
+  env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"session_id": "sess1"' "$f"
+  write_active_sessions sess-other 424242
+  run env GROK_SESSION_ID=sess-other bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  grep -q '"session_id": "sess-other"' "$f"
+  grep -q '"pid": "424242"' "$f"
+  grep -q '"first_turn_done": true' "$f"
 }
 
 @test "grok-stop.sh: emits decision=block when the seat has unread messages (grok's own Stop contract)" {

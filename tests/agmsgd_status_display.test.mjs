@@ -261,6 +261,17 @@ test('grok queue: a recorded pending reason (SessionStart/Stop both could not fi
   assert.match(plain, /Grok queue test\/ga1: agmsgd cannot reach this seat: SessionStart could not find session sess-1 in \/home\/x\/\.grok\/active_sessions\.json/);
 });
 
+test('grok queue: a recorded pending reason alongside process_gone is shown too, not only the missing-witness case (review on #1979, finding 1)', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    grokQueue: [
+      { seat: JSON.stringify(['test', 'ga1']), state: 'unaddressable', reason: 'process_gone:Stop could not find session sess-2 in /home/x/.grok/active_sessions.json either' },
+    ],
+  });
+  const plain = await runAsync(f.root);
+  assert.match(plain, /Grok queue test\/ga1: agmsgd cannot reach this seat: Stop could not find session sess-2 in \/home\/x\/\.grok\/active_sessions\.json either/);
+});
+
 test('a recorded Node that is gone does not turn a running agmsgd into "not running": the seat state is still fetched', async t => {
   const f = fixture(t);
   await fakeDaemon(t, f, { codex: [{ seat: JSON.stringify(['test', 'alice']), thread, codex_home: '/profile', state: 'blocked', reason: 'codex_executable_unavailable:run_agmsg_daemon_enable', since: new Date().toISOString() }] });

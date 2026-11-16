@@ -84,6 +84,25 @@ agmsg_grok_resolve_seat() {
 # Prints the matched object's raw text (one line, newlines stripped) on
 # success; nothing, rc 1, if the file is absent/unreadable or no object
 # contains this session id.
+# True (rc 0) only when <pid> is CONFIRMED gone -- `kill -0` failed with a
+# message naming the process as absent, never on an unreadable pid or a
+# permission-denied answer (which could still mean "alive, not ours to
+# signal"). Mirrors the same conservative direction grok-queue.mjs's own
+# pidAlive takes (EPERM/unresolvable -> treated as alive). Used by
+# grok-stop.sh to decide whether a DIFFERENT session's own stale witness
+# may safely be replaced (review on #1979, finding (1)): only when that
+# witness's own recorded owner is definitely gone, never merely because
+# this Stop event's session_id does not match it.
+agmsg_grok_pid_definitely_dead() {
+  local pid="$1" err
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  err="$(kill -0 "$pid" 2>&1)" && return 1
+  case "$err" in
+    *"No such process"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 agmsg_grok_active_session_lookup() {
   local path="$1" sid="$2"
   [ -f "$path" ] || return 1

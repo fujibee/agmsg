@@ -158,8 +158,17 @@ CONTENT="$(cat <<EOF
 }
 EOF
 )"
-agmsg_write_atomic "$WITNESS_PATH" "$CONTENT" || true
-# A witness was written successfully -- any earlier "could not find this
-# session" reason recorded for this seat no longer applies.
-rm -f "$(agmsg_grok_pending_path "$TEAM" "$AGENT")" 2>/dev/null || true
+# review on #1979, finding (2): clearing the pending-reason file
+# unconditionally right after a write attempt that itself used `|| true`
+# meant a write failure (e.g. a transient mv failure) left BOTH no
+# witness AND no pending reason -- a silent regression to the original
+# bug this file exists to fix. Only clear it when the write actually
+# succeeded; record why it didn't otherwise, so status still shows
+# something rather than reverting to an unexplained absence.
+_pending_path="$(agmsg_grok_pending_path "$TEAM" "$AGENT")"
+if agmsg_write_atomic "$WITNESS_PATH" "$CONTENT"; then
+  rm -f "$_pending_path" 2>/dev/null || true
+else
+  agmsg_write_atomic "$_pending_path" "SessionStart found session $SESSION_ID but could not write the witness to $WITNESS_PATH" || true
+fi
 exit 0

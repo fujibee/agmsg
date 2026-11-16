@@ -97,6 +97,23 @@ test('a recorded pending reason (SessionStart/Stop both could not find the sessi
   await channel.stop();
 });
 
+test('a recorded pending reason is surfaced alongside process_gone too, not only the missing-witness reason (review on #1979, finding 1)', async (t) => {
+  // A present-but-stale witness (process_gone) must not mask a recorded
+  // pending reason any more than a wholly-missing witness does -- the
+  // reason a recovery attempt for a NEWER session also failed is just as
+  // actionable here.
+  const { channel, state } = channelFixture(t);
+  state.witness = { ...state.witness, pid: 999999999 };
+  state.pendingReason = 'Stop could not find session sess-2 in /home/x/.grok/active_sessions.json either';
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 0);
+  assert.deepEqual(seatBrief(channel), {
+    state: 'unaddressable',
+    reason: 'process_gone:Stop could not find session sess-2 in /home/x/.grok/active_sessions.json either',
+  });
+  await channel.stop();
+});
+
 test('a witness whose pid is dead is unaddressable, never attempted', async (t) => {
   const { channel, state } = channelFixture(t);
   state.witness = { ...state.witness, pid: 999999999 };
