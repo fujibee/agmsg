@@ -94,14 +94,25 @@ trap - EXIT HUP INT TERM
 COUNT=$(printf '%s\n' "$ROWS" | wc -l | tr -d ' ')
 echo "$COUNT new message(s):"
 echo ""
+# Thousands of unread rows cannot be printed in a 30s hook window. Show the
+# snapshot count and the first N bodies; still collect every id so mark-read
+# drains this SELECT (later arrivals are not in ROWS and stay unread).
+_AGMSG_INBOX_DISPLAY_LIMIT=20
 IDS=()
+_shown=0
 while IFS=$'\x1f' read -r from body ts id; do
   [ -n "$id" ] || continue
-  # A body's line breaks arrive as \x1e (one row per message); show them as
-  # line breaks, indented under the header (#1780).
-  echo "  [$ts] $from: ${body//$'\x1e'/$'\n'      }"
   IDS+=("$id")
+  if [ "$_shown" -lt "$_AGMSG_INBOX_DISPLAY_LIMIT" ]; then
+    # A body's line breaks arrive as \x1e (one row per message); show them as
+    # line breaks, indented under the header (#1780).
+    echo "  [$ts] $from: ${body//$'\x1e'/$'\n'      }"
+    _shown=$((_shown + 1))
+  fi
 done <<< "$ROWS"
+if [ "$COUNT" -gt "$_AGMSG_INBOX_DISPLAY_LIMIT" ]; then
+  echo "  … $((COUNT - _AGMSG_INBOX_DISPLAY_LIMIT)) more not shown; marking all $COUNT from this snapshot"
+fi
 echo ""
 
 # Test seam: a two-file barrier that lets the race regression test land a
@@ -124,9 +135,9 @@ fi
 # may fail in sandboxed environments or lose to a concurrent writer — but a
 # failure is reported on stderr, because the messages above were displayed
 # and their read state is now unknown (#1011). "Some or all", not "they":
-# only the sqlite driver marks in one transaction; the jsonl driver can have
-# recorded part of the batch before the failing step. The exit status stays
-# 0: the inbox did deliver.
+# sqlite commits in chunks of 500, so a failure can leave a prefix marked;
+# jsonl can also record part of the batch before the failing step. The exit
+# status stays 0: the inbox did deliver.
 if [ "${#IDS[@]}" -gt 0 ]; then
   if ! storage_mark_read_batch "$TEAM" "$AGENT" "${IDS[@]}" >/dev/null 2>&1; then
     echo "agmsg: failed to record read state for ${#IDS[@]} displayed message(s); some or all may be shown again (#1011)" >&2

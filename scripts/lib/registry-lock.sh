@@ -444,31 +444,17 @@ agmsg_lock_acquire() {
   # and an unprovable lock is one this process will refuse to delete rather
   # than one it deletes on a coincidence.
   #
-  # One write, with nothing forked since the mkdir: the values were made above.
-  # The token is registered for release right after; a kill in between leaves a
-  # lock WITH a record, which the next acquirer can judge and break.
-  printf 'token %s\npid %s\ncommand %s\nhost %s\n' \
-    "$token" "$$" "${0##*/}" "$rec_host" > "$lock.holder" 2>/dev/null || true
+  # Token and EXIT trap are armed BEFORE the holder file is written, so a
+  # kill between mkdir and the record still runs release (INT/TERM; SIGKILL
+  # still cannot). The holder write stays best-effort and fork-free.
   [ -n "$token" ] && _agmsg_lock_set_token "$lock" "$token"
   AGMSG_HELD_LOCKS="${AGMSG_HELD_LOCKS:+$AGMSG_HELD_LOCKS
 }$lock"
-  # Idempotent: re-arming the same handlers each acquire is harmless.
-  #
-  # WHAT THEY COVER, AND WHAT THEY DO NOT. These release every lock this process
-  # holds, so an ordinary exit or a Ctrl-C leaves nothing behind. `SIGKILL`, an
-  # OOM kill and the machine going down run no trap at all, and the lock stays.
-  # This sentence used to end at "a crash leaves no stale lock", with no
-  # qualifier, so the next reader believed crashes were covered — and the crash
-  # that is not covered is the one #865 was reported from. What covers it is the
-  # staleness check in the loop above, not this.
-  # EXIT releases only. INT/TERM release AND exit, so a signal arriving between
-  # commands in a critical section can't release the lock and then let the script
-  # continue into an unprotected config move/write (matters for 2-lock
-  # rename-team). NOTE: no current registry writer sets its own trap; a future
-  # caller that does must chain these in.
   trap 'agmsg_lock_release' EXIT
   trap 'agmsg_lock_release; exit 130' INT
   trap 'agmsg_lock_release; exit 143' TERM
+  printf 'token %s\npid %s\ncommand %s\nhost %s\n' \
+    "$token" "$$" "${0##*/}" "$rec_host" > "$lock.holder" 2>/dev/null || true
 }
 
 # agmsg_lock_release
