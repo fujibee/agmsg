@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-11-17
+
+### Added
+- agmsgd: a grok-queue native delivery channel for grok-build (#1979)
+- agmsgd: a terminal-poke delivery channel for types with no native channel (#1973)
+
+### Changed
+- install: the Antigravity TUI shim is no longer placed (#1967)
+
+### Fixed
+- actas: a seat that proves its own pane replaces a stale record there; otherwise it says why the pane was not recorded (#1980)
+- Terminal: when tmux and herdr are nested, the innermost one names the pane (#1982)
+- remote.sh: the sync engine starts in its own session, so it outlives the command that started it (#1964)
+
+[1.8.0]: https://github.com/fujibee/agmsg/compare/v1.7.4...v1.8.0
+
 ## [1.7.4] - 2026-11-15
 
 ### Fixed

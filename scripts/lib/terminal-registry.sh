@@ -395,6 +395,52 @@ agmsg_terminal_resolve_by_capability() {   # <capability> [exclude, space-separa
   return 1
 }
 
+# Which of two terminals this process is really inside, when it carries the
+# environment of both (#1981): a tmux session started in a herdr pane inherits
+# the pane's HERDR_* variables, and a herdr pane opened from a tmux pane may
+# inherit TMUX. The environment alone cannot say which is innermost, so ask the
+# process tree: this process is inside the tmux pane iff the pane's shell pid is
+# one of its ancestors. (herdr starts its panes from its own server, so a herdr
+# pane's processes do not descend from the tmux pane that merely launched herdr.)
+# Prints nothing when only one environment is present (the ordinary case: no
+# extra process is started), otherwise tmux | herdr | unknown.
+_agmsg_terminal_nested_innermost() {
+  [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || return 0
+  [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  command -v tmux >/dev/null 2>&1 || { echo unknown; return 0; }
+  local sock="${TMUX%%,*}" want hwant pid hop=0 out
+  want="$(tmux -S "$sock" display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null)" || want=""
+  case "$want" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  # The herdr pane's own shell: whichever of the two panes' shells is met FIRST
+  # going up is the innermost one. (A herdr server started in the foreground of a
+  # tmux pane has its panes below that tmux pane's shell too, so the tmux pane
+  # alone would claim them.) Without herdr's answer only one of the two shells is
+  # known, and choosing on that is how the outer terminal gets picked: unknown.
+  command -v herdr >/dev/null 2>&1 || { echo unknown; return 0; }
+  # herdr's own exit status first: a pipeline would report only the last stage's,
+  # and a command that failed after printing a pid is not an answer.
+  local pi="" pirc=0
+  pi="$(herdr pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null)" || pirc=$?
+  [ "$pirc" -eq 0 ] || { echo unknown; return 0; }
+  hwant="$(printf '%s\n' "$pi" | sed -n 's/.*"shell_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)" || hwant=""
+  case "$hwant" in ''|*[!0-9]*|0|1) echo unknown; return 0 ;; esac
+  # A Codex seat under the shared app-server runs its commands as children of the
+  # daemon, not of its TUI; the TUI is what sits in the pane, so the walk starts
+  # from the TUI process codex-own-pane.sh proved (AGMSG_COP_TUI_PID), not from $$.
+  pid="${AGMSG_COP_TUI_PID:-$$}"
+  case "$pid" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  while [ "$hop" -lt 32 ]; do
+    [ "$pid" = "$want" ] && { echo tmux; return 0; }
+    [ "$pid" = "$hwant" ] && { echo herdr; return 0; }
+    out="$(ps -o ppid= -p "$pid" 2>/dev/null)" || out=""
+    out="${out//[[:space:]]/}"
+    case "$out" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+    [ "$out" -gt 1 ] || { echo herdr; return 0; }
+    pid="$out"; hop=$((hop + 1))
+  done
+  echo unknown
+}
+
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
 # and exit 0. ORDER (2026-09-01, from the nested-herdr measurement): prefer a
 # candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
@@ -421,7 +467,7 @@ _agmsg_terminal_resolve_name_raw() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name id rc errf reason
   local reasons="" saw_present_unnamed=0 plain_present=0 plain_name=""
   errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-detect.XXXXXX")" || errf=/dev/null
-  local names
+  local names nest=""
   names="$(agmsg_terminal_candidates)"
   if [ -n "$override" ]; then
     agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
@@ -429,6 +475,16 @@ _agmsg_terminal_resolve_name_raw() {
       [ "$errf" = /dev/null ] || rm -f "$errf"; return 1
     }
     names="$override"
+  else
+    # tmux inside herdr (or the reverse): the innermost terminal names the pane.
+    nest="$(_agmsg_terminal_nested_innermost)" || nest=""
+    case "$nest" in
+      tmux)  names="tmux" ;;
+      herdr) names=" $names "; names="${names// tmux / }"; names="${names# }"; names="${names% }" ;;
+      unknown)
+        echo "agmsg: did not name or record this pane: this process carries both a tmux and a herdr environment and which one it is inside could not be determined (nested terminals)." >&2
+        [ "$errf" = /dev/null ] || rm -f "$errf"; return 1 ;;
+    esac
   fi
   for name in $names; do
     # `|| rc=$?` (not `; rc=$?`): a bare command-substitution assignment fires the
@@ -643,8 +699,14 @@ agmsg_terminal_epoch() {   # <terminal>
 # This is the fast half of self-naming on action: a matching mark avoids a
 # terminal round trip. Drivers without this optional hook are skipped.
 _agmsg_terminal_self_env_raw() {
-  local name out rc id epoch
+  local name out rc id epoch nest
+  nest="$(_agmsg_terminal_nested_innermost)" || nest=""
   for name in $(agmsg_terminal_self_env_candidates); do
+    # Nested tmux/herdr (#1981): only the innermost terminal answers.
+    case "$nest:$name" in
+      tmux:herdr|herdr:tmux) continue ;;
+      unknown:tmux|unknown:herdr) printf 'unknown:%s:nested_terminals_innermost_unknown\n' "$name"; return 0 ;;
+    esac
     rc=0; out="$(_agmsg_terminal_self_env_one "$name")" || rc=$?
     [ "$rc" -eq 125 ] && continue
     if [ "$rc" -ne 0 ] || [[ "$out" == *[$'\r\n']* ]]; then
@@ -1339,16 +1401,31 @@ _agmsg_codex_own_pane() {
 _agmsg_with_terminal_env() {   # <own-pane output> <command...>
   local own="$1" line; shift
   (
-    unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE
+    unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE AGMSG_COP_TUI_PID
     while IFS= read -r line; do
       case "$line" in
-        HERDR_ENV=*|HERDR_SOCKET_PATH=*|HERDR_PANE_ID=*|TMUX=*|TMUX_PANE=*) export "${line%%=*}=${line#*=}" ;;
+        HERDR_ENV=*|HERDR_SOCKET_PATH=*|HERDR_PANE_ID=*|TMUX=*|TMUX_PANE=*|AGMSG_COP_TUI_PID=*) export "${line%%=*}=${line#*=}" ;;
       esac
     done <<ENVLINES
 ${own#env}
 ENVLINES
     "$@"
   )
+}
+
+# The nested decision as the resolver will see it: a Codex seat under the shared
+# app-server carries the daemon's environment, which is replaced by its proved
+# TUI's (codex-own-pane.sh) before anything is resolved, so the decision is made
+# on that same environment and TUI pid. An own pane that could not be proven is
+# reported by the resolver itself; no decision is made here for it.
+_agmsg_terminal_nested_innermost_effective() {
+  local own
+  own="$(_agmsg_codex_own_pane)" || own=""
+  case "$own" in
+    '')       _agmsg_terminal_nested_innermost ;;
+    unknown*) return 0 ;;
+    *)        _agmsg_with_terminal_env "$own" _agmsg_terminal_nested_innermost ;;
+  esac
 }
 
 agmsg_terminal_resolve_name() {
@@ -1423,11 +1500,16 @@ agmsg_terminal_name_self() {
   # named this seat, and more than one means the label is not identifying here.
   # A Codex seat under the shared daemon skips it too: the labels written there
   # were derived from the daemon starter's pane and are not evidence (#1736).
+  # Nested tmux/herdr (#1981): the label of a pane is one more thing an inherited
+  # environment can point at, so it does not get to answer ahead of the
+  # innermost-terminal decision; the resolver below applies that decision.
   # A caller replacing another seat's record (replace_claim) proved ITS OWN pane
   # from its terminal environment; a pane found by label is a different claim
   # and could name another pane than the one that was proved, so the label is
-  # not consulted for it.
-  if [ -z "$_excl" ] && [ "$replace" != replace_claim ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
+  # not consulted for it either.
+  local _nest=""
+  _nest="$(_agmsg_terminal_nested_innermost_effective 2>/dev/null)" || _nest=""
+  if [ -z "$_excl" ] && [ -z "$_nest" ] && [ "$replace" != replace_claim ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
     resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
   fi
   if [ -n "$resolved" ]; then
@@ -1443,6 +1525,14 @@ agmsg_terminal_name_self() {
     # pane up BY agent session id) is SKIPPED, quietly, because nothing was asked
     # of it. The resolver's reason is dropped on purpose: it would report a
     # missing input as a failure, on every join, forever.
+    #
+    # The one reason that is NOT "nothing was asked of it": the process carries
+    # both a tmux and a herdr environment and which one it is inside could not
+    # be decided (#1981). That is said, so the caller's output can carry it.
+    if [ "$_nest" = unknown ]; then
+      echo "agmsg: did not name or record this pane: this process carries both a tmux and a herdr environment and which one it is inside could not be determined (nested terminals)." >&2
+      return 0
+    fi
     resolved="$(agmsg_terminal_resolve_name "" 2>/dev/null)" || rc=$?
     [ "$rc" -eq 0 ] || return 0            # skipped
   fi
@@ -1531,7 +1621,13 @@ agmsg_terminal_name_self() {
     # belongs to whoever sits in it. A tmux environment next to a non-tmux pane is
     # not a proof of anything, so nothing is replaced there (the refusal below
     # says why).
+    # The decision of the resolver (#1981) is what separates the two nestings: a
+    # process the ancestry shows to be in a herdr pane that merely inherited TMUX
+    # (herdr inside tmux) really is in the herdr pane it resolved to, so it is not
+    # refused here; everything else that carries a tmux environment next to a
+    # non-tmux pane still is.
     if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$terminal" != tmux ] \
+       && [ "$_nest" != herdr ] \
        && { [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
       # Return here rather than falling through: the takeovers below (dead
       # claimant, vanished team) would otherwise still drop the outer pane's

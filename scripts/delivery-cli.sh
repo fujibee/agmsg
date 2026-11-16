@@ -127,7 +127,18 @@ case "$ACTION" in
     # installs; session-start.sh reads the recorded choice and arms no Monitor for
     # a project on agmsgd. Say what happens to this session, without a Monitor
     # directive (monitor mode's own output is for monitor mode).
-    if [ "$TYPE" = claude-code ]; then
+    #
+    # grok-build is the one type whose own agmsgd delivery is not "the
+    # session hooks monitor already installs, minus the Monitor directive"
+    # -- its channel (grok-queue) talks to the TUI over ACP instead, which
+    # needs its OWN real hooks (.grok/hooks/agmsg.json: SessionStart +
+    # Stop, not the rule-file monitor mode writes) and its own config edit
+    # (use_leader). delivery.sh's own `agmsgd` mode in grok-build's
+    # delivery_modes= does exactly that.
+    if [ "$TYPE" = grok-build ]; then
+      bash "$SCRIPT_DIR/delivery.sh" set agmsgd "$TYPE" "$PROJECT" >/dev/null
+      echo "agmsgd delivers to this project via the leader socket; no rule file or watcher is installed for it."
+    elif [ "$TYPE" = claude-code ]; then
       bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT" >/dev/null
       echo "agmsgd delivers to this project. This session moves to it when it restarts or runs actas; no Monitor is armed for it."
     else

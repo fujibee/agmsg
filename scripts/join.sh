@@ -12,6 +12,11 @@ AGENT_TYPE="${3:?Missing type (a registered type under scripts/drivers/types/<na
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/detect-cli-type.sh"
+# #846: see whoami.sh's identical call -- a grok-build session reading the
+# shared Codex-flavored skill passes the literal type "codex".
+AGENT_TYPE="$(agmsg_resolve_grok_type "$AGENT_TYPE")"
 
 # Reject unknown agent types — the rest of agmsg (delivery.sh,
 # session-start.sh, identities.sh lookups) only supports registered types
