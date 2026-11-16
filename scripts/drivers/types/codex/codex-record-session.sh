@@ -64,6 +64,57 @@ export SKILL_DIR
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/_app-server.sh"
 
+# Record where this seat lives, as actas-claim.sh does for Claude Code. The Codex
+# actas flow never reaches that script, so without this the only writers of the
+# placement record are join (first join only) and the action hook, which stays
+# silent when it cannot write. The pane is found the way `where` finds it (no
+# session id: this seat's own terminal environment, or its TUI's under the shared
+# app-server). A refusal prints one `placement=unrecorded` line; actas goes on.
+_codex_actas_placement() {
+  local _rc=$?
+  if [ "${AGMSG_SELF_NAME:-on}" != off ] && [ -r "$SKILL_DIR/scripts/lib/terminal-registry.sh" ] \
+     && [ -r "$SKILL_DIR/scripts/lib/placement-report.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/terminal-registry.sh" 2>/dev/null || true
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/placement-report.sh" 2>/dev/null || true
+    # The environment of a seat under the shared app-server names the pane that
+    # started the daemon, not this seat's. Whether it can be believed is decided by
+    # CODEX_THREAD_ID (the seat's own thread, not the one inferred above): without
+    # it a daemon-hosted seat is not recorded, and a thread that cannot be tied to
+    # one TUI is not recorded either. Both say why instead of going quiet.
+    . "$SKILL_DIR/scripts/lib/codex-own-pane.sh" 2>/dev/null || true
+    _pl_reason=""
+    if declare -F agmsg_codex_own_pane >/dev/null 2>&1; then
+      if [ -z "${CODEX_THREAD_ID:-}" ]; then
+        _pl_rc=0; _agmsg_cop_under_managed_daemon || _pl_rc=$?
+        [ "$_pl_rc" -eq 1 ] || _pl_reason="CODEX_THREAD_ID is not set, so this seat's own pane cannot be told from the shared app-server's"
+      else
+        _pl_own="$(agmsg_codex_own_pane 2>/dev/null)" || _pl_own=""
+        case "$_pl_own" in
+          unknown*) _pl_reason="this Codex seat's own pane could not be proven (${_pl_own#unknown$'\t'})" ;;
+        esac
+      fi
+    fi
+    if [ -n "$_pl_reason" ]; then
+      printf 'placement=unrecorded team=%s reason=%s\n' "$TEAM" "$_pl_reason"
+    else
+      # CODEX_THREAD_ID is set here (the unset case is refused above) and
+      # the own-pane check did not come back unknown: the pane is this seat's
+      # own, proved from its terminal, so another seat's stale claim on it may be
+      # replaced. The replaced record is reported as placement=replaced.
+      _pl_replace=""
+      [ -z "${CODEX_THREAD_ID:-}" ] || _pl_replace=replace_claim
+      agmsg_placement_report "" "$TEAM" "$AGENT" "${project_phys:-$PROJECT}" codex record "" "" "$_pl_replace" || true
+    fi
+  fi
+  return "$_rc"
+}
+# Every exit below, including the ones that record nothing, still says whether
+# the pane was recorded.
+trap _codex_actas_placement EXIT
+
+
 # Poison-record guard (best-effort bias: record nothing when unsure). A mangled
 # <project> argument -- e.g. the lone `\` a PowerShell-parsed \"$PWD\" collapses
 # to -- must never be recorded: the launcher's project-mismatch safety valve
@@ -274,18 +325,4 @@ if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "$AGMSG_CODEX_
   mv "$request_tmp" "$request_file"
 fi
 
-# Record where this seat lives, as actas-claim.sh does for Claude Code. The Codex
-# actas flow never reaches that script, so without this the only writers of the
-# placement record are join (first join only) and the action hook, which stays
-# silent when it cannot write. The pane is found the way `where` finds it (no
-# session id: this seat's own terminal environment, or its TUI's under the shared
-# app-server). A refusal prints one `placement=unrecorded` line; actas goes on.
-if [ "${AGMSG_SELF_NAME:-on}" != off ] && [ -r "$SKILL_DIR/scripts/lib/terminal-registry.sh" ] \
-   && [ -r "$SKILL_DIR/scripts/lib/placement-report.sh" ]; then
-  # shellcheck disable=SC1091
-  . "$SKILL_DIR/scripts/lib/terminal-registry.sh" 2>/dev/null || true
-  # shellcheck disable=SC1091
-  . "$SKILL_DIR/scripts/lib/placement-report.sh" 2>/dev/null || true
-  agmsg_placement_report "" "$TEAM" "$AGENT" "$project_phys" codex record || true
-fi
 exit 0

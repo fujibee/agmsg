@@ -30,6 +30,11 @@ agmsg_placement_report() {
   else
     agmsg_terminal_name_self_safe "$@" || rc=$?
   fi
+  if [ -n "${AGMSG_PLACEMENT_REPLACED:-}" ]; then
+    local _prev="${AGMSG_PLACEMENT_REPLACED%%$'\t'*}" _at="${AGMSG_PLACEMENT_REPLACED#*$'\t'}"
+    case "$_at" in ''|*[!0-9]*) ;; *) _at="$(date -u -r "$_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$_at")" ;; esac
+    printf 'placement=replaced team=%s previous=%s recorded_at=%s\n' "$team" "$_prev" "${_at:-unknown}"
+  fi
   case "$text" in
     *"did not name or record"*|*"could not name"*|*"could not write"*|*"cannot record"*|*"cannot identify"*|*"could not be proven"*|*"no pane to name"*) ;;
     *) [ "$rc" -ne 0 ] || return 0 ;;
