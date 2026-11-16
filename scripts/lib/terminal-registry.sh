@@ -1399,6 +1399,21 @@ ENVLINES
   )
 }
 
+# The nested decision as the resolver will see it: a Codex seat under the shared
+# app-server carries the daemon's environment, which is replaced by its proved
+# TUI's (codex-own-pane.sh) before anything is resolved, so the decision is made
+# on that same environment and TUI pid. An own pane that could not be proven is
+# reported by the resolver itself; no decision is made here for it.
+_agmsg_terminal_nested_innermost_effective() {
+  local own
+  own="$(_agmsg_codex_own_pane)" || own=""
+  case "$own" in
+    '')       _agmsg_terminal_nested_innermost ;;
+    unknown*) return 0 ;;
+    *)        _agmsg_with_terminal_env "$own" _agmsg_terminal_nested_innermost ;;
+  esac
+}
+
 agmsg_terminal_resolve_name() {
   local own
   own="$(_agmsg_codex_own_pane)" || own=""
@@ -1473,7 +1488,7 @@ agmsg_terminal_name_self() {
   # environment can point at, so it does not get to answer ahead of the
   # innermost-terminal decision; the resolver below applies that decision.
   local _nest=""
-  _nest="$(_agmsg_terminal_nested_innermost 2>/dev/null)" || _nest=""
+  _nest="$(_agmsg_terminal_nested_innermost_effective 2>/dev/null)" || _nest=""
   if [ -z "$_excl" ] && [ -z "$_nest" ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
     resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
   fi

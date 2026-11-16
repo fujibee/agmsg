@@ -369,3 +369,23 @@ EOT
   [ "$status" -eq 0 ]
   case "$output" in "tmux"$'\t'"/tmp/ts:%3"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "nested (#1981): a stale tmux in the daemon's environment does not preempt a proved TUI pane during naming" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pOUTER
+  printf '/v/bin/codex HERDR_ENV=1 HERDR_SOCKET_PATH=%s HERDR_PANE_ID=w1:pOUTER TMUX=/tmp/ts,5,0 TMUX_PANE=%%3 HOME=/h\n' \
+    "$HERDR_SOCKET_PATH" > "$PSDIR/env/91001"
+  cat > "$FAKEBIN/tmux" <<'EOT'
+#!/usr/bin/env bash
+case "$*" in *'/tmp/ts'*'#{pane_pid}'*) echo 91001 ;; esac
+EOT
+  chmod +x "$FAKEBIN/tmux"
+  _seat t-aaa
+  export TMUX=/tmp/daemon-stale,9,0 TMUX_PANE=%0     # what the daemon's tool shell inherited
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  run --separate-stderr agmsg_terminal_name_self "" seatteam alice /work/a codex record
+  [ "$status" -eq 0 ]
+  refute grep -q 'nested terminals' <<<"$stderr"
+  grep -Fq 'tmux:/tmp/ts:%3' "$(agmsg_spawn_path seatteam alice)"
+}
