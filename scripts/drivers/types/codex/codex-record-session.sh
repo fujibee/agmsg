@@ -273,4 +273,19 @@ if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "$AGMSG_CODEX_
   fi
   mv "$request_tmp" "$request_file"
 fi
+
+# Record where this seat lives, as actas-claim.sh does for Claude Code. The Codex
+# actas flow never reaches that script, so without this the only writers of the
+# placement record are join (first join only) and the action hook, which stays
+# silent when it cannot write. The pane is found the way `where` finds it (no
+# session id: this seat's own terminal environment, or its TUI's under the shared
+# app-server). A refusal prints one `placement=unrecorded` line; actas goes on.
+if [ "${AGMSG_SELF_NAME:-on}" != off ] && [ -r "$SKILL_DIR/scripts/lib/terminal-registry.sh" ] \
+   && [ -r "$SKILL_DIR/scripts/lib/placement-report.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/terminal-registry.sh" 2>/dev/null || true
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/placement-report.sh" 2>/dev/null || true
+  agmsg_placement_report "" "$TEAM" "$AGENT" "$project_phys" codex record || true
+fi
 exit 0

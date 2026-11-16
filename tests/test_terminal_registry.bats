@@ -4882,3 +4882,54 @@ TABLE
   # Control: a plain-word name of a real driver still answers.
   _agmsg_terminal_id_ok herdr w1:pB
 }
+
+# --- placement report: a refused or unwritten record is said on stdout ---------
+# The refusal above went to stderr only, and actas callers drop stderr, so a seat
+# was told it was connected while peek/poke could not find it.
+
+@test "placement report: a pane another seat records prints one placement=unrecorded line" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=')" -eq 1 ]
+  grep -q 'already recorded as' <<<"$output"
+  # the original stderr is still there
+  grep -q 'did not name or record' <<<"$stderr"
+  refute test -e "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "placement report: a pane nobody holds is recorded and prints nothing" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  test -s "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "actas-claim: a pane that cannot be identified is still claimed, and says placement=unrecorded" {
+  _install_fake_herdr "some-other-sess"
+  export HERDR_ENV=1
+  unset HERDR_PANE_ID
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null 2>&1
+
+  run --separate-stderr bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -Fq 'status=ok'
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=')" -eq 1 ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}

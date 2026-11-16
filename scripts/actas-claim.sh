@@ -284,10 +284,17 @@ fi
 # gets its own record, because that pair is what peek/poke resolve by. The
 # VISIBLE pane name is whichever team comes last — panes have one name and a role
 # in two teams is one pane. Stable, since the order is $TEAMS'.
+# A refusal or a pane that could not be identified comes back as one
+# `placement=unrecorded` line (lib/placement-report.sh), printed after the
+# status line; the claim itself is unaffected.
+PLACEMENT_LINES=""
 if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/placement-report.sh" 2>/dev/null || true
   while IFS= read -r team; do
     [ -z "$team" ] && continue
-    agmsg_terminal_name_self_safe "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record retire_previous "$SESSION_ID" || true
+    _pl="$(agmsg_placement_report "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record retire_previous "$SESSION_ID")" || true
+    [ -z "$_pl" ] || PLACEMENT_LINES="${PLACEMENT_LINES:+$PLACEMENT_LINES$'\n'}$_pl"
   done <<< "$TEAMS"
 fi
 
@@ -336,6 +343,7 @@ while IFS= read -r team; do
   printf ' team=%s' "$team"
 done <<< "$TEAMS"
 printf '\n'
+[ -z "$PLACEMENT_LINES" ] || printf '%s\n' "$PLACEMENT_LINES"
 if [ "$NATIVE_DELIVERY" -eq 1 ]; then
   echo "delivery=native"
 elif [ -n "$NATIVE_AGMSGD_REASON" ]; then
