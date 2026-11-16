@@ -232,6 +232,7 @@ agmsg_codex_own_pane() {
             case "$rc" in
               0) printf 'env\n'
                  { IFS= read -r _; while IFS= read -r _l; do printf '%s\n' "$_l"; done; } <"$f"
+                 printf 'AGMSG_COP_TUI_PID=%s\n' "$pid"
                  return 0 ;;
               2) reason="cannot_check_for_another_resume_of_this_thread"
                  printf '' | _agmsg_cop_remember unknown "$tid" "" "" "$reason"
@@ -276,7 +277,7 @@ agmsg_codex_own_pane() {
         *HERDR_PANE_ID=*|*TMUX_PANE=*)
           lstart="$(ps -o lstart= -p "$pid" 2>/dev/null)" || lstart=""
           [ -n "$lstart" ] && printf '%s\n' "$env" | _agmsg_cop_remember pane "$tid" "$pid" "$lstart"
-          printf 'env\n%s\n' "$env"
+          printf 'env\n%s\nAGMSG_COP_TUI_PID=%s\n' "$env" "$pid"
           return 0 ;;
         *) reason="codex_tui_environment_has_no_pane" ;;
       esac
