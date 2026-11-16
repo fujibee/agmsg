@@ -408,9 +408,16 @@ _agmsg_terminal_nested_innermost() {
   [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || return 0
   [ -n "${HERDR_PANE_ID:-}" ] || return 0
   command -v tmux >/dev/null 2>&1 || { echo unknown; return 0; }
-  local sock="${TMUX%%,*}" want pid hop=0 out
+  local sock="${TMUX%%,*}" want hwant="" pid hop=0 out
   want="$(tmux -S "$sock" display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null)" || want=""
   case "$want" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  # The herdr pane's own shell, when herdr can say which it is: whichever of the
+  # two panes' shells is met FIRST going up is the innermost one. (A herdr server
+  # started in the foreground of a tmux pane has its panes below that tmux pane's
+  # shell too, so the tmux pane alone would claim them.)
+  if command -v herdr >/dev/null 2>&1; then
+    hwant="$(herdr pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null | sed -n 's/.*"shell_pid":\([0-9][0-9]*\).*/\1/p' | head -n 1)" || hwant=""
+  fi
   # A Codex seat under the shared app-server runs its commands as children of the
   # daemon, not of its TUI; the TUI is what sits in the pane, so the walk starts
   # from the TUI process codex-own-pane.sh proved (AGMSG_COP_TUI_PID), not from $$.
@@ -418,6 +425,7 @@ _agmsg_terminal_nested_innermost() {
   case "$pid" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
   while [ "$hop" -lt 32 ]; do
     [ "$pid" = "$want" ] && { echo tmux; return 0; }
+    [ -n "$hwant" ] && [ "$pid" = "$hwant" ] && { echo herdr; return 0; }
     out="$(ps -o ppid= -p "$pid" 2>/dev/null)" || out=""
     out="${out//[[:space:]]/}"
     case "$out" in ''|*[!0-9]*) echo unknown; return 0 ;; esac

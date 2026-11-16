@@ -97,6 +97,8 @@ elif [ "\$1" = agent ] && [ "\$2" = get ]; then
   if [ "\${HERDR_AGENT_GET_FAIL:-}" = 1 ]; then echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; fi
   if [ -n "\${HERDR_AGENT_GET_JSON:-}" ]; then printf '%s\n' "\$HERDR_AGENT_GET_JSON"; exit 0; fi
   printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\${HERDR_AGENT_NAME:-}"
+elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
+  printf '{"id":"x","result":{"process_info":{"pane_id":"%s","shell_pid":%s},"type":"pane_process_info"}}\n' "\$4" "\${FAKE_HERDR_SHELL_PID:-0}"
 elif [ "\$1" = pane ] && [ "\$2" = get ]; then
   echo '{"result":{"pane":{"terminal_id":"term_naming"}}}'
 elif [ "\$1" = tab ] && [ "\$2" = create ]; then
@@ -5199,4 +5201,16 @@ _nested_env() {   # <tmux pane pid the fake reports>
   [ "$status" -eq 0 ]
   test -e "$peer"
   grep -Fq 'tmux:/tmp/fake:%1' "$(agmsg_spawn_path seatteam inner)"
+}
+
+@test "nested (#1981): a herdr server started in the foreground of a tmux pane still locates its own panes by herdr (nearest pane shell wins)" {
+  _nested_env "$PPID"              # the tmux pane's shell is an ancestor, but ABOVE the herdr pane's
+  export FAKE_HERDR_SHELL_PID="$$"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'*":wC:p4") ;; *) echo "$output"; return 1 ;; esac
+  # and with the herdr shell not among the ancestors, the tmux pane decides again
+  export FAKE_HERDR_SHELL_PID=999998
+  run agmsg_terminal_resolve_name ""
+  [ "$output" = "$(printf 'tmux\t/tmp/fake:%%1')" ]
 }
