@@ -92,21 +92,51 @@ EOF
   ! ls "$TEST_SKILL_DIR"/run/grok-seat.*.json >/dev/null 2>&1
 }
 
-@test "grok-session-start.sh: no matching active_sessions.json entry writes nothing, warns on stderr" {
+@test "grok-session-start.sh: no matching active_sessions.json entry writes nothing, warns on stderr, records the pending reason" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   write_active_sessions some-other-session 17031
-  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  run env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "could not find session sess1"
+  [ ! -e "$TEST_SKILL_DIR"/run/grok-seat.*.json ]
+  local pending; pending="$(ls "$TEST_SKILL_DIR"/run/grok-seat-pending.* 2>/dev/null)"
+  [ -n "$pending" ]
+  grep -q "could not find session sess1" "$pending"
+}
+
+@test "grok-session-start.sh: no active_sessions.json at all writes nothing, warns on stderr" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "could not find session sess1"
   ! ls "$TEST_SKILL_DIR"/run/grok-seat.*.json >/dev/null 2>&1
 }
 
-@test "grok-session-start.sh: no active_sessions.json at all writes nothing, warns on stderr" {
+@test "grok-session-start.sh: a Linux real-machine round -- the session is not in active_sessions.json yet, but appears by the Nth retry" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
-  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  # Not written yet; a background writer adds it after a couple of
+  # retries' worth of (near-zero) delay -- models grok itself writing the
+  # session into active_sessions.json slightly after SessionStart fires.
+  ( sleep 0.3; write_active_sessions sess1 17031 ) &
+  local writer_pid=$!
+  run env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=20 AGMSG_GROK_LOOKUP_INTERVAL=0.05 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  wait "$writer_pid"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "could not find session sess1"
-  ! ls "$TEST_SKILL_DIR"/run/grok-seat.*.json >/dev/null 2>&1
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"pid": "17031"' "$f"
+  ! ls "$TEST_SKILL_DIR"/run/grok-seat-pending.* >/dev/null 2>&1
+}
+
+@test "grok-session-start.sh: a successful witness clears any earlier pending-reason file for this seat" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions some-other-session 17031
+  env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
+  local pending; pending="$(ls "$TEST_SKILL_DIR"/run/grok-seat-pending.*)"
+  [ -n "$pending" ]
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  [ ! -f "$pending" ]
 }
 
 @test "grok-session-start.sh: a second, unrelated session in active_sessions.json does not confuse the match" {
@@ -162,6 +192,44 @@ EOF
   run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"decision": "block"'
+}
+
+@test "grok-stop.sh: creates the witness itself when SessionStart never managed to (Linux real-machine round) -- first_turn_done true from the start" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  # SessionStart never ran (or ran before the session existed) -- no
+  # witness at all. By Stop time, active_sessions.json is populated.
+  [ ! -e "$TEST_SKILL_DIR"/run/grok-seat.*.json ]
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"pid": "17031"' "$f"
+  grep -q '"session_id": "sess1"' "$f"
+  grep -q '"first_turn_done": true' "$f"
+}
+
+@test "grok-stop.sh: clears an earlier pending-reason file once it successfully creates the witness itself" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions some-other-session 1
+  env GROK_SESSION_ID=sess1 AGMSG_GROK_LOOKUP_RETRIES=1 AGMSG_GROK_LOOKUP_INTERVAL=0 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
+  local pending; pending="$(ls "$TEST_SKILL_DIR"/run/grok-seat-pending.*)"
+  [ -n "$pending" ]
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  [ ! -f "$pending" ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"first_turn_done": true' "$f"
+}
+
+@test "grok-stop.sh: still no witness and no active_sessions.json entry at Stop -- records its own pending reason, still runs the inbox check" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_SKILL_DIR"/run/grok-seat.*.json ]
+  local pending; pending="$(ls "$TEST_SKILL_DIR"/run/grok-seat-pending.*)"
+  [ -n "$pending" ]
+  grep -q "Stop could not find session sess1" "$pending"
 }
 
 @test "grok-session-start.sh: a re-fire for the SAME session_id does not reset an already-advanced first_turn_done" {

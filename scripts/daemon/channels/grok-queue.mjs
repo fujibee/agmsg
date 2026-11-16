@@ -23,7 +23,7 @@ import {
   readStorageDriver,
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
-import { leaderSocketDirIsLax, listGrokRegistrations, readGrokWitness } from "./grok-queue-store.mjs";
+import { leaderSocketDirIsLax, listGrokRegistrations, readGrokPendingReason, readGrokWitness } from "./grok-queue-store.mjs";
 import { pokeNudgeText } from "./terminal-poke-types.mjs";
 import { probeLeaderListening, runGrokNudge } from "./grok-queue-io.mjs";
 
@@ -156,6 +156,7 @@ export function createGrokQueueChannel({
   log = (message) => logLine(installRoot, message),
   listSeats = listGrokRegistrations,
   readWitness = (team, agent) => readGrokWitness(installRoot, team, agent),
+  readPendingReason = (team, agent) => readGrokPendingReason(installRoot, team, agent),
   nudgeText = (cmdName) => pokeNudgeText(installRoot, "grok-build", cmdName),
   readDriver = readStorageDriver,
   openStore = openMessageStore,
@@ -202,7 +203,19 @@ export function createGrokQueueChannel({
 
     const witnessResult = classifyWitness(readWitness(team, agent));
     if (!witnessResult.ok) {
-      saveSeat(book, { seat: key, state: "unaddressable", reason: witnessResult.reason });
+      // Linux real-machine round (2026-11-15): a missing witness is not
+      // always "never chose agmsgd / never started a session" -- the
+      // hooks may have genuinely tried and come up empty (SessionStart's
+      // own bounded active_sessions.json retry, and grok-stop.sh's
+      // one-shot attempt at the end of the first turn, can both still
+      // find nothing). That reason, when recorded, is surfaced here
+      // instead of the generic not_registered_for_agmsgd alone.
+      let reason = witnessResult.reason;
+      if (reason === "not_registered_for_agmsgd") {
+        const pending = readPendingReason(team, agent);
+        if (pending) reason = `not_registered_for_agmsgd:${pending}`;
+      }
+      saveSeat(book, { seat: key, state: "unaddressable", reason });
       return;
     }
 

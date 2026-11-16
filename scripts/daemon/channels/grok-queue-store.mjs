@@ -114,6 +114,29 @@ export function grokWitnessPath(installRoot, team, agent) {
   return join(installRoot, "run", `grok-seat.${grokWitnessKey(team, agent)}.json`);
 }
 
+// Linux real-machine round (2026-11-15): grok-session-start.sh's own
+// bounded active_sessions.json retry, and grok-stop.sh's own one-shot
+// attempt at the end of the first turn, can both still come up empty --
+// previously reported only to stderr, which grok discards for a passive
+// hook, so the reason was otherwise invisible. Read here so `agmsg daemon
+// status` can show it (class D) instead.
+export function grokPendingPath(installRoot, team, agent) {
+  return join(installRoot, "run", `grok-seat-pending.${grokWitnessKey(team, agent)}`);
+}
+
+// Returns the recorded reason text, or "" when no pending-reason file
+// exists (the common case: either a witness exists, or neither hook has
+// ever run for this seat yet). Unreadable is folded into "" too -- there
+// is nothing more specific to say than the witness's own "missing" state
+// already says.
+export function readGrokPendingReason(installRoot, team, agent) {
+  try {
+    return readFileSync(grokPendingPath(installRoot, team, agent), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 // Reads one seat's witness file. Returns:
 //   { state: "ok", witness: {...} }               -- read and parsed
 //   { state: "missing" }                           -- no SessionStart has run yet

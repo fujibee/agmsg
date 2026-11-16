@@ -458,6 +458,16 @@ function formatGrokQueueSeats(inventory, all) {
       lines.push(`Grok queue ${label}: notified via grok queue${permsSuffix}`);
       continue;
     }
+    const pendingWitnessReason = /^not_registered_for_agmsgd:(.+)$/.exec(seat.reason ?? "")?.[1];
+    if (pendingWitnessReason) {
+      // Shown unconditionally, never behind --all: unlike the generic
+      // "haven't chosen agmsgd yet" state just below, this is a seat that
+      // DID choose it and whose hooks genuinely tried and came up empty
+      // (Linux real-machine round, 2026-11-15) -- an actionable finding,
+      // not a routine, expected-forever absence.
+      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: ${pendingWitnessReason}`);
+      continue;
+    }
     if (seat.reason === "not_registered_for_agmsgd" || seat.reason === "seat_registration_missing") {
       if (!all) { omitted += 1; continue; }
       lines.push(`Grok queue ${label}: agmsgd cannot reach this seat yet (not on agmsgd delivery, or no SessionStart has run)`);

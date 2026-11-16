@@ -42,6 +42,7 @@ function channelFixture(t, overrides = {}) {
     log: () => {},
     listSeats: () => ({ state: 'ok', seats: [{ team: 'test', agent: 'ga1', project: root, teamConfig }] }),
     readWitness: () => (state.witness === null ? { state: 'missing' } : { state: 'ok', witness: state.witness }),
+    readPendingReason: () => state.pendingReason ?? '',
     nudgeText: () => 'agmsg: you have new messages. Run /agmsg to check your inbox.',
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     openStore: () => ({ close() {} }),
@@ -80,6 +81,19 @@ test('no witness yet (agmsgd not chosen, or SessionStart never ran) is reported,
   await channel.pollOnce();
   assert.equal(state.nudgeCalls, 0);
   assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'not_registered_for_agmsgd' });
+  await channel.stop();
+});
+
+test('a recorded pending reason (SessionStart/Stop both could not find the session) is surfaced instead of the generic missing-witness reason (Linux real-machine round)', async (t) => {
+  const { channel, state } = channelFixture(t, { witness: null });
+  state.witness = null;
+  state.pendingReason = 'SessionStart could not find session sess-1 in /home/x/.grok/active_sessions.json';
+  await channel.pollOnce();
+  assert.equal(state.nudgeCalls, 0);
+  assert.deepEqual(seatBrief(channel), {
+    state: 'unaddressable',
+    reason: 'not_registered_for_agmsgd:SessionStart could not find session sess-1 in /home/x/.grok/active_sessions.json',
+  });
   await channel.stop();
 });
 

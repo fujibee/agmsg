@@ -55,19 +55,52 @@ LEADER_SOCKET="${GROK_LEADER_SOCKET:-}"
 PID=""
 PID_START=""
 CWD=""
-_session_obj="$(agmsg_grok_active_session_lookup "$GROK_HOME_RESOLVED/active_sessions.json" "$SESSION_ID" 2>/dev/null || true)"
-if [ -n "$_session_obj" ]; then
-  PID="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+# Linux real-machine round (2026-11-15): SessionStart can fire BEFORE grok
+# itself has written this session into active_sessions.json yet -- a bare
+# single lookup then found nothing on 2 of 3 fresh sessions, leaving the
+# seat unaddressable forever (no later event re-tries this write). Retried
+# here for a bounded time instead: SessionStart is NOT in grok's own
+# blockingEvents list (confirmed from its initialize response's
+# x.ai/hooks.blockingEvents, which lists only pre_tool_use/stop/
+# subagent_stop), so this wait never delays the user's own turn. 25
+# attempts * 0.2s = ~5s outer bound; stops as soon as a match is found.
+# Overridable so a test can confirm the Nth-attempt-succeeds path and the
+# give-up-after-the-last-attempt path without a real suite spending ~5s
+# per case; production never sets these, so the real default stays 25 *
+# 0.2s = ~5s.
+_lookup_retries="${AGMSG_GROK_LOOKUP_RETRIES:-25}"
+_lookup_interval="${AGMSG_GROK_LOOKUP_INTERVAL:-0.2}"
+_lookup_attempt=0
+while [ "$_lookup_attempt" -lt "$_lookup_retries" ]; do
+  _session_obj="$(agmsg_grok_active_session_lookup "$GROK_HOME_RESOLVED/active_sessions.json" "$SESSION_ID" 2>/dev/null || true)"
+  if [ -n "$_session_obj" ]; then
+    PID="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+    [ -n "$PID" ] && break
+  fi
+  _lookup_attempt=$((_lookup_attempt + 1))
+  [ "$_lookup_attempt" -lt "$_lookup_retries" ] && sleep "$_lookup_interval"
+done
+if [ -n "$_session_obj" ] && [ -n "$PID" ]; then
   PID_START="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
   CWD="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi
-# No active_sessions.json entry found (unexpected shape, or the lookup's
-# own flat-object assumption did not hold): fail toward "no witness" rather
-# than writing one with a wrong pid that would misreport as unaddressable
-# forever. GROK_SESSION_ID was still confirmed non-empty above, so this is
-# a real gap worth reporting back, not a routine absence.
+# Still no active_sessions.json entry after the bounded retry above
+# (unexpected shape, or the lookup's own flat-object assumption did not
+# hold): fail toward "no witness" rather than writing one with a wrong
+# pid that would misreport as unaddressable forever. GROK_SESSION_ID was
+# still confirmed non-empty above, so this is a real gap worth reporting
+# back, not a routine absence -- grok-stop.sh gets one more chance to
+# create this witness at the end of the first turn (active_sessions.json
+# is certainly populated by then), and the reason is recorded where
+# `agmsg daemon status` can show it (class D), not only to stderr, which
+# grok itself discards for SessionStart.
 if [ -z "$PID" ]; then
-  echo "agmsg: grok-session-start.sh: could not find session $SESSION_ID in $GROK_HOME_RESOLVED/active_sessions.json; no witness written" >&2
+  _reason="SessionStart could not find session $SESSION_ID in $GROK_HOME_RESOLVED/active_sessions.json"
+  echo "agmsg: grok-session-start.sh: $_reason; no witness written" >&2
+  _seat_for_pending="$(agmsg_grok_resolve_seat "$PROJECT" 2>/dev/null || true)"
+  if [ -n "$_seat_for_pending" ]; then
+    agmsg_write_atomic "$(agmsg_grok_pending_path "${_seat_for_pending%%	*}" "${_seat_for_pending#*	}")" "$_reason" || true
+  fi
   exit 0
 fi
 # NG2 follow-up (2026-11-15): session/resume's cwd must be grok's own
@@ -126,4 +159,7 @@ CONTENT="$(cat <<EOF
 EOF
 )"
 agmsg_write_atomic "$WITNESS_PATH" "$CONTENT" || true
+# A witness was written successfully -- any earlier "could not find this
+# session" reason recorded for this seat no longer applies.
+rm -f "$(agmsg_grok_pending_path "$TEAM" "$AGENT")" 2>/dev/null || true
 exit 0

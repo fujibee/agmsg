@@ -30,6 +30,17 @@ agmsg_grok_witness_path() {
   printf '%s/grok-seat.%s.json\n' "$RUN_DIR" "$(_agmsg_grok_witness_key "$1" "$2")"
 }
 
+# Prints the path for a seat's own "could not establish a witness" reason
+# (Linux real-machine round, 2026-11-15): SessionStart's bounded
+# active_sessions.json retry, and grok-stop.sh's own one at the end of the
+# first turn, can both still come up empty. This is the ONE place that
+# reason is recorded so `agmsg daemon status` can show it (class D) instead
+# of only the stderr line grok itself discards for a passive hook. Removed
+# by either hook the moment a witness is actually written successfully.
+agmsg_grok_pending_path() {
+  printf '%s/grok-seat-pending.%s\n' "$RUN_DIR" "$(_agmsg_grok_witness_key "$1" "$2")"
+}
+
 # Resolve the SINGLE (team, agent) pair this grok-build session is for, the
 # same narrowing session-start.sh's own ROLE_NAME resolution uses for the
 # common case: a project registered under exactly one (team, agent) pair for
