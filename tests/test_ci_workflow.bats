@@ -149,7 +149,7 @@
   [ "$status" -eq 0 ]
   run bash -c "grep -A25 'if \[ \"\$ACTION\" = \"closed\" \]; then' '$workflow' | grep -c 'GITHUB_OUTPUT'"
   [ "$status" -eq 0 ]
-  [ "$output" -eq 5 ]
+  [ "$output" -eq 6 ]
 
   # Every heavy job must skip at the JOB level on a closed event, not merely
   # skip its own steps -- a job-level `if:` that still evaluates true lets
@@ -235,7 +235,7 @@ GIT
   # the step that fails unless every shard passed.
   grep -Fq "      - id: reuse" "$workflow"
   [ "$(grep -A1 '^      - id: reuse$' "$workflow" | tail -1)" = "        if: github.event_name == 'push'" ]
-  [ "$(grep -A2 '^      - name: Record this tree as passed$' "$workflow" | tail -1)" = "        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'" ]
+  [ "$(grep -A2 '^      - name: Record this tree as passed$' "$workflow" | tail -1)" = "        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.mac_needed != 'false'" ]
   # The artifact is named green-tree-<tree>, or partial-tree-<tree> when the
   # run skipped files; the step records which in its `name` output.
   grep -Fq 'name: ${{ steps.green.outputs.name }}' "$workflow"
@@ -243,7 +243,7 @@ GIT
   grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
   # Every heavy shard step skips on a reused tree, the same set the docs-only
   # skip gates; nothing heavy is left gated on docs_only alone.
-  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 10 ]
+  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 11 ]
   # And the run says which green it is, on the shard and on the aggregate.
   grep -Fq "format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run)" "$workflow"
   grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
@@ -267,6 +267,19 @@ GIT
   # contracts_needed=true; the reuse must not skip it. The step is gated on
   # contracts_needed alone, and bats is installed for it even when the suite is
   # skipped.
-  grep -Fq "if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()" "$workflow"
-  grep -Fq "|| (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')" "$workflow"
+  grep -Fq "if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && needs.changes.outputs.mac_needed != 'false' && !cancelled()" "$workflow"
+  grep -Fq "|| (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && needs.changes.outputs.mac_needed != 'false')" "$workflow"
+}
+
+@test "CI: macOS shards skip only on a pull_request whose diff says macOS is not needed, and such a tree is never recorded for reuse" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+  # Pushes and the closed event set mac_needed=true, so main and release run macOS.
+  [ "$(grep -c 'echo "mac_needed=true" >> "\$GITHUB_OUTPUT"' "$workflow")" -eq 2 ]
+  # The diff-based answer is false only when mac-needed.mjs said so; a failure to
+  # run it leaves true.
+  grep -Fq 'case "$res" in false*) mac_needed=false ;; esac' "$workflow"
+  grep -Fq 'mac_needed=true' "$workflow"
+  # Every suite step on the shard job carries the macOS gate; the notice step names the skip.
+  grep -Fq "(matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')" "$workflow"
+  grep -Fq '::notice title=bats shard skipped::no macOS-sensitive change in this diff' "$workflow"
 }

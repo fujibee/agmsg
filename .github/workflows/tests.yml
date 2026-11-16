@@ -213,6 +213,9 @@ jobs:
       server_changed: ${{ steps.detect.outputs.server_changed }}
       sync_changed: ${{ steps.detect.outputs.sync_changed }}
       contracts_needed: ${{ steps.detect.outputs.contracts_needed }}
+      # 'false' only on a pull_request whose diff cannot behave differently on
+      # macOS (mac-needed.mjs); everything else, including every doubt, is true.
+      mac_needed: ${{ steps.detect.outputs.mac_needed }}
       reuse_run: ${{ steps.reuse.outputs.reuse_run }}
       # Comma-separated tests/*.bats files this run does not need to run (empty:
       # run everything). From the diff on a pull_request, from the pull
@@ -237,6 +240,7 @@ jobs:
             echo "server_changed=true" >> "$GITHUB_OUTPUT"
             echo "sync_changed=true" >> "$GITHUB_OUTPUT"
             echo "contracts_needed=true" >> "$GITHUB_OUTPUT"
+            echo "mac_needed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$ACTION" = "closed" ]; then
@@ -260,6 +264,7 @@ jobs:
             echo "server_changed=false" >> "$GITHUB_OUTPUT"
             echo "sync_changed=false" >> "$GITHUB_OUTPUT"
             echo "contracts_needed=false" >> "$GITHUB_OUTPUT"
+            echo "mac_needed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
@@ -380,6 +385,24 @@ jobs:
             fi
           fi
           echo "bats_skip=$bats_skip" >> "$GITHUB_OUTPUT"
+
+          # Whether macOS needs to run this PR's suite. Only a diff that
+          # provably cannot behave differently on macOS (no installer, daemon,
+          # launchd, compat.sh or CI change, and no added line using a command
+          # whose GNU and BSD behaviour differ: see mac-patterns.tsv) says
+          # false. Any failure to decide says true. A push (main, integration)
+          # and a release PR never get here and run macOS in full.
+          mac_needed=true
+          if [ "$docs_only" != true ]; then
+            if git diff -U0 "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.diff" \
+               && res="$(node .github/scripts/mac-needed.mjs --changed "$RUNNER_TEMP/changed.txt" --diff "$RUNNER_TEMP/changed.diff")"; then
+              echo "macOS needed: $res"
+              case "$res" in false*) mac_needed=false ;; esac
+            else
+              echo "::warning title=macOS selection::could not decide whether macOS is needed; running it"
+            fi
+          fi
+          echo "mac_needed=$mac_needed" >> "$GITHUB_OUTPUT"
 
       # Whole-tree reuse, push only. A pull_request run tests GitHub's merge
       # ref: the PR head merged into the base as it was at that moment. When
@@ -554,8 +577,14 @@ jobs:
           echo "This tree already passed every bats shard in run $REUSE_RUN; skipping the suite."
           echo "::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN — this shard ran 0 test files"
 
+      - name: macOS not needed for this diff — skipping
+        if: matrix.os == 'macos-latest' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && needs.changes.outputs.mac_needed == 'false'
+        run: |
+          echo "This diff touches nothing that can behave differently on macOS (installer, daemon, launchd, compat.sh, the CI definition, or a command whose GNU and BSD behaviour differ); the Linux legs cover it. Pushes to main run macOS in full."
+          echo "::notice title=bats shard skipped::no macOS-sensitive change in this diff — this macOS shard ran 0 test files; the Linux shards ran them"
+
       - name: Compute this shard's test files
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         env:
           SHARD: ${{ matrix.shard }}
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
@@ -587,14 +616,14 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
+        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')) || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && needs.changes.outputs.mac_needed != 'false')
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         run: |
           bash --version | head -1
           sqlite3 --version
@@ -607,7 +636,7 @@ jobs:
       # measuring. It closes fds 3 and 4 for the same reason, and gives itself a
       # hard lifetime so it cannot outlive the job it is watching.
       - name: Start hang sampler
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         continue-on-error: true
         run: |
           set +e
@@ -645,7 +674,7 @@ jobs:
           echo "sampler pid $!"
 
       - name: Run bats suite (this shard)
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -669,7 +698,7 @@ jobs:
       # bats result it reuses never covered this contract. bats itself is
       # installed for this step even when the suite is skipped (below).
       - name: Storage contract against the jsonl driver (macOS)
-        if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()
+        if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && needs.changes.outputs.mac_needed != 'false' && !cancelled()
         env:
           AGMSG_STORAGE_DRIVER: jsonl
         run: |
@@ -686,7 +715,7 @@ jobs:
       # pipelines for the same reason: it closes the pipe early and SIGPIPEs
       # whatever was writing.
       - name: Hang forensics
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         continue-on-error: true
         run: |
           set +e
@@ -720,7 +749,7 @@ jobs:
           exit 0
 
       - name: Upload hang samples
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -730,7 +759,7 @@ jobs:
           retention-days: 3
 
       - name: Upload bats timings
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && (matrix.os != 'macos-latest' || needs.changes.outputs.mac_needed != 'false')
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -836,7 +865,7 @@ jobs:
       # the condition keeps docs-only runs (nothing ran) from recording.
       - name: Record this tree as passed
         id: green
-        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.mac_needed != 'false'
         env:
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
         run: |
