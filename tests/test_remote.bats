@@ -153,8 +153,12 @@ _reap_1941_launcher() {
 # ever signalled after its argv is seen to carry that nonce.
 _reap_bystander_1941() {
   [ -n "${_V1941:-}" ] || return 0
-  if ps -o command= -p "$_V1941" 2>/dev/null | grep -qF -- "$_VN1941"; then
-    kill -TERM "$_V1941" 2>/dev/null || true
+  # The bystander leads a group of its own and its shell waits on a child, so the
+  # whole group goes -- but only while some live member of that group carries the
+  # bystander's nonce (the same proof as for the launcher's group).
+  if ps -axo pgid=,command= 2>/dev/null \
+       | awk -v g="$_V1941" -v n="$_VN1941" '$1 == g && index($0, n) && !/awk/ { found = 1 } END { exit found ? 0 : 1 }'; then
+    kill -TERM -- "-$_V1941" 2>/dev/null || true
   fi
   wait "$_V1941" 2>/dev/null || true
   _V1941=""
@@ -1305,6 +1309,10 @@ _capability_endpoint() {
   [ "$_S1941" = 1 ]
   kill -0 "$victim"
   _C1941=""
+  # and the bystander cleanup takes its children with it
+  _reap_bystander_1941
+  sleep 0.3
+  [ "$(ps -axo pgid= 2>/dev/null | tr -d ' ' | grep -cx "$victim")" = 0 ]
 }
 
 @test "connect: starts a background sync engine that disconnect stops (Done-when 4)" {
