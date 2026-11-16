@@ -243,7 +243,7 @@ GIT
   grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
   # Every heavy shard step skips on a reused tree, the same set the docs-only
   # skip gates; nothing heavy is left gated on docs_only alone.
-  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 11 ]
+  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 10 ]
   # And the run says which green it is, on the shard and on the aggregate.
   grep -Fq "format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run)" "$workflow"
   grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
@@ -259,4 +259,14 @@ GIT
   grep -Fq '"$(sed -n '"'"'s/^tree //p'"'"' "$m")" = "$tree"' "$workflow"
   grep -Fq "'^sha [0-9a-f]\\{40\\}\$'" "$workflow"
   grep -Fq 'tests/*.bats) [ -f "$f" ] || todo="" ;;' "$workflow"
+}
+
+@test "CI: the macOS storage contract runs on a reused tree, as its own job did" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+  # A tree recorded green by a PR run that skipped the contract is pushed with
+  # contracts_needed=true; the reuse must not skip it. The step is gated on
+  # contracts_needed alone, and bats is installed for it even when the suite is
+  # skipped.
+  grep -Fq "if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()" "$workflow"
+  grep -Fq "|| (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')" "$workflow"
 }

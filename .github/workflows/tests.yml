@@ -587,7 +587,7 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
@@ -662,10 +662,14 @@ jobs:
 
       # The jsonl storage contract on macOS (BSD userlands), formerly its own
       # job. Runs after the shard's files so a failure there is reported on its
-      # own step, and only on shard 5 so it runs once. Skipped when the diff
-      # reads nothing the contract reads (same gate as the Linux leg).
+      # own step, and only on shard 5 so it runs once. Gated exactly as the job
+      # it replaced was: on contracts_needed alone, NOT on a reused tree, because
+      # a tree recorded green by a pull_request run that skipped this contract
+      # (contracts_needed=false) is pushed with contracts_needed=true, and the
+      # bats result it reuses never covered this contract. bats itself is
+      # installed for this step even when the suite is skipped (below).
       - name: Storage contract against the jsonl driver (macOS)
-        if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && needs.changes.outputs.contracts_needed != 'false' && !cancelled()
+        if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()
         env:
           AGMSG_STORAGE_DRIVER: jsonl
         run: |
