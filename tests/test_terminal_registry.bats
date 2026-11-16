@@ -114,6 +114,7 @@ elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
   # Nested-terminal tests (#1981) steer this answer: fail / garbage / spaced JSON, or
   # a chosen shell pid (default 7, which is never an ancestor of the test).
   [ "\${FAKE_HERDR_PI_MODE:-}" = fail ] && exit 1
+  [ "\${FAKE_HERDR_PI_MODE:-}" = partialfail ] && { printf '{"result":{"process_info":{"shell_pid":%s}}}\n' "\${FAKE_HERDR_SHELL_PID:-7}"; exit 1; }
   [ "\${FAKE_HERDR_PI_MODE:-}" = garbage ] && { echo '{"result":{"process_info":{"shell_pid":"x"}}}'; exit 0; }
   [ "\${FAKE_HERDR_PI_MODE:-}" = spaced ] && { printf '{ "result" : { "process_info" : { "shell_pid" : %s } } }\n' "\${FAKE_HERDR_SHELL_PID:-7}"; exit 0; }
   [ -n "\${FAKE_HERDR_SHELL_PID:-}" ] && { printf '{"result":{"process_info":{"shell_pid":%s,"foreground_process_group_id":%s}}}\n' "\$FAKE_HERDR_SHELL_PID" "\$FAKE_HERDR_SHELL_PID"; exit 0; }
@@ -5232,7 +5233,7 @@ _nested_env() {   # <tmux pane pid the fake reports>
 
 @test "nested (#1981): when herdr cannot say where its pane's shell is, nothing is chosen on tmux's word alone" {
   local mode
-  for mode in fail garbage; do
+  for mode in fail garbage partialfail; do
     _nested_env "$PPID"
     export FAKE_HERDR_PI_MODE="$mode"
     run --separate-stderr agmsg_terminal_resolve_name ""
@@ -5243,5 +5244,14 @@ _nested_env() {   # <tmux pane pid the fake reports>
   _nested_env "$PPID"
   rm -f "$FAKEBIN/herdr"
   PATH="$FAKEBIN:/usr/bin:/bin" run --separate-stderr agmsg_terminal_resolve_name ""
+  [ "$status" -eq 1 ]
+}
+
+@test "nested (#1981): a failed process-info that printed a pid first is not trusted, with or without pipefail" {
+  _nested_env "$PPID"
+  export FAKE_HERDR_SHELL_PID="$$" FAKE_HERDR_PI_MODE=partialfail
+  set +o pipefail
+  run agmsg_terminal_resolve_name ""
+  set -o pipefail
   [ "$status" -eq 1 ]
 }

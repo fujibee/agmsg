@@ -417,8 +417,12 @@ _agmsg_terminal_nested_innermost() {
   # alone would claim them.) Without herdr's answer only one of the two shells is
   # known, and choosing on that is how the outer terminal gets picked: unknown.
   command -v herdr >/dev/null 2>&1 || { echo unknown; return 0; }
-  hwant="$(herdr pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null \
-    | sed -n 's/.*"shell_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)" || hwant=""
+  # herdr's own exit status first: a pipeline would report only the last stage's,
+  # and a command that failed after printing a pid is not an answer.
+  local pi="" pirc=0
+  pi="$(herdr pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null)" || pirc=$?
+  [ "$pirc" -eq 0 ] || { echo unknown; return 0; }
+  hwant="$(printf '%s\n' "$pi" | sed -n 's/.*"shell_pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)" || hwant=""
   case "$hwant" in ''|*[!0-9]*|0|1) echo unknown; return 0 ;; esac
   # A Codex seat under the shared app-server runs its commands as children of the
   # daemon, not of its TUI; the TUI is what sits in the pane, so the walk starts
