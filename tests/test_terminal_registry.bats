@@ -3049,7 +3049,7 @@ STUB
 @test "a failed LABEL rename still leaves the member addressable (#1044)" {
   _install_fake_herdr "sess-l"
   export HERDR_ENV=1
-  export HERDR_AGENT_GET_FAIL=1     # the decoration fails
+  export HERDR_PANE_RENAME_RC=1     # the decoration fails
   export HERDR_AGENT_RENAME_RC=0    # the key would succeed, if it is reached
   unset AGMSG_TERMINAL_NAMING
 
