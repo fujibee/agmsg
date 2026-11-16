@@ -3049,7 +3049,7 @@ STUB
 @test "a failed LABEL rename still leaves the member addressable (#1044)" {
   _install_fake_herdr "sess-l"
   export HERDR_ENV=1
-  export HERDR_PANE_RENAME_RC=1     # the decoration fails
+  export HERDR_AGENT_GET_FAIL=1     # the decoration fails
   export HERDR_AGENT_RENAME_RC=0    # the key would succeed, if it is reached
   unset AGMSG_TERMINAL_NAMING
 
@@ -5033,7 +5033,7 @@ TABLE
 
 @test "replace_claim: when this seat cannot be named, the other seat's record is kept" {
   _install_fake_herdr "x"
-  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4" HERDR_PANE_RENAME_RC=1
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4" HERDR_AGENT_GET_FAIL=1
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   source "$SKILL_DIR/scripts/lib/placement-report.sh"
   local peer; peer="$(agmsg_spawn_path seatteam stale)"
