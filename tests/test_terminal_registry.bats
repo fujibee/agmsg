@@ -5002,3 +5002,31 @@ TABLE
   test -e "$peer"
   refute test -e "$(agmsg_spawn_path seatteam alice)"
 }
+
+@test "codex actas: a pane picked by label is never the one a replacement is proved for" {
+  _fake_herdr_labels "w1:pHERE=other:seat" "w1:pTHERE=seatteam:alice"
+  export HERDR_ENV=1 HERDR_PANE_ID=w1:pHERE CODEX_THREAD_ID=t-own
+  export CODEX_HOME="$TEST_SKILL_DIR/profile"
+  mkdir -p "$CODEX_HOME" "$SKILL_DIR/run" "$TEST_SKILL_DIR/project"
+  printf 'trusted|%s||||\n' "$(date +%s)" > "$SKILL_DIR/run/codex-own-pane.t-own"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  printf 'herdr:%s:w1:pTHERE\t/proj/PEER\tcodex\n' "$HERDR_SOCKET_PATH" > "$peer"
+  run bash "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" seatteam alice "$TEST_SKILL_DIR/project"
+  [ -f "$peer" ]
+  refute grep -q '^placement=replaced' <<<"$output"
+}
+
+@test "codex actas: a project the poison guard rejects is not recorded and replaces nothing" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%1" CODEX_THREAD_ID=t-own
+  export CODEX_HOME="$TEST_SKILL_DIR/profile"
+  mkdir -p "$CODEX_HOME" "$SKILL_DIR/run"
+  printf 'trusted|%s||||\n' "$(date +%s)" > "$SKILL_DIR/run/codex-own-pane.t-own"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tcodex\n' > "$peer"
+  run bash "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" seatteam alice /no/such/project
+  [ -f "$peer" ]
+  [ ! -f "$(agmsg_spawn_path seatteam alice)" ]
+}

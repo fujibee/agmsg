@@ -110,10 +110,6 @@ _codex_actas_placement() {
   fi
   return "$_rc"
 }
-# Every exit below, including the ones that record nothing, still says whether
-# the pane was recorded.
-trap _codex_actas_placement EXIT
-
 
 # Poison-record guard (best-effort bias: record nothing when unsure). A mangled
 # <project> argument -- e.g. the lone `\` a PowerShell-parsed \"$PWD\" collapses
@@ -127,6 +123,16 @@ project_phys="$(agmsg_canonical_path "$PROJECT")"
 case "$project_phys" in
   / | /[A-Za-z] | [A-Za-z]: | [A-Za-z]:/ | [A-Za-z]:\\) exit 0 ;;
 esac
+
+# Registered only now: an argument the guard above rejected is not recorded, and
+# must not reach the placement step either. Every exit below, including the ones
+# that record nothing, still says whether the pane was recorded.
+
+
+# Registered only now: an argument the guard above rejected is not recorded, and
+# must not reach the placement step either. Every exit below, including the ones
+# that record nothing, still says whether the pane was recorded.
+trap _codex_actas_placement EXIT
 
 thread=""
 if [ -n "${CODEX_THREAD_ID:-}" ]; then

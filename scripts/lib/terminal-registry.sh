@@ -1422,7 +1422,11 @@ agmsg_terminal_name_self() {
   # named this seat, and more than one means the label is not identifying here.
   # A Codex seat under the shared daemon skips it too: the labels written there
   # were derived from the daemon starter's pane and are not evidence (#1736).
-  if [ -z "$_excl" ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
+  # A caller replacing another seat's record (replace_claim) proved ITS OWN pane
+  # from its terminal environment; a pane found by label is a different claim
+  # and could name another pane than the one that was proved, so the label is
+  # not consulted for it.
+  if [ -z "$_excl" ] && [ "$replace" != replace_claim ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
     resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
   fi
   if [ -n "$resolved" ]; then
