@@ -525,8 +525,11 @@ EOF
   [ -z "$(agmsg_terminal_self_env)" ] || return 1
 
   # Self-env order is independent of the resolver's global priorities (orca,
-  # herdr, tmux). A nested tmux environment remains the legacy first answer.
+  # herdr, tmux). A process inside the tmux pane (its pane shell is an ancestor,
+  # #1981) is located by tmux even though it carries the herdr environment too.
   touch "$TEST_SKILL_DIR/herdr.sock"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH" FAKE_TMUX_PANE_PID="$$"
   export TMUX="/tmp/tmux-self,321,0" TMUX_PANE='%4'
   export HERDR_ENV=1 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock" HERDR_PANE_ID='w1:p2'
   export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
@@ -4881,4 +4884,57 @@ TABLE
   refute test -e "$BATS_TEST_TMPDIR/evil-was-sourced"
   # Control: a plain-word name of a real driver still answers.
   _agmsg_terminal_id_ok herdr w1:pB
+}
+
+# --- #1981: the innermost of tmux / herdr names the pane ------------------------
+# A tmux session started in a herdr pane inherits that pane's HERDR_* variables.
+# Which terminal a process is inside is read from its ancestry: it is inside the
+# tmux pane iff the pane's shell pid is one of its ancestors.
+
+_nested_env() {   # <tmux pane pid the fake reports>
+  _install_fake_herdr "x"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  export FAKE_TMUX_PANE_PID="$1"
+}
+
+@test "nested (#1981): a process inside the tmux pane is located by tmux, not the enclosing herdr pane" {
+  _nested_env "$$"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'tmux\t/tmp/fake:%%1')" ]
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  case "$output" in "tmux"$'\t'"/tmp/fake:%1"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "nested (#1981): a herdr pane that merely inherited TMUX is located by herdr" {
+  _nested_env 999999
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'*":wC:p4") ;; *) echo "$output"; return 1 ;; esac
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'*":wC:p4"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "nested (#1981): when the innermost cannot be told, nothing is named and the reason is said" {
+  _nested_env ""
+  run --separate-stderr agmsg_terminal_resolve_name ""
+  [ "$status" -eq 1 ]
+  grep -q 'both a tmux and a herdr environment' <<<"$stderr"
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:tmux:nested_terminals_innermost_unknown" ]
+}
+
+@test "nested (#1981): with only one terminal's environment no tmux process is started to decide" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  unset HERDR_ENV HERDR_PANE_ID
+  : > "$ARGV_LOG"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  refute grep -q 'pane_pid' "$ARGV_LOG"
 }

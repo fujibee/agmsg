@@ -307,7 +307,9 @@ case "\${args[0]}" in
     fi ;;
   display-message)
     # display-message -p -t <id> <format>
-    if [ "\${args[4]}" = '#{pane_id}|#{@agmsg_agent}' ]; then
+    if [ "\${args[4]}" = '#{pane_pid}' ]; then
+      printf '%s\n' "\${FAKE_TMUX_PANE_PID:-}"
+    elif [ "\${args[4]}" = '#{pane_id}|#{@agmsg_agent}' ]; then
       pane="\${args[3]}"
       label="\$(awk -F'\t' -v p="\$pane" '\$1 == p { print \$2 }' "\$state" 2>/dev/null)"
       printf '%s|%s\n' "\$pane" "\$label"

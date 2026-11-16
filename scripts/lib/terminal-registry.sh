@@ -395,6 +395,34 @@ agmsg_terminal_resolve_by_capability() {   # <capability> [exclude, space-separa
   return 1
 }
 
+# Which of two terminals this process is really inside, when it carries the
+# environment of both (#1981): a tmux session started in a herdr pane inherits
+# the pane's HERDR_* variables, and a herdr pane opened from a tmux pane may
+# inherit TMUX. The environment alone cannot say which is innermost, so ask the
+# process tree: this process is inside the tmux pane iff the pane's shell pid is
+# one of its ancestors. (herdr starts its panes from its own server, so a herdr
+# pane's processes do not descend from the tmux pane that merely launched herdr.)
+# Prints nothing when only one environment is present (the ordinary case: no
+# extra process is started), otherwise tmux | herdr | unknown.
+_agmsg_terminal_nested_innermost() {
+  [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || return 0
+  [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  command -v tmux >/dev/null 2>&1 || { echo unknown; return 0; }
+  local sock="${TMUX%%,*}" want pid hop=0 out
+  want="$(tmux -S "$sock" display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null)" || want=""
+  case "$want" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  pid=$$
+  while [ "$hop" -lt 32 ]; do
+    [ "$pid" = "$want" ] && { echo tmux; return 0; }
+    out="$(ps -o ppid= -p "$pid" 2>/dev/null)" || out=""
+    out="${out//[[:space:]]/}"
+    case "$out" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+    [ "$out" -gt 1 ] || { echo herdr; return 0; }
+    pid="$out"; hop=$((hop + 1))
+  done
+  echo unknown
+}
+
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
 # and exit 0. ORDER (2026-09-01, from the nested-herdr measurement): prefer a
 # candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
@@ -421,7 +449,7 @@ _agmsg_terminal_resolve_name_raw() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name id rc errf reason
   local reasons="" saw_present_unnamed=0 plain_present=0 plain_name=""
   errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-detect.XXXXXX")" || errf=/dev/null
-  local names
+  local names nest=""
   names="$(agmsg_terminal_candidates)"
   if [ -n "$override" ]; then
     agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
@@ -429,6 +457,16 @@ _agmsg_terminal_resolve_name_raw() {
       [ "$errf" = /dev/null ] || rm -f "$errf"; return 1
     }
     names="$override"
+  else
+    # tmux inside herdr (or the reverse): the innermost terminal names the pane.
+    nest="$(_agmsg_terminal_nested_innermost)" || nest=""
+    case "$nest" in
+      tmux)  names="tmux" ;;
+      herdr) names=" $names "; names="${names// tmux / }"; names="${names# }"; names="${names% }" ;;
+      unknown)
+        echo "agmsg: this process carries both a tmux and a herdr environment and which one it is inside could not be determined — nothing was named" >&2
+        [ "$errf" = /dev/null ] || rm -f "$errf"; return 1 ;;
+    esac
   fi
   for name in $names; do
     # `|| rc=$?` (not `; rc=$?`): a bare command-substitution assignment fires the
@@ -643,8 +681,14 @@ agmsg_terminal_epoch() {   # <terminal>
 # This is the fast half of self-naming on action: a matching mark avoids a
 # terminal round trip. Drivers without this optional hook are skipped.
 _agmsg_terminal_self_env_raw() {
-  local name out rc id epoch
+  local name out rc id epoch nest
+  nest="$(_agmsg_terminal_nested_innermost)" || nest=""
   for name in $(agmsg_terminal_self_env_candidates); do
+    # Nested tmux/herdr (#1981): only the innermost terminal answers.
+    case "$nest:$name" in
+      tmux:herdr|herdr:tmux) continue ;;
+      unknown:tmux|unknown:herdr) printf 'unknown:%s:nested_terminals_innermost_unknown\n' "$name"; return 0 ;;
+    esac
     rc=0; out="$(_agmsg_terminal_self_env_one "$name")" || rc=$?
     [ "$rc" -eq 125 ] && continue
     if [ "$rc" -ne 0 ] || [[ "$out" == *[$'\r\n']* ]]; then
