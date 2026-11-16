@@ -1508,6 +1508,19 @@ agmsg_terminal_name_self() {
       echo "agmsg: did not name or record this pane: this seat's own reference ('$_claim_ref') cannot be read as a pane, so whether another seat holds it cannot be decided. (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
       return 0
     fi
+    # replace_claim_session: the caller has no proof of its own but its session id;
+    # the pane is replaceable only when the terminal says that session is live in
+    # exactly this pane (herdr: agent_session == this sid). Anything else keeps
+    # the refusal below.
+    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim_session ]; then
+      local _rs_want="" _rs_live="" _rs_tab
+      _rs_tab="$(printf '\t')"
+      _rs_want="$(_agmsg_placement_bare_pane_id "$_claim_ref" 2>/dev/null)" || _rs_want=""
+      if [ -n "$sid" ] && [ -n "$_rs_want" ] && declare -F terminal_session_live >/dev/null 2>&1; then
+        _rs_live="$(terminal_session_live "$sid" 2>/dev/null)" || _rs_live=""
+        case "$_rs_live" in "live${_rs_tab}"*) [ "${_rs_live#"live${_rs_tab}"}" = "$_rs_want" ] && replace=replace_claim ;; esac
+      fi
+    fi
     if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ]; then
       # REPLACE (caller proved this pane is its own): a seat that typed `actas`
       # from INSIDE this pane, and whose caller established the pane from its

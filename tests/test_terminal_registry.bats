@@ -4966,3 +4966,39 @@ TABLE
   test -e "$peer"
   refute test -e "$(agmsg_spawn_path seatteam taker)"
 }
+
+@test "actas-claim: a session proved in the pane replaces another seat's stale record" {
+  _install_fake_herdr "sess-bare"
+  export HERDR_ENV=1
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null 2>&1
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -Fq 'status=ok'
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=replaced team=seatteam previous=seatteam__stale recorded_at=')" -eq 1 ]
+  refute test -e "$peer"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "actas-claim: a pane the session is NOT in keeps the other seat's record" {
+  _install_fake_herdr "someone-else"
+  export HERDR_ENV=1
+  export HERDR_PANE_ID="wC:p4"
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null 2>&1
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=')" -eq 1 ]
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}

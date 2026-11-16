@@ -293,7 +293,7 @@ if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
   . "$SCRIPT_DIR/lib/placement-report.sh" 2>/dev/null || true
   while IFS= read -r team; do
     [ -z "$team" ] && continue
-    _pl="$(agmsg_placement_report "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record retire_previous "$SESSION_ID")" || true
+    _pl="$(agmsg_placement_report "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record retire_previous "$SESSION_ID" replace_claim_session)" || true
     [ -z "$_pl" ] || PLACEMENT_LINES="${PLACEMENT_LINES:+$PLACEMENT_LINES$'\n'}$_pl"
   done <<< "$TEAMS"
 fi
