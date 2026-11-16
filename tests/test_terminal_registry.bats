@@ -4938,3 +4938,22 @@ _nested_env() {   # <tmux pane pid the fake reports>
   [ "$status" -eq 0 ]
   refute grep -q 'pane_pid' "$ARGV_LOG"
 }
+
+@test "nested (#1981): a pane label on the enclosing herdr pane does not pull a tmux seat out to it" {
+  _fake_herdr_labels "wC:p4=seatteam:alice"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  export FAKE_TMUX_PANE_PID="$$"
+  run agmsg_terminal_name_self "" seatteam alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
+  grep -Fq 'tmux:/tmp/fake:%1' "$(agmsg_spawn_path seatteam alice)"
+  refute grep -q 'herdr' "$(agmsg_spawn_path seatteam alice)"
+  rm -f "$(agmsg_spawn_path seatteam alice)"
+  # undecidable: nothing is named or recorded, and the label does not decide it
+  export FAKE_TMUX_PANE_PID=""
+  run agmsg_terminal_name_self "" seatteam alice /proj/A claude-code record
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}

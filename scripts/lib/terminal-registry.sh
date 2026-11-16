@@ -411,7 +411,11 @@ _agmsg_terminal_nested_innermost() {
   local sock="${TMUX%%,*}" want pid hop=0 out
   want="$(tmux -S "$sock" display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null)" || want=""
   case "$want" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
-  pid=$$
+  # A Codex seat under the shared app-server runs its commands as children of the
+  # daemon, not of its TUI; the TUI is what sits in the pane, so the walk starts
+  # from the TUI process codex-own-pane.sh proved (AGMSG_COP_TUI_PID), not from $$.
+  pid="${AGMSG_COP_TUI_PID:-$$}"
+  case "$pid" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
   while [ "$hop" -lt 32 ]; do
     [ "$pid" = "$want" ] && { echo tmux; return 0; }
     out="$(ps -o ppid= -p "$pid" 2>/dev/null)" || out=""
@@ -1383,10 +1387,10 @@ _agmsg_codex_own_pane() {
 _agmsg_with_terminal_env() {   # <own-pane output> <command...>
   local own="$1" line; shift
   (
-    unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE
+    unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE AGMSG_COP_TUI_PID
     while IFS= read -r line; do
       case "$line" in
-        HERDR_ENV=*|HERDR_SOCKET_PATH=*|HERDR_PANE_ID=*|TMUX=*|TMUX_PANE=*) export "${line%%=*}=${line#*=}" ;;
+        HERDR_ENV=*|HERDR_SOCKET_PATH=*|HERDR_PANE_ID=*|TMUX=*|TMUX_PANE=*|AGMSG_COP_TUI_PID=*) export "${line%%=*}=${line#*=}" ;;
       esac
     done <<ENVLINES
 ${own#env}
@@ -1465,7 +1469,12 @@ agmsg_terminal_name_self() {
   # named this seat, and more than one means the label is not identifying here.
   # A Codex seat under the shared daemon skips it too: the labels written there
   # were derived from the daemon starter's pane and are not evidence (#1736).
-  if [ -z "$_excl" ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
+  # Nested tmux/herdr (#1981): the label of a pane is one more thing an inherited
+  # environment can point at, so it does not get to answer ahead of the
+  # innermost-terminal decision; the resolver below applies that decision.
+  local _nest=""
+  _nest="$(_agmsg_terminal_nested_innermost 2>/dev/null)" || _nest=""
+  if [ -z "$_excl" ] && [ -z "$_nest" ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
     resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
   fi
   if [ -n "$resolved" ]; then

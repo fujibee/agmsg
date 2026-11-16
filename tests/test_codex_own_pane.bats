@@ -348,3 +348,24 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   run agmsg_terminal_self_env
   [ "$output" = "unknown:codex:shared_daemon_pane_unproven:cannot_check_for_another_resume_of_this_thread" ]
 }
+
+# --- #1981: a Codex TUI inside tmux inside herdr is located by tmux ---------------
+# The seat's commands run as children of the shared daemon, so the ancestry walk
+# must start from the TUI that was proved to hold the thread, not from the shell.
+
+@test "nested (#1981): the TUI sits in a tmux pane; its tool shell is a daemon child, and the answer is tmux" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pOUTER
+  printf '/v/bin/codex HERDR_ENV=1 HERDR_SOCKET_PATH=%s HERDR_PANE_ID=w1:pOUTER TMUX=/tmp/ts,5,0 TMUX_PANE=%%3 HOME=/h\n' \
+    "$HERDR_SOCKET_PATH" > "$PSDIR/env/91001"
+  cat > "$FAKEBIN/tmux" <<'EOT'
+#!/usr/bin/env bash
+case "$*" in *'#{pane_pid}'*) echo 91001 ;; esac
+EOT
+  chmod +x "$FAKEBIN/tmux"
+  _seat t-aaa
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  case "$output" in "tmux"$'\t'"/tmp/ts:%3"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
