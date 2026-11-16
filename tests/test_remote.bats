@@ -1218,11 +1218,10 @@ _capability_endpoint() {
 
   # Stand in for a command (a Codex shell tool call, #1941's own trigger)
   # that runs in its own process group and is reaped as a whole group when
-  # it ends. `set -m` inside this subshell is bash's own job control, not
-  # the fix under test (scripts/remote.sh's setsid/perl use): it is only
-  # how this TEST gives the launcher below a process group of its own,
-  # portably, without depending on a setsid binary existing on this machine
-  # (it does not on macOS).
+  # it ends. The launcher gets its group from perl's setsid (see
+  # _start_1941_launcher): that is only how this TEST gives it a process group
+  # of its own, portably (there is no setsid binary on macOS); it is not the
+  # fix under test (scripts/remote.sh's own setsid/perl use).
   #
   # The launcher stays alive (it sleeps after `sync start` returns) and carries
   # a nonce in its arguments, so the group that is signalled below is one this
