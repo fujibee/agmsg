@@ -23,7 +23,7 @@ agmsg_placement_report() {
   errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-placement.XXXXXX" 2>/dev/null)" || errf=""
   if [ -n "$errf" ]; then
     agmsg_terminal_name_self_safe "$@" 2>"$errf" || rc=$?
-    text="$(cat "$errf" 2>/dev/null || true)"
+    text="$(<"$errf")" || text=""
     rm -f "$errf"
     # What the callee said is still said, on stderr, as before.
     [ -z "$text" ] || printf '%s\n' "$text" >&2
