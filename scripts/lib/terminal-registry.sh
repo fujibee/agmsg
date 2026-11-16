@@ -1375,7 +1375,9 @@ agmsg_terminal_self_env() {
 
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
-  local write_record="${6:-}" retire="${7:-}" instance="${8:-}"
+  local write_record="${6:-}" retire="${7:-}" instance="${8:-}" replace="${9:-}"
+  AGMSG_PLACEMENT_REPLACED=""
+  local _rp_spawn="" _rp_role="" _rp_mtime="" _rp_prev=""
   [ -n "$team" ] && [ -n "$agent" ] || {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
@@ -1421,7 +1423,11 @@ agmsg_terminal_name_self() {
   # named this seat, and more than one means the label is not identifying here.
   # A Codex seat under the shared daemon skips it too: the labels written there
   # were derived from the daemon starter's pane and are not evidence (#1736).
-  if [ -z "$_excl" ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
+  # A caller replacing another seat's record (replace_claim) proved ITS OWN pane
+  # from its terminal environment; a pane found by label is a different claim
+  # and could name another pane than the one that was proved, so the label is
+  # not consulted for it.
+  if [ -z "$_excl" ] && [ "$replace" != replace_claim ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
     resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
   fi
   if [ -n "$resolved" ]; then
@@ -1506,6 +1512,55 @@ agmsg_terminal_name_self() {
     if [ "$_claim_rc" -ne 0 ]; then
       echo "agmsg: did not name or record this pane: this seat's own reference ('$_claim_ref') cannot be read as a pane, so whether another seat holds it cannot be decided. (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
       return 0
+    fi
+    # replace_claim_session: the caller has no proof of its own but its session id;
+    # the pane is replaceable only when the terminal says that session is live in
+    # exactly this pane (herdr: agent_session == this sid). Anything else keeps
+    # the refusal below.
+    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim_session ]; then
+      local _rs_want="" _rs_live="" _rs_tab
+      _rs_tab="$(printf '\t')"
+      _rs_want="$(_agmsg_placement_bare_pane_id "$_claim_ref" 2>/dev/null)" || _rs_want=""
+      if [ -n "$sid" ] && [ -n "$_rs_want" ] && declare -F terminal_session_live >/dev/null 2>&1; then
+        _rs_live="$(terminal_session_live "$sid" 2>/dev/null)" || _rs_live=""
+        case "$_rs_live" in "live${_rs_tab}"*) [ "${_rs_live#"live${_rs_tab}"}" = "$_rs_want" ] && replace=replace_claim ;; esac
+      fi
+    fi
+    # Nested terminals (tmux started inside a herdr pane): the seat inherits the
+    # OUTER herdr environment, so "this pane" can resolve to the outer pane, which
+    # belongs to whoever sits in it. A tmux environment next to a non-tmux pane is
+    # not a proof of anything, so nothing is replaced there (the refusal below
+    # says why).
+    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$terminal" != tmux ] \
+       && { [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
+      # Return here rather than falling through: the takeovers below (dead
+      # claimant, vanished team) would otherwise still drop the outer pane's
+      # record and write this seat's under it.
+      echo "agmsg: did not name or record this pane: this seat runs inside tmux but resolved the enclosing $terminal pane ($_claim_ref), and that pane may belong to another seat (nested terminals)." >&2
+      return 0
+    fi
+    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$write_record" = record ]; then
+      # REPLACE (caller proved this pane is its own): a seat that typed `actas`
+      # from INSIDE this pane, and whose caller established the pane from its
+      # own terminal environment, may take over the record of another seat that
+      # still claims it. The caller, not this function, holds the proof -- only
+      # a caller that has one passes the flag; #1114's refusal stays for every
+      # path that takes a pane from outside (spawn and friends). Nothing is
+      # deleted here: the old record goes only AFTER this seat's own record has
+      # been written (below), so a naming or write failure leaves it as it was.
+      if ! declare -F compat_file_mtime >/dev/null 2>&1 \
+         && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/compat.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$SKILL_DIR/scripts/lib/compat.sh" 2>/dev/null || true
+      fi
+      _rp_spawn="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || _rp_spawn=""
+      if [ -n "$_rp_spawn" ]; then
+        _rp_prev="$_claimed_by"
+        _rp_spawn="$(dirname "$_rp_spawn")/spawn.$_claimed_by"
+        _rp_mtime="$(compat_file_mtime "$_rp_spawn" 2>/dev/null)" || _rp_mtime=""
+        _rp_role="$(dirname "$_rp_spawn")/role-session.${_rp_spawn##*/spawn.}"
+        _claimed_by=""
+      fi
     fi
     if [ -n "$_claimed_by" ]; then
       # DEAD-CLAIMANT TAKEOVER (#1485): the claim above is otherwise
@@ -1720,6 +1775,20 @@ agmsg_terminal_name_self() {
   agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$project" "$type")" 2>/dev/null || {
     echo "agmsg: named the pane but could not write its record ($rec)" >&2; return 1
   }
+  # This seat's record is in place: now the record it replaced can go. The
+  # claimant's role stays registered; only the naming mark it can no longer back
+  # up is dropped (see the dead-claimant takeover above).
+  if [ -n "$_rp_prev" ] && [ -n "$_rp_spawn" ]; then
+    if ! declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+       && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+      # shellcheck disable=SC1090,SC1091
+      . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+    fi
+    declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+      && agmsg_role_session_clear_named_at "$_rp_role" 2>/dev/null
+    rm -f "$_rp_spawn"
+    AGMSG_PLACEMENT_REPLACED="$_rp_prev$(printf '\t')$_rp_mtime"
+  fi
   return 0
 }
 

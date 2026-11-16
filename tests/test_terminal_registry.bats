@@ -4882,3 +4882,208 @@ TABLE
   # Control: a plain-word name of a real driver still answers.
   _agmsg_terminal_id_ok herdr w1:pB
 }
+
+# --- placement report: a refused or unwritten record is said on stdout ---------
+# The refusal above went to stderr only, and actas callers drop stderr, so a seat
+# was told it was connected while peek/poke could not find it.
+
+@test "placement report: a pane another seat records prints one placement=unrecorded line" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=')" -eq 1 ]
+  grep -q 'already recorded as' <<<"$output"
+  # the original stderr is still there
+  grep -q 'did not name or record' <<<"$stderr"
+  refute test -e "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "placement report: a pane nobody holds is recorded and prints nothing" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  test -s "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "actas-claim: a pane that cannot be identified is still claimed, and says placement=unrecorded" {
+  _install_fake_herdr "some-other-sess"
+  export HERDR_ENV=1
+  unset HERDR_PANE_ID
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null 2>&1
+
+  run --separate-stderr bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -Fq 'status=ok'
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=')" -eq 1 ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "replace_claim: a seat that proved its pane replaces another seat's record and says so" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=replaced team=seatteam previous=seatteam__peer recorded_at=')" -eq 1 ]
+  refute grep -q 'placement=unrecorded' <<<"$output"
+  refute test -e "$peer"
+  grep -Fq 'tmux:/tmp/fake:%1' "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "replace_claim: without the flag another seat's record still stands (#1114)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record "" "" ""
+  grep -q '^placement=unrecorded' <<<"$output"
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "actas-claim: a session proved in the pane replaces another seat's stale record" {
+  _install_fake_herdr "sess-bare"
+  export HERDR_ENV=1
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null 2>&1
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -Fq 'status=ok'
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=replaced team=seatteam previous=seatteam__stale recorded_at=')" -eq 1 ]
+  refute test -e "$peer"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "actas-claim: a pane the session is NOT in keeps the other seat's record" {
+  _install_fake_herdr "someone-else"
+  export HERDR_ENV=1
+  export HERDR_PANE_ID="wC:p4"
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null 2>&1
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=')" -eq 1 ]
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "codex actas: a pane picked by label is never the one a replacement is proved for" {
+  _fake_herdr_labels "w1:pHERE=other:seat" "w1:pTHERE=seatteam:alice"
+  export HERDR_ENV=1 HERDR_PANE_ID=w1:pHERE CODEX_THREAD_ID=t-own
+  export CODEX_HOME="$TEST_SKILL_DIR/profile"
+  mkdir -p "$CODEX_HOME" "$SKILL_DIR/run" "$TEST_SKILL_DIR/project"
+  printf 'trusted|%s||||\n' "$(date +%s)" > "$SKILL_DIR/run/codex-own-pane.t-own"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  printf 'herdr:%s:w1:pTHERE\t/proj/PEER\tcodex\n' "$HERDR_SOCKET_PATH" > "$peer"
+  run bash "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" seatteam alice "$TEST_SKILL_DIR/project"
+  [ -f "$peer" ]
+  refute grep -q '^placement=replaced' <<<"$output"
+}
+
+@test "codex actas: a project the poison guard rejects is not recorded and replaces nothing" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%1" CODEX_THREAD_ID=t-own
+  export CODEX_HOME="$TEST_SKILL_DIR/profile"
+  mkdir -p "$CODEX_HOME" "$SKILL_DIR/run"
+  printf 'trusted|%s||||\n' "$(date +%s)" > "$SKILL_DIR/run/codex-own-pane.t-own"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tcodex\n' > "$peer"
+  run bash "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" seatteam alice /no/such/project
+  [ -f "$peer" ]
+  [ ! -f "$(agmsg_spawn_path seatteam alice)" ]
+}
+
+@test "replace_claim: when this seat cannot be named, the other seat's record is kept" {
+  _install_fake_herdr "x"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4" HERDR_AGENT_GET_FAIL=1
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  grep -q '^placement=unrecorded' <<<"$output"
+  refute grep -q '^placement=replaced' <<<"$output"
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "replace_claim: a tmux seat nested in a herdr pane never replaces the herdr pane's record" {
+  _install_fake_herdr "x"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam outer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OUTER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam inner /proj/IN codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  refute grep -q '^placement=replaced' <<<"$output"
+  test -e "$peer"
+}
+
+@test "replace_claim: a tmux seat nested in a herdr pane takes over nothing, not even a vanished team's record" {
+  _install_fake_herdr "x"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  # the claimant's team is not on disk, which the ordinary takeover treats as stale
+  mkdir -p "$TEST_SKILL_DIR/teams/seatteam"
+  local peer; peer="$(agmsg_spawn_path vanished outer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OUTER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam inner /proj/IN codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  grep -q '^placement=unrecorded .*nested terminals' <<<"$output"
+  refute grep -q '^placement=replaced' <<<"$output"
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam inner)"
+}
