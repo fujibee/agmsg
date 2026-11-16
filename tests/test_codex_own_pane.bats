@@ -349,6 +349,40 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   [ "$output" = "unknown:codex:shared_daemon_pane_unproven:cannot_check_for_another_resume_of_this_thread" ]
 }
 
+# --- the Codex actas step records the pane only when it can be proven ----------
+# codex-record-session.sh is what a Codex `actas` runs. It must not take the
+# shared app-server's inherited pane, and when it cannot record it says why.
+
+_actas_record() {   # runs the real script for a joined codex seat
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice codex "$BATS_TEST_TMPDIR/proj" >/dev/null 2>&1 || true
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  run bash -c 'cd "$1" && bash "$2" seatteam alice "$1" 2>&1' _ "$BATS_TEST_TMPDIR/proj" \
+    "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh"
+}
+
+@test "codex actas: under the shared daemon without CODEX_THREAD_ID, the inherited pane is not recorded" {
+  _under_daemon
+  export HERDR_ENV=1 HERDR_PANE_ID='w1:p17'
+  unset CODEX_THREAD_ID
+  _actas_record
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=unrecorded team=seatteam reason=CODEX_THREAD_ID is not set')" -eq 1 ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "codex actas: a thread no TUI can be tied to says why and records nothing" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _seat t-aaa
+  _actas_record
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q '^placement=unrecorded team=seatteam reason=.*could not be proven'
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
 # --- #1981: a Codex TUI inside tmux inside herdr is located by tmux ---------------
 # The seat's commands run as children of the shared daemon, so the ancestry walk
 # must start from the TUI that was proved to hold the thread, not from the shell.
