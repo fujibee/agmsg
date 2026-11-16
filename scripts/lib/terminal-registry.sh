@@ -468,7 +468,7 @@ _agmsg_terminal_resolve_name_raw() {
       tmux)  names="tmux" ;;
       herdr) names=" $names "; names="${names// tmux / }"; names="${names# }"; names="${names% }" ;;
       unknown)
-        echo "agmsg: this process carries both a tmux and a herdr environment and which one it is inside could not be determined — nothing was named" >&2
+        echo "agmsg: did not name or record this pane: this process carries both a tmux and a herdr environment and which one it is inside could not be determined (nested terminals)." >&2
         [ "$errf" = /dev/null ] || rm -f "$errf"; return 1 ;;
     esac
   fi
@@ -1490,6 +1490,14 @@ agmsg_terminal_name_self() {
     # pane up BY agent session id) is SKIPPED, quietly, because nothing was asked
     # of it. The resolver's reason is dropped on purpose: it would report a
     # missing input as a failure, on every join, forever.
+    #
+    # The one reason that is NOT "nothing was asked of it": the process carries
+    # both a tmux and a herdr environment and which one it is inside could not
+    # be decided (#1981). That is said, so the caller's output can carry it.
+    if [ "$_nest" = unknown ]; then
+      echo "agmsg: did not name or record this pane: this process carries both a tmux and a herdr environment and which one it is inside could not be determined (nested terminals)." >&2
+      return 0
+    fi
     resolved="$(agmsg_terminal_resolve_name "" 2>/dev/null)" || rc=$?
     [ "$rc" -eq 0 ] || return 0            # skipped
   fi

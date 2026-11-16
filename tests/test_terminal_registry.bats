@@ -4957,3 +4957,12 @@ _nested_env() {   # <tmux pane pid the fake reports>
   run agmsg_terminal_name_self "" seatteam alice /proj/A claude-code record
   refute test -e "$(agmsg_spawn_path seatteam alice)"
 }
+
+@test "nested (#1981): an empty-sid naming that cannot tell the innermost terminal says why and stops nothing" {
+  _nested_env ""
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  run --separate-stderr agmsg_terminal_name_self "" seatteam alice /proj/A codex record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record this pane.*nested terminals' <<<"$stderr"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
