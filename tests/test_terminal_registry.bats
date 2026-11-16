@@ -5030,3 +5030,20 @@ TABLE
   [ -f "$peer" ]
   [ ! -f "$(agmsg_spawn_path seatteam alice)" ]
 }
+
+@test "replace_claim: when this seat cannot be named, the other seat's record is kept" {
+  _install_fake_herdr "x"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4" HERDR_PANE_RENAME_RC=1
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  grep -q '^placement=unrecorded' <<<"$output"
+  refute grep -q '^placement=replaced' <<<"$output"
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam taker)"
+}

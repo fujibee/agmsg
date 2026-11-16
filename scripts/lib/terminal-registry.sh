@@ -1377,6 +1377,7 @@ agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}" retire="${7:-}" instance="${8:-}" replace="${9:-}"
   AGMSG_PLACEMENT_REPLACED=""
+  local _rp_spawn="" _rp_role="" _rp_mtime="" _rp_prev=""
   [ -n "$team" ] && [ -n "$agent" ] || {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
@@ -1525,15 +1526,15 @@ agmsg_terminal_name_self() {
         case "$_rs_live" in "live${_rs_tab}"*) [ "${_rs_live#"live${_rs_tab}"}" = "$_rs_want" ] && replace=replace_claim ;; esac
       fi
     fi
-    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ]; then
+    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$write_record" = record ]; then
       # REPLACE (caller proved this pane is its own): a seat that typed `actas`
       # from INSIDE this pane, and whose caller established the pane from its
       # own terminal environment, may take over the record of another seat that
       # still claims it. The caller, not this function, holds the proof -- only
       # a caller that has one passes the flag; #1114's refusal stays for every
-      # path that takes a pane from outside (spawn and friends). The replaced
-      # record is reported through AGMSG_PLACEMENT_REPLACED (<claimant>\t<mtime>).
-      local _rp_spawn="" _rp_role="" _rp_mtime=""
+      # path that takes a pane from outside (spawn and friends). Nothing is
+      # deleted here: the old record goes only AFTER this seat's own record has
+      # been written (below), so a naming or write failure leaves it as it was.
       if ! declare -F compat_file_mtime >/dev/null 2>&1 \
          && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/compat.sh" ]; then
         # shellcheck disable=SC1091
@@ -1541,18 +1542,10 @@ agmsg_terminal_name_self() {
       fi
       _rp_spawn="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || _rp_spawn=""
       if [ -n "$_rp_spawn" ]; then
+        _rp_prev="$_claimed_by"
         _rp_spawn="$(dirname "$_rp_spawn")/spawn.$_claimed_by"
         _rp_mtime="$(compat_file_mtime "$_rp_spawn" 2>/dev/null)" || _rp_mtime=""
         _rp_role="$(dirname "$_rp_spawn")/role-session.${_rp_spawn##*/spawn.}"
-        if ! declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
-           && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
-          # shellcheck disable=SC1090,SC1091
-          . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
-        fi
-        declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
-          && agmsg_role_session_clear_named_at "$_rp_role" 2>/dev/null
-        rm -f "$_rp_spawn"
-        AGMSG_PLACEMENT_REPLACED="$_claimed_by$(printf '\t')$_rp_mtime"
         _claimed_by=""
       fi
     fi
@@ -1769,6 +1762,20 @@ agmsg_terminal_name_self() {
   agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$project" "$type")" 2>/dev/null || {
     echo "agmsg: named the pane but could not write its record ($rec)" >&2; return 1
   }
+  # This seat's record is in place: now the record it replaced can go. The
+  # claimant's role stays registered; only the naming mark it can no longer back
+  # up is dropped (see the dead-claimant takeover above).
+  if [ -n "$_rp_prev" ] && [ -n "$_rp_spawn" ]; then
+    if ! declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+       && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+      # shellcheck disable=SC1090,SC1091
+      . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+    fi
+    declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+      && agmsg_role_session_clear_named_at "$_rp_role" 2>/dev/null
+    rm -f "$_rp_spawn"
+    AGMSG_PLACEMENT_REPLACED="$_rp_prev$(printf '\t')$_rp_mtime"
+  fi
   return 0
 }
 
