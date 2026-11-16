@@ -1,0 +1,24 @@
+# Commands whose behaviour differs between GNU (Linux) and BSD (macOS) userlands,
+# and words that mark platform-specific code. A pull request whose ADDED lines in
+# a tracked .sh/.bash/.bats/.mjs file match one of these needs the macOS legs of
+# the suite (mac-needed.mjs). One row per pattern: <name><TAB><JavaScript regex>.
+# tests/test_ci_mac_needed.bats runs every row against a line that must match and
+# a line that must not, so a row cannot rot into matching nothing or everything.
+sed-in-place	\bsed\s+(-[A-Za-z]*i|--in-place)
+sed-gnu-extension	\bsed\b.*(\s-r\b|\s--regexp-extended|\\[+?|]|\\[<>]|\\[bBwWsS]\b)
+date-gnu-bsd	\bdate\s+(-[A-Za-z]*[djvr]\b|--date|--iso-8601|--rfc|--utc)
+stat-format	\bstat\s+(-[A-Za-z]*[cf]\b|--format|--printf)
+readlink-f	\breadlink\s+-[A-Za-z]*f\b
+grep-perl	\bgrep\s+(-[A-Za-z]*P\b|--perl)
+xargs-r	\bxargs\s+(-[A-Za-z]*r\b|--no-run-if-empty|-0r|-r0)
+find-printf	\bfind\b.*\s-(printf|fprintf|regextype)\b
+mktemp-gnu	\bmktemp\b.*(--suffix|--tmpdir|\s-t\b|\s-p\b|XXXXXX[^"'\s]+)
+base64-decode	\bbase64\s+(-[A-Za-z]*[dD]\b|--decode|-w)
+sort-version	\bsort\s+(-[A-Za-z]*V\b|--version-sort|-[A-Za-z]*h\b)
+timeout-cmd	(^|[|;&(\s])timeout\s+[0-9-]
+awk-gnu	\b(gensub|strftime|systime|asort|asorti|PROCINFO|IGNORECASE)\b
+tac	(^|[|;&(\s])tac(\s|$)
+checksum-tools	\b(sha256sum|sha1sum|sha512sum|md5sum|shasum|md5)\b
+ps-format	\bps\b.*(\s-[A-Za-z]*o\b|\s-[A-Za-z]*[Ee]ww?\b|--sort|\saux)
+lsof	(^|[|;&(\s])lsof(\s|$)
+platform-word	\b(Darwin|darwin|uname|OSTYPE|launchctl|launchd|osascript|sw_vers|pbcopy|pbpaste|plutil|dscl|caffeinate)\b
