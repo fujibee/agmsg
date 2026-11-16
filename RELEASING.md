@@ -34,7 +34,8 @@ cut that way — and the script used to refuse them outright (#679).
 
 **Prereleases skip the changelog.** A version with a prerelease suffix
 (`1.2.0-rc.4`) leaves `CHANGELOG.md` untouched; the GitHub Release notes come
-from `release.yml`'s own `git-cliff --latest`. Writing the section on an
+from `release.yml`'s own `git-cliff --latest` (the one case where notes still come from commits).
+Writing the section on an
 integration branch would later merge into `main` a section for a version `main`
 never had.
 
@@ -58,8 +59,13 @@ which:
    otherwise. npm reads nothing from the version string on its own — without
    the flag, `1.2.0-rc.4` would land on `latest` exactly like `1.2.0` and every
    `npx agmsg` would get it.
-4. Generates the release notes for the tag with git-cliff and creates a
-   GitHub Release from them.
+4. Takes the release notes from the `[X.Y.Z]` section of `CHANGELOG.md` in the
+   tag's tree (`scripts/release/changelog-section.sh`) and creates a GitHub
+   Release from them. A stable tag whose section is missing or empty fails
+   this step with the reason; it does not fall back to commits. The tag's
+   tree is fixed, so a re-run cannot add the section: if the version is not on
+   npm yet, delete the tag and cut again; if it is, create the Release by hand
+   with `gh release create vX.Y.Z --notes-file <file>`.
 
 ### Manual steps (if you'd rather not use the script)
 
