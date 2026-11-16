@@ -5047,3 +5047,21 @@ TABLE
   test -e "$peer"
   refute test -e "$(agmsg_spawn_path seatteam taker)"
 }
+
+@test "replace_claim: a tmux seat nested in a herdr pane never replaces the herdr pane's record" {
+  _install_fake_herdr "x"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam outer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OUTER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam inner /proj/IN codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  refute grep -q '^placement=replaced' <<<"$output"
+  test -e "$peer"
+}

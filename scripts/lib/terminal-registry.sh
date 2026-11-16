@@ -1526,6 +1526,16 @@ agmsg_terminal_name_self() {
         case "$_rs_live" in "live${_rs_tab}"*) [ "${_rs_live#"live${_rs_tab}"}" = "$_rs_want" ] && replace=replace_claim ;; esac
       fi
     fi
+    # Nested terminals (tmux started inside a herdr pane): the seat inherits the
+    # OUTER herdr environment, so "this pane" can resolve to the outer pane, which
+    # belongs to whoever sits in it. A tmux environment next to a non-tmux pane is
+    # not a proof of anything, so nothing is replaced there (the refusal below
+    # says why).
+    if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$terminal" != tmux ] \
+       && { [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
+      echo "agmsg: did not replace the record on this pane: this seat runs inside tmux but resolved the enclosing $terminal pane ($_claim_ref), so that pane may belong to another seat (nested terminals)." >&2
+      replace=""
+    fi
     if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$write_record" = record ]; then
       # REPLACE (caller proved this pane is its own): a seat that typed `actas`
       # from INSIDE this pane, and whose caller established the pane from its
