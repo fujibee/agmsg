@@ -59,6 +59,14 @@ commit_parsers = [
   { message = "^Merge", skip = true },
   { message = "^release", skip = true },
   { message = "^(chore|ci|build|test|style)", skip = true },
+  # 1.8.0: core changes squashed without a Conventional prefix. Placed ahead of
+  # the older rules so the first match is the intended section.
+  { message = "^remote\\.sh: start the sync engine in its own session", group = "<!-- 1 -->Fixed" },
+  { message = "^install: stop placing the Antigravity TUI shim", group = "<!-- 3 -->Changed" },
+  { message = "^agmsgd: add the terminal-poke delivery channel for types with no native channel", group = "<!-- 0 -->Added" },
+  { message = "^agmsgd: add the grok-queue native delivery channel for grok-build", group = "<!-- 0 -->Added" },
+  { message = "^actas: a seat that proves its own pane replaces a stale record there", group = "<!-- 1 -->Fixed" },
+  { message = "^Terminal: the innermost of tmux and herdr names the pane", group = "<!-- 1 -->Fixed" },
   # App-only changes after 1.5.0 ship in the desktop app release (app 0.5.0),
   # not in the npm package. Named one by one: older app-scoped entries already
   # in the changelog must keep appearing if the file is ever regenerated.
@@ -151,6 +159,6 @@ commit_parsers = [
 ]
 protect_breaking_commits = true
 filter_commits = true
-tag_pattern = "v[0-9]*"
+tag_pattern = "^v[0-9]"
 topo_order = false
 sort_commits = "newest"
