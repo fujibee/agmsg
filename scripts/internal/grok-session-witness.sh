@@ -20,6 +20,13 @@
 # way (agmsg_sha1 here, node:crypto in the channel) on both sides, and this
 # key is ours alone, so there is no legacy format to stay compatible with.
 
+# scripts/lib/instance-id.sh is the one file that owns every kill -0 in this
+# codebase (enforced by .github/scripts/check-instance-id-ownership.sh);
+# liveness here goes through its own _agmsg_pid_alive rather than a second,
+# independent kill -0. Guarded so a caller that already sourced it (or will,
+# for its own reasons) does not pay for a second source.
+declare -F _agmsg_pid_alive >/dev/null 2>&1 || source "${SCRIPT_DIR:?SCRIPT_DIR is not set}/lib/instance-id.sh"
+
 _agmsg_grok_witness_key() {
   printf '%s\x1f%s' "$1" "$2" | agmsg_sha1
 }
@@ -84,30 +91,21 @@ agmsg_grok_resolve_seat() {
 # Prints the matched object's raw text (one line, newlines stripped) on
 # success; nothing, rc 1, if the file is absent/unreadable or no object
 # contains this session id.
-# True (rc 0) only when <pid> is CONFIRMED gone -- `kill -0` failed with a
-# message naming the process as absent, never on an unreadable pid or a
-# permission-denied answer (which could still mean "alive, not ours to
-# signal"). Mirrors the same conservative direction grok-queue.mjs's own
+# True (rc 0) only when <pid> is CONFIRMED gone. A thin wrapper over
+# instance-id.sh's own _agmsg_pid_alive (the file that owns kill -0 and
+# already forces LC_ALL=C on a subshell -- not a bare prefix, which misses
+# bash 3.2's builtin -- around its own error-text match, plus a ps
+# cross-check before calling anything gone), never a second, independent
+# kill -0 here. Conservative in the same direction grok-queue.mjs's own
 # pidAlive takes (EPERM/unresolvable -> treated as alive). Used by
 # grok-stop.sh to decide whether a DIFFERENT session's own stale witness
 # may safely be replaced (review on #1979, finding (1)): only when that
 # witness's own recorded owner is definitely gone, never merely because
 # this Stop event's session_id does not match it.
 agmsg_grok_pid_definitely_dead() {
-  local pid="$1" err
+  local pid="$1"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  # LC_ALL=C: `kill`'s own error text is matched literally below, and on
-  # glibc (Linux) that text is translated by the active locale -- a
-  # non-English LANG/LC_ALL (e.g. ja_JP.UTF-8) makes "No such process"
-  # never match, so this falls back to its safe default (not confirmed
-  # dead) and recovery silently never fires on that machine. Forcing C
-  # here only affects THIS command's own message text, not the pid check
-  # itself.
-  err="$(LC_ALL=C kill -0 "$pid" 2>&1)" && return 1
-  case "$err" in
-    *"No such process"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  ! _agmsg_pid_alive "$pid"
 }
 
 agmsg_grok_active_session_lookup() {
