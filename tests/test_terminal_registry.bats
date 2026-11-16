@@ -5065,3 +5065,25 @@ TABLE
   refute grep -q '^placement=replaced' <<<"$output"
   test -e "$peer"
 }
+
+@test "replace_claim: a tmux seat nested in a herdr pane takes over nothing, not even a vanished team's record" {
+  _install_fake_herdr "x"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  # the claimant's team is not on disk, which the ordinary takeover treats as stale
+  mkdir -p "$TEST_SKILL_DIR/teams/seatteam"
+  local peer; peer="$(agmsg_spawn_path vanished outer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OUTER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+
+  run --separate-stderr agmsg_placement_report "" seatteam inner /proj/IN codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  grep -q '^placement=unrecorded .*nested terminals' <<<"$output"
+  refute grep -q '^placement=replaced' <<<"$output"
+  test -e "$peer"
+  refute test -e "$(agmsg_spawn_path seatteam inner)"
+}

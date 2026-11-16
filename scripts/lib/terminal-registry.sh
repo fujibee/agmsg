@@ -1533,8 +1533,11 @@ agmsg_terminal_name_self() {
     # says why).
     if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$terminal" != tmux ] \
        && { [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
-      echo "agmsg: did not replace the record on this pane: this seat runs inside tmux but resolved the enclosing $terminal pane ($_claim_ref), so that pane may belong to another seat (nested terminals)." >&2
-      replace=""
+      # Return here rather than falling through: the takeovers below (dead
+      # claimant, vanished team) would otherwise still drop the outer pane's
+      # record and write this seat's under it.
+      echo "agmsg: did not name or record this pane: this seat runs inside tmux but resolved the enclosing $terminal pane ($_claim_ref), and that pane may belong to another seat (nested terminals)." >&2
+      return 0
     fi
     if [ -n "$_claimed_by" ] && [ "$replace" = replace_claim ] && [ "$write_record" = record ]; then
       # REPLACE (caller proved this pane is its own): a seat that typed `actas`
