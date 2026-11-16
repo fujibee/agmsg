@@ -50,7 +50,7 @@
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
   # 1. The shard job's name carries the marker, keyed on the docs_only output.
   #    Shard checks are not required contexts, so the name may vary.
-  grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/6)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$workflow"
+  grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/\${{ matrix.total }})\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$workflow"
   # 2. The aggregate -- the required context -- keeps its exact name, once,
   #    unconditionally.
   [ "$(grep -c '^    name: bats$' "$workflow")" -eq 1 ]
@@ -86,7 +86,7 @@
   # The mutation took: the marker is gone from the copy.
   if grep -Fq "docs-only, suite skipped' || ''" "$mutant"; then false; fi
   # ...and the name pin no longer matches it.
-  if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/6)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
+  if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/\${{ matrix.total }})\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
 }
 
 # The suite has to run on the shape that actually gets dogfooded. A PR is only
@@ -243,7 +243,7 @@ GIT
   grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
   # Every heavy shard step skips on a reused tree, the same set the docs-only
   # skip gates; nothing heavy is left gated on docs_only alone.
-  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 10 ]
+  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 11 ]
   # And the run says which green it is, on the shard and on the aggregate.
   grep -Fq "format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run)" "$workflow"
   grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
