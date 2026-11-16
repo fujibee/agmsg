@@ -1,0 +1,38 @@
+name: bash32-probe
+on:
+  push:
+    branches: ['ci/bash32-probe']
+    paths: ['.github/workflows/bash32-probe.yml']
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build bash 3.2.57
+        run: |
+          set -e
+          t0=$(date +%s)
+          curl -fsSL https://ftp.gnu.org/gnu/bash/bash-3.2.57.tar.gz -o "$RUNNER_TEMP/bash.tgz"
+          tar -xzf "$RUNNER_TEMP/bash.tgz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/bash-3.2.57"
+          CFLAGS="-std=gnu89 -w -O1" ./configure --prefix="$HOME/bash32" --without-bash-malloc > "$RUNNER_TEMP/conf.log" 2>&1 || { tail -30 "$RUNNER_TEMP/conf.log"; exit 1; }
+          make -j4 > "$RUNNER_TEMP/make.log" 2>&1 || { tail -30 "$RUNNER_TEMP/make.log"; exit 1; }
+          make install > /dev/null 2>&1
+          "$HOME/bash32/bin/bash" --version | head -1
+          echo "build seconds: $(( $(date +%s) - t0 ))"
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 jq
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+      - name: Run a few files under bash 3.2
+        run: |
+          mkdir -p "$HOME/b32path"; ln -s "$HOME/bash32/bin/bash" "$HOME/b32path/bash"
+          export PATH="$HOME/b32path:$PATH"
+          bash --version | head -1
+          # bats itself picks its shell from the shebang (env bash): the PATH shim makes that 3.2.
+          for f in tests/test_send.bats tests/test_inbox.bats tests/test_join.bats; do
+            echo "== $f"; s=$(date +%s); bats "$f" 2>&1 | tail -4; echo "seconds: $(( $(date +%s) - s ))"
+          done
