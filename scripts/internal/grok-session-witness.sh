@@ -91,21 +91,30 @@ agmsg_grok_resolve_seat() {
 # Prints the matched object's raw text (one line, newlines stripped) on
 # success; nothing, rc 1, if the file is absent/unreadable or no object
 # contains this session id.
-# True (rc 0) only when <pid> is CONFIRMED gone. A thin wrapper over
-# instance-id.sh's own _agmsg_pid_alive (the file that owns kill -0 and
-# already forces LC_ALL=C on a subshell -- not a bare prefix, which misses
-# bash 3.2's builtin -- around its own error-text match, plus a ps
-# cross-check before calling anything gone), never a second, independent
-# kill -0 here. Conservative in the same direction grok-queue.mjs's own
-# pidAlive takes (EPERM/unresolvable -> treated as alive). Used by
-# grok-stop.sh to decide whether a DIFFERENT session's own stale witness
-# may safely be replaced (review on #1979, finding (1)): only when that
-# witness's own recorded owner is definitely gone, never merely because
-# this Stop event's session_id does not match it.
+# True (rc 0) only when <pid> is CONFIRMED gone. Built on instance-id.sh's
+# own pid machinery (the file that owns kill -0 and already forces LC_ALL=C
+# on a subshell -- not a bare prefix, which misses bash 3.2's builtin --
+# around its own error-text match, plus a ps cross-check before calling
+# anything gone), never a second, independent kill -0 here, but NOT a bare
+# `! _agmsg_pid_alive`: that call answers "is this usable as a liveness
+# token at all", and a NO there (an invalid pid shape, or MSYS where it
+# cannot ask tasklist at all without a real pid to hand it) is "I don't
+# know", not "confirmed dead" -- the review on #1979 caught both: pid "0"
+# read back as CONFIRMED DEAD, and a broken `tasklist` on MSYS did too.
+# Conservative in the same direction grok-queue.mjs's own pidAlive takes
+# (EPERM/unresolvable -> treated as alive). Used by grok-stop.sh to decide
+# whether a DIFFERENT session's own stale witness may safely be replaced
+# (review on #1979, finding (1)): only when that witness's own recorded
+# owner is definitely gone, never merely because this Stop event's
+# session_id does not match it.
 agmsg_grok_pid_definitely_dead() {
   local pid="$1"
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  ! _agmsg_pid_alive "$pid"
+  _agmsg_pid_valid "$pid" || return 1
+  # MSYS liveness goes through tasklist, not a signal -- a failure there is
+  # "could not observe", never "observed gone". Recovery stays withheld
+  # (status shows the pending reason) rather than guessed at.
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|UCRT*|CLANG*) return 1 ;; esac
+  ! _agmsg_pid_alive_local "$pid"
 }
 
 agmsg_grok_active_session_lookup() {

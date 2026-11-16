@@ -238,6 +238,44 @@ EOF
   grep -q '"first_turn_done": true' "$f"
 }
 
+# agmsg_grok_pid_definitely_dead unit cases (review on #1979, round 2): a bare
+# `! _agmsg_pid_alive` over-reads "cannot tell" (invalid pid shape, or MSYS
+# where only tasklist could answer) as confirmed dead.
+
+@test "agmsg_grok_pid_definitely_dead: pid 0 is not a liveness token, never confirmed dead" {
+  run bash -c 'SCRIPT_DIR="$1"; . "$1"/lib/hash.sh; . "$1"/internal/grok-session-witness.sh; agmsg_grok_pid_definitely_dead 0' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
+@test "agmsg_grok_pid_definitely_dead: a leading-zero pid is invalid, never confirmed dead" {
+  run bash -c 'SCRIPT_DIR="$1"; . "$1"/lib/hash.sh; . "$1"/internal/grok-session-witness.sh; agmsg_grok_pid_definitely_dead 0123' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
+@test "agmsg_grok_pid_definitely_dead: an out-of-range pid is invalid, never confirmed dead" {
+  run bash -c 'SCRIPT_DIR="$1"; . "$1"/lib/hash.sh; . "$1"/internal/grok-session-witness.sh; agmsg_grok_pid_definitely_dead 99999999999' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
+@test "agmsg_grok_pid_definitely_dead: on MSYS a failed tasklist is unobservable, never confirmed dead" {
+  run bash -c '
+    SCRIPT_DIR="$1"; . "$1"/lib/hash.sh; . "$1"/internal/grok-session-witness.sh
+    tasklist() { return 1; }
+    MSYSTEM=MINGW64 agmsg_grok_pid_definitely_dead 12345
+  ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
+@test "agmsg_grok_pid_definitely_dead: a genuinely dead pid is still confirmed dead" {
+  run bash -c 'SCRIPT_DIR="$1"; . "$1"/lib/hash.sh; . "$1"/internal/grok-session-witness.sh; agmsg_grok_pid_definitely_dead 999999999' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+}
+
+@test "agmsg_grok_pid_definitely_dead: a live pid is never confirmed dead" {
+  run bash -c 'SCRIPT_DIR="$1"; . "$1"/lib/hash.sh; . "$1"/internal/grok-session-witness.sh; agmsg_grok_pid_definitely_dead $$' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
 @test "grok-stop.sh: emits decision=block when the seat has unread messages (grok's own Stop contract)" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/join.sh" t1 sender claude-code "$TEST_PROJECT" >/dev/null
