@@ -77,7 +77,7 @@ hold_install_db() {   # <seconds>
 }
 
 @test "install.db held past the wait: the update names the table, sqlite's rc and the file, and still exits 1" {
-  hold_install_db 3
+  hold_install_db 6
   export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
