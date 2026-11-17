@@ -58,10 +58,15 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
       case "$NEW_CONTENT" in
         *'"leader_socket": ""'*)
           _wpid="$(printf '%s' "$NEW_CONTENT" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -1)"
-          _sock="$(agmsg_grok_leader_socket_for "$_wpid" "${GROK_HOME:-$HOME/.grok}" 2>/dev/null || true)"
-          if [ -n "$_sock" ]; then
-            _sock_json="$(printf '%s' "$_sock" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g')"
+          agmsg_grok_resolve_leader_socket "$_wpid" "${GROK_HOME:-$HOME/.grok}"
+          if [ -n "$LEADER_SOCKET" ]; then
+            _sock_json="$(printf '%s' "$LEADER_SOCKET" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g')"
             NEW_CONTENT="${NEW_CONTENT/\"leader_socket\": \"\"/\"leader_socket\": \"$_sock_json\"}"
+            rm -f "$_pending_path" 2>/dev/null || true
+          elif [ -n "${LEADER_SOCKET_UNKNOWN:-}" ]; then
+            agmsg_write_atomic "$_pending_path" "${LEADER_SOCKET_UNKNOWN:-}" || true
+          else
+            rm -f "$_pending_path" 2>/dev/null || true
           fi
           ;;
       esac
@@ -103,7 +108,7 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
       _pid="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
     fi
     if [ -n "$_pid" ]; then
-      LEADER_SOCKET="$(agmsg_grok_leader_socket_for "$_pid" "$GROK_HOME_RESOLVED" 2>/dev/null || true)"
+      agmsg_grok_resolve_leader_socket "$_pid" "$GROK_HOME_RESOLVED"
       _pid_start="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
       _cwd="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
       if [ -z "$_cwd" ]; then
@@ -132,7 +137,11 @@ EOF
       # the original bug this file exists to fix. Only clear it on an
       # actual write success; record why otherwise.
       if agmsg_write_atomic "$WITNESS_PATH" "$_content"; then
-        rm -f "$_pending_path" 2>/dev/null || true
+        if [ -n "${LEADER_SOCKET_UNKNOWN:-}" ]; then
+          agmsg_write_atomic "$_pending_path" "${LEADER_SOCKET_UNKNOWN:-}" || true
+        else
+          rm -f "$_pending_path" 2>/dev/null || true
+        fi
       else
         agmsg_write_atomic "$_pending_path" "Stop found session $SESSION_ID but could not write the witness to $WITNESS_PATH" || true
       fi
