@@ -141,13 +141,18 @@ hold_install_db() {   # [seconds]
   [ "$(env -u AGMSG_INSTALL_DB_BUSY_MS bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT")" = 5000 ]
 }
 
-@test "install.db held, the wait is bounded by AGMSG_INSTALL_DB_BUSY_MS: ensure_meta gives up near it, not after the default" {
-  hold_install_db
-  local t0=$SECONDS
-  AGMSG_INSTALL_DB_BUSY_MS=700 run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$REPO_ROOT" "$SK/run/install.db"
-  [ "$status" -ne 0 ]
-  # The default wait is 5 s; a call that gave up in under 4 s used the knob.
-  [ $((SECONDS - t0)) -lt 4 ]
+# The knob has to reach sqlite3. This reads what the helpers pass instead of timing a
+# call, so it does not depend on how fast the runner is.
+@test "the wait knob reaches sqlite3: every call on install.db passes .timeout with the set value, none the default" {
+  local real log="$BATS_TEST_TMPDIR/sqlite-args.log"
+  real="$(command -v sqlite3)"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$log'" "exec $real \"\$@\"" > "$SHIMS/sqlite3"
+  chmod +x "$SHIMS/sqlite3"
+  AGMSG_INSTALL_DB_BUSY_MS=700 PATH="$SHIMS:$PATH" run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2" >/dev/null && agmsg_install_db_apply_schema "$2" "$1/scripts/daemon/schema.sql"' _ "$REPO_ROOT" "$SK/run/install.db"
+  [ "$status" -eq 0 ]
+  [ -s "$log" ]
+  refute grep -q -- '.timeout 5000' "$log"
+  [ "$(grep -c -- '-cmd .timeout 700 ' "$log")" -eq "$(grep -c . "$log")" ]
 }
 
 @test "the incomplete-operation record cannot be made: mktemp failure names the step and the directory" {
