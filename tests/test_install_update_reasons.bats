@@ -76,8 +76,9 @@ hold_install_db() {   # <seconds>
   refute has "update stopped at"
 }
 
-@test "install.db held by another writer: the update names the table, sqlite's rc and the file, and still exits 1" {
+@test "install.db held past the wait: the update names the table, sqlite's rc and the file, and still exits 1" {
   hold_install_db 3
+  export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
   has "install.db: creating the meta table failed (sqlite3 rc="
@@ -85,6 +86,25 @@ hold_install_db() {   # <seconds>
   has "could not read or create install.db's meta row"
   has "update stopped at: starting the install operation"
   has "(exit status 1)"
+}
+
+@test "install.db held for a short while: the update waits for the writer and goes through" {
+  hold_install_db 2
+  update
+  [ "$status" -eq 0 ]
+  refute has "update stopped at"
+  refute has "creating the meta table failed"
+}
+
+@test "install.db held, the wait is bounded by AGMSG_INSTALL_DB_BUSY_MS: the update stops near it, not after the default" {
+  hold_install_db 8
+  export AGMSG_INSTALL_DB_BUSY_MS=500
+  local t0=$SECONDS
+  update
+  [ "$status" -eq 1 ]
+  has "creating the meta table failed"
+  # The holder lets go after 8 s; stopping earlier than that is the bound at work.
+  [ $((SECONDS - t0)) -lt 8 ]
 }
 
 @test "the incomplete-operation record cannot be made: mktemp failure names the step and the directory" {
