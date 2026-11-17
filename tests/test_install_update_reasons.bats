@@ -58,7 +58,9 @@ has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
 # Another sqlite3 takes install.db's write lock and holds it for <seconds>, then
 # ends by itself (one process: BEGIN EXCLUSIVE, then a bounded sleep).
 hold_install_db() {   # <seconds>
-  sqlite3 "$SK/run/install.db" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
+  # .timeout first: the readiness probe below writes too, and a holder that met it
+  # mid-write without a wait would give up at once and never hold anything.
+  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
   HOLDER_PID=$!
   # Wait until the hold is real: a second writer must be refused.
   local i=0
@@ -111,6 +113,9 @@ hold_install_db() {   # <seconds>
   [ "$(busy -1)" = 5000 ]
   [ "$(busy 0)" = 0 ]
   [ "$(busy 00500)" = 500 ]
+  [ "$(busy 0000000000)" = 0 ]
+  [ "$(busy 0000000500)" = 500 ]
+  [ "$(busy 000000000000000000000500)" = 500 ]
   [ "$(busy 600001)" = 600000 ]
   [ "$(busy 99999999999999999999)" = 600000 ]
   [ "$(busy 2147483648)" = 600000 ]
@@ -201,4 +206,69 @@ hold_install_db() {   # <seconds>
     sleep 0.1
   done
   [ "$i" -lt 50 ]
+}
+
+# An update that stops after it has recorded its incomplete-operation marker but
+# before it changed anything used to leave that marker behind, and the next update
+# refused until someone ran --recover. Now it takes back its own marker, only in that
+# case (an existing refusal narrowed to the updates that changed something).
+
+marker() { printf '%s' "$SK/run/install-op-incomplete.json"; }
+
+@test "stopped before any change: the marker is taken back, and the next update goes through" {
+  hold_install_db 6
+  export AGMSG_INSTALL_DB_BUSY_MS=300
+  update
+  [ "$status" -eq 1 ]
+  has "update stopped at: starting the install operation"
+  has "nothing was changed, so no incomplete-operation record is kept"
+  [ ! -e "$(marker)" ]
+  # The holder lets go on its own; its own wait, not a signal.
+  wait "$HOLDER_PID" || true
+  HOLDER_PID=""
+  unset AGMSG_INSTALL_DB_BUSY_MS
+  update
+  [ "$status" -eq 0 ]
+  refute has "incomplete"
+  refute has "update stopped at"
+}
+
+@test "stopped after a change: the marker stays and the next update refuses, as before" {
+  shim_fail_on mv '*install-manifest.json.prev'
+  update
+  [ "$status" -eq 1 ]
+  has "could not move the previous completion record aside"
+  refute has "nothing was changed"
+  [ -f "$(marker)" ]
+  rm -f "$SHIMS/mv"
+  update
+  [ "$status" -eq 1 ]
+  has "is incomplete; install (update) will not start"
+}
+
+@test "a marker that is not this run's own is left alone" {
+  shim_fail_on mv '*install-manifest.json.prev'
+  update
+  [ -f "$(marker)" ]
+  cp "$(marker)" "$BATS_TEST_TMPDIR/marker.before"
+  rm -f "$SHIMS/mv"
+  hold_install_db 6
+  export AGMSG_INSTALL_DB_BUSY_MS=300
+  update
+  [ "$status" -eq 1 ]
+  has "is incomplete; install (update) will not start"
+  refute has "nothing was changed"
+  cmp "$(marker)" "$BATS_TEST_TMPDIR/marker.before"
+}
+
+@test "a marker that cannot be taken back stays, with the reason and the recovery command" {
+  hold_install_db 6
+  export AGMSG_INSTALL_DB_BUSY_MS=300
+  shim_fail_on rm '*install-op-incomplete.json'
+  update
+  [ "$status" -eq 1 ]
+  has "could not take back the incomplete-operation record"
+  has "--update --recover "
+  refute has "nothing was changed"
+  [ -f "$(marker)" ]
 }

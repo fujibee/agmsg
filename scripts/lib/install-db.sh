@@ -44,6 +44,10 @@ fi
 _agmsg_install_db_busy_ms() {
   local ms="${AGMSG_INSTALL_DB_BUSY_MS:-5000}"
   case "$ms" in ''|*[!0-9]*) ms=5000 ;; esac
+  # Leading zeros go first, before the length is judged: 0000000000 is 0 (no wait)
+  # and 0000000500 is 500, not "a long number".
+  ms="${ms#"${ms%%[!0]*}"}"
+  [ -n "$ms" ] || ms=0
   if [ "${#ms}" -gt 9 ]; then
     ms=600000
   else
