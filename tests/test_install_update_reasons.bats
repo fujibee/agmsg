@@ -58,7 +58,9 @@ has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
 # Another sqlite3 takes install.db's write lock and holds it for <seconds>, then
 # ends by itself (one process: BEGIN EXCLUSIVE, then a bounded sleep).
 hold_install_db() {   # <seconds>
-  sqlite3 "$SK/run/install.db" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
+  # .timeout first: the readiness probe below writes too, and a holder that met it
+  # mid-write without a wait would give up at once and never hold anything.
+  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
   HOLDER_PID=$!
   # Wait until the hold is real: a second writer must be refused.
   local i=0
