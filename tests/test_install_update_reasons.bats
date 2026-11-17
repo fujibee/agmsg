@@ -3,17 +3,19 @@ bats_require_minimum_version 1.5.0
 
 # An `install.sh --update` that ends between "Updating agmsg..." and the first
 # progress line used to end with no word about why: several steps in that stretch
-# return 1 and the caller exits 1. A CI run twice ended a test that way (the output
-# stopped at "Updating agmsg...", status non-zero) with nothing to say which step it
-# was. Each case here makes one of those steps fail and checks that the update
-# names the step, the command and the path, and still ends with the same status.
+# return 1, or fail under errexit, and the script just ends. A CI run twice ended a
+# test that way (the output stopped at "Updating agmsg...", status non-zero) with
+# nothing to say which step it was. Each case here makes one of those steps fail and
+# checks that the update names the step, the command and the path, and ends with
+# the same status and at the same place as before.
 #
-# Every run uses a throwaway HOME, as test_install.bats does.
+# Every run uses a throwaway HOME inside the test's own temp directory.
 
 load test_helper
 
 setup() {
-  export FAKE_HOME="$(mktemp -d)"
+  export FAKE_HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$FAKE_HOME"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
   unset CODEX_HOME
@@ -25,22 +27,23 @@ setup() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg >/dev/null 2>&1
 }
 
+# The holder (a single sqlite3 that ends by itself) is this test's own child; wait
+# for it rather than signal anything. Nothing is removed here: the runner removes
+# BATS_TEST_TMPDIR.
 teardown() {
   if [ -n "$HOLDER_PID" ]; then
-    kill "$HOLDER_PID" 2>/dev/null || true
     wait "$HOLDER_PID" 2>/dev/null || true
   fi
-  rm -rf "$FAKE_HOME"
 }
 
 # A command that fails when any argument matches <pattern>, and otherwise runs
 # the real one found after the shim directory.
-shim_fail_on() {   # <command> <glob pattern for an argument>
+shim_fail_on() {   # <command> <glob pattern for an argument> [exit status]
   local real
   real="$(command -v "$1")"
   printf '%s\n' '#!/usr/bin/env bash' \
     'for a in "$@"; do' \
-    "  case \"\$a\" in $2) exit 1 ;; esac" \
+    "  case \"\$a\" in $2) exit ${3:-1} ;; esac" \
     'done' \
     "exec $real \"\$@\"" > "$SHIMS/$1"
   chmod +x "$SHIMS/$1"
@@ -52,14 +55,10 @@ update() {
 
 has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
 
-@test "an update that goes through names no stopping step" {
-  update
-  [ "$status" -eq 0 ]
-  refute has "update stopped at"
-}
-
-@test "install.db held by another writer: the update names the table, sqlite's rc and the file, and still exits 1" {
-  ( printf 'BEGIN EXCLUSIVE;\n'; sleep 60 ) | sqlite3 "$SK/run/install.db" >/dev/null 2>&1 &
+# Another sqlite3 takes install.db's write lock and holds it for <seconds>, then
+# ends by itself (one process: BEGIN EXCLUSIVE, then a bounded sleep).
+hold_install_db() {   # <seconds>
+  sqlite3 "$SK/run/install.db" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
   HOLDER_PID=$!
   # Wait until the hold is real: a second writer must be refused.
   local i=0
@@ -69,6 +68,16 @@ has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
     sleep 0.1
   done
   [ "$i" -lt 300 ]
+}
+
+@test "an update that goes through names no stopping step" {
+  update
+  [ "$status" -eq 0 ]
+  refute has "update stopped at"
+}
+
+@test "install.db held by another writer: the update names the table, sqlite's rc and the file, and still exits 1" {
+  hold_install_db 3
   update
   [ "$status" -eq 1 ]
   has "install.db: creating the meta table failed (sqlite3 rc="
@@ -116,4 +125,26 @@ has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
   update
   [ "$status" -eq 1 ]
   has "update stopped at: copying CHANGELOG.md to $SK/CHANGELOG.md"
+}
+
+# The two below fail under errexit with no message of their own. The status and the
+# place the update stops at are exactly what they were; only the line is new.
+
+@test "moving the state: a failing readlink ends the update with its own status, and names the step" {
+  shim_fail_on readlink '*/run' 7
+  update
+  [ "$status" -eq 7 ]
+  has "update stopped at: moving the state of $SK (exit status 7)"
+  refute has "file(s) backed up"
+}
+
+@test "listing the built-in drivers: a failing sort ends the update with its own status, before any progress line" {
+  printf '%s\n' '#!/usr/bin/env bash' \
+    '[ "${LC_ALL:-}" = C ] && [ "$#" -eq 0 ] && exit 9' \
+    "exec $(command -v sort) \"\$@\"" > "$SHIMS/sort"
+  chmod +x "$SHIMS/sort"
+  update
+  [ "$status" -eq 9 ]
+  has "update stopped at: listing the built-in drivers of $SK (exit status 9)"
+  refute has "file(s) backed up"
 }
