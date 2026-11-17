@@ -1178,17 +1178,41 @@ cmd_offer() {
         echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
         return 0
       }
+      # review on #1989: a hand-built 'file://'+native-path URL breaks for
+      # any install path containing a character '#' (or other URL-special
+      # bytes) must-encode-in-a-URL, and never converts a Windows native
+      # path at all (the codex/Windows branch below handles that with its
+      # own pwd -W -- this one did not). Both failures used to surface as
+      # the GENERIC "agmsgd does not deliver to <type> sessions", silently
+      # regressing an already-supported type's offer to unavailable with a
+      # misleading reason. Node receives the plain native path as an
+      # argument instead and converts it itself via pathToFileURL, which
+      # handles both encoding and (on win32) the drive-letter form; any
+      # import/check failure is reported by its own message, not folded
+      # into the "unsupported type" case.
       found="$("$node_path" --input-type=module -e '
-        const { pokeDeliveryEnabled, hasVerifiedInputBox } = await import(process.argv[1]);
-        const [installRoot, type] = process.argv.slice(2);
-        if (!pokeDeliveryEnabled(installRoot, type)) { console.log("no_poke_delivery"); process.exit(0); }
-        if (!hasVerifiedInputBox(installRoot, type)) { console.log("no_input_box"); process.exit(0); }
-        console.log("ok");
-      ' "file://$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" "$SKILL_DIR" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
+        const { pathToFileURL } = await import("node:url");
+        const [modPath, installRoot, type] = process.argv.slice(1);
+        let mod;
+        try {
+          mod = await import(pathToFileURL(modPath).href);
+        } catch (error) {
+          console.log("import_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
+          process.exit(0);
+        }
+        try {
+          if (!mod.pokeDeliveryEnabled(installRoot, type)) { console.log("no_poke_delivery"); process.exit(0); }
+          if (!mod.hasVerifiedInputBox(installRoot, type)) { console.log("no_input_box"); process.exit(0); }
+          console.log("ok");
+        } catch (error) {
+          console.log("check_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
+        }
+      ' "$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" "$SKILL_DIR" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
       case "$found" in
         ok) ;;
         no_poke_delivery) echo "agmsgd=unavailable reason=$type has turned off poke delivery (poke_delivery=no in its type.conf)"; return 0 ;;
         no_input_box) echo "agmsgd=unavailable reason=$type has no verified input box yet, so agmsgd has no way to deliver to it"; return 0 ;;
+        import_failed:*|check_failed:*) echo "agmsgd=unavailable reason=${found#*:}"; return 0 ;;
         *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
       esac
       ;;

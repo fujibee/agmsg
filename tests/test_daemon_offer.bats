@@ -120,3 +120,24 @@ EOF
   run env PATH="$TEST_SKILL_DIR/bin:/usr/bin:/bin" bash "$SCRIPTS/daemon.sh" offer antigravity
   [[ "$output" == "agmsgd=unavailable reason="*Node* ]]
 }
+
+# review on #1989, finding (1): a hand-built 'file://'+native-path URL
+# breaks for any install path containing a URL-special character, and the
+# import failure this caused was folded into the generic "agmsgd does not
+# deliver to <type> sessions" -- a supported type's offer silently
+# regressed to unavailable with a misleading reason.
+
+@test "offer: a terminal-poke-eligible type is still offered when the install path needs URL-encoding" {
+  local hashed_dir="$TEST_SKILL_DIR/has#hash dir"
+  mkdir -p "$hashed_dir/run"
+  cp -R "$SCRIPTS" "$hashed_dir/scripts"
+  sqlite3 "$hashed_dir/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  run env AGMSG_STORAGE_PATH="$AGMSG_STORAGE_PATH" bash "$hashed_dir/scripts/daemon.sh" offer antigravity
+  [ "$output" = "agmsgd=available" ]
+}
+
+@test "offer: a broken terminal-poke-types.mjs reports its own import error, not the generic unsupported-type reason" {
+  printf 'this is not valid javascript {{{\n' > "$SCRIPTS/daemon/channels/terminal-poke-types.mjs"
+  run bash "$SCRIPTS/daemon.sh" offer antigravity
+  [[ "$output" == "agmsgd=unavailable reason="* && "$output" != *"does not deliver to antigravity sessions"* ]]
+}
