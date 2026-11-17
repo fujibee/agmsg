@@ -27,12 +27,19 @@ setup() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg >/dev/null 2>&1
 }
 
-# The holder (a single sqlite3 that ends by itself) is this test's own child; wait
-# for it rather than signal anything. Nothing is removed here: the runner removes
-# BATS_TEST_TMPDIR.
+# The holder (a single sqlite3 that ends by itself) is this test's own child; it is
+# released by creating a file it watches, and waited for, never signalled. Nothing is
+# removed here: the runner removes BATS_TEST_TMPDIR.
 teardown() {
+  release_install_db
+}
+
+# Let go of the hold now (a file the holder is watching) and wait for it to end.
+release_install_db() {
   if [ -n "$HOLDER_PID" ]; then
+    : > "$BATS_TEST_TMPDIR/release-hold"
     wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
   fi
 }
 
@@ -55,12 +62,21 @@ update() {
 
 has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
 
-# Another sqlite3 takes install.db's write lock and holds it for <seconds>, then
-# ends by itself (one process: BEGIN EXCLUSIVE, then a bounded sleep).
-hold_install_db() {   # <seconds>
+# Another sqlite3 takes install.db's write lock and holds it, then ends by itself
+# (one process: BEGIN EXCLUSIVE, then a wait). With <seconds> it holds for that long;
+# with none it holds until release_install_db, so a test that needs the update to
+# meet the hold does not depend on how fast the runner is (a 120 s bound ends a test
+# that forgot to release).
+hold_install_db() {   # [seconds]
+  local wait_cmd
+  if [ -n "${1:-}" ]; then
+    wait_cmd="sleep $1"
+  else
+    wait_cmd="n=0; while [ ! -e '$BATS_TEST_TMPDIR/release-hold' ] && [ \$n -lt 1200 ]; do sleep 0.1; n=\$((n + 1)); done"
+  fi
   # .timeout first: the readiness probe below writes too, and a holder that met it
   # mid-write without a wait would give up at once and never hold anything.
-  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
+  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell $wait_cmd" >/dev/null 2>&1 &
   HOLDER_PID=$!
   # Wait until the hold is real: a second writer must be refused.
   local i=0
@@ -79,7 +95,7 @@ hold_install_db() {   # <seconds>
 }
 
 @test "install.db held by another writer: the update names the table, sqlite's rc and the file, and still exits 1" {
-  hold_install_db 3
+  hold_install_db
   update
   [ "$status" -eq 1 ]
   has "install.db: creating the meta table failed (sqlite3 rc="
