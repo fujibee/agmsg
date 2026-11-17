@@ -810,6 +810,37 @@ agmsg_install_write_recovery_helper() {
   agmsg_install_op_require
 }
 
+# An update that stops after it has recorded its incomplete-operation marker but
+# before it has changed anything leaves nothing to recover, and the marker would
+# make the next update refuse until someone runs --recover. This takes back that one
+# marker, and only it: agmsg_install_op_pending_remove checks that the record on disk
+# is this operation's own (its id) and that the lock is still held. If the marker
+# cannot be taken back it stays, with the reason. It never changes the status the
+# update stops with.
+agmsg_install_op_withdraw_unchanged() {
+  local marker="${AGMSG_INSTALL_OP_MARKER:-}" op_id="${AGMSG_INSTALL_OP_ID:-}" remove_rc=0
+  [ -n "$marker" ] && [ -n "$op_id" ] || return 0
+  agmsg_install_op_pending_remove "$marker" "$op_id" || remove_rc=$?
+  case "$remove_rc" in
+    0)
+      AGMSG_INSTALL_OP_ID=""
+      AGMSG_INSTALL_OP_MARKER=""
+      echo "  ~ nothing was changed, so no incomplete-operation record is kept" >&2
+      ;;
+    2)
+      # pending_remove says it removed the record and only the lock check after
+      # that failed: not a guess from whether the file can be seen.
+      AGMSG_INSTALL_OP_ID=""
+      AGMSG_INSTALL_OP_MARKER=""
+      echo "  ~ nothing was changed, so no incomplete-operation record is kept (the lock could not be confirmed again after it was removed)" >&2
+      ;;
+    *)
+      echo "  ! could not take back the incomplete-operation record $marker (it may still be there, and this cannot be checked from here); if the next run refuses because of it, it needs: bash $(printf '%q' "$SCRIPT_DIR/install.sh") --cmd $(printf '%q' "$CMD_NAME") --update --recover $op_id" >&2
+      ;;
+  esac
+  return 0
+}
+
 agmsg_install_operation_begin() {
   local manifest="$SKILL_DIR/run/install-manifest.json"
   local lock_db="$SKILL_DIR/.install-op/lock.db"
@@ -855,6 +886,7 @@ agmsg_install_operation_begin() {
 
   if [ "${UPDATE_ONLY:-false}" = true ] && [ ! -f "$SKILL_DIR/.agmsg" ]; then
     echo "  ! the selected installation was removed before the update could acquire its lock" >&2
+    agmsg_install_op_withdraw_unchanged
     return 1
   fi
 
@@ -862,13 +894,21 @@ agmsg_install_operation_begin() {
   # first install is generation 1 only when neither completion file exists.
   if ! AGMSG_INSTALL_GEN="$(agmsg_install_manifest_next_gen "$manifest")"; then
     echo "  ! could not read the generation of the install manifest: $manifest" >&2
+    [ "$operation_mode" != update ] || agmsg_install_op_withdraw_unchanged
     return 1
   fi
   agmsg_install_op_require || return 1
-  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || {
+  # Nothing has changed only if the very first statement of ensure_meta failed
+  # (status 3): a failed statement writes nothing and none ran after it. A later
+  # failure (the read of the id, the insert) comes after a CREATE that may have made
+  # the table, so the marker stays.
+  local meta_rc=0
+  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || meta_rc=$?
+  if [ "$meta_rc" -ne 0 ]; then
     echo "  ! could not read or create install.db's meta row: $install_db" >&2
+    [ "$operation_mode:$meta_rc" != update:3 ] || agmsg_install_op_withdraw_unchanged
     return 1
-  }
+  fi
   agmsg_install_op_require || return 1
   if [ -z "$AGMSG_INSTALL_ID" ]; then
     echo "  ! could not read or create install.db's meta row" >&2
