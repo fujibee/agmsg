@@ -50,8 +50,21 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
   if [ -f "$WITNESS_PATH" ]; then
     _wsid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WITNESS_PATH" 2>/dev/null | head -1)"
     if [ "$_wsid" = "$SESSION_ID" ]; then
-      # The witness this Stop event is actually for: advance it.
+      # The witness this Stop event is actually for: advance it. A witness
+      # written with an empty leader_socket (SessionStart ran before the
+      # TUI's own leader was up, or by an agmsg that could not find it)
+      # gets the socket filled in here when the leader is found now.
       NEW_CONTENT="$(LC_ALL=C sed 's/"first_turn_done"[[:space:]]*:[[:space:]]*false/"first_turn_done": true/' "$WITNESS_PATH" 2>/dev/null || true)"
+      case "$NEW_CONTENT" in
+        *'"leader_socket": ""'*)
+          _wpid="$(printf '%s' "$NEW_CONTENT" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -1)"
+          _sock="$(agmsg_grok_leader_socket_for "$_wpid" "${GROK_HOME:-$HOME/.grok}" 2>/dev/null || true)"
+          if [ -n "$_sock" ]; then
+            _sock_json="$(printf '%s' "$_sock" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g')"
+            NEW_CONTENT="${NEW_CONTENT/\"leader_socket\": \"\"/\"leader_socket\": \"$_sock_json\"}"
+          fi
+          ;;
+      esac
       [ -n "$NEW_CONTENT" ] && agmsg_write_atomic "$WITNESS_PATH" "$NEW_CONTENT" || true
     else
       # review on #1979, finding (1): a DIFFERENT session's own witness is
@@ -83,13 +96,14 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
     # SessionStart) creates the witness directly as already past its
     # first turn -- this Stop event IS that first turn's own end.
     GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
-    LEADER_SOCKET="${GROK_LEADER_SOCKET:-}"
+    LEADER_SOCKET=""
     _session_obj="$(agmsg_grok_active_session_lookup "$GROK_HOME_RESOLVED/active_sessions.json" "$SESSION_ID" 2>/dev/null || true)"
     _pid=""
     if [ -n "$_session_obj" ]; then
       _pid="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
     fi
     if [ -n "$_pid" ]; then
+      LEADER_SOCKET="$(agmsg_grok_leader_socket_for "$_pid" "$GROK_HOME_RESOLVED" 2>/dev/null || true)"
       _pid_start="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
       _cwd="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
       if [ -z "$_cwd" ]; then

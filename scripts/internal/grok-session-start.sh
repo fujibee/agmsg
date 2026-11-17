@@ -42,7 +42,10 @@ GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
 # process there against the user's REAL ~/.grok (real-machine review, finding
 # A, 2026-11-15). An empty leader_socket here is what makes the channel's own
 # in-process connect probe refuse to spawn anything for this seat at all.
-LEADER_SOCKET="${GROK_LEADER_SOCKET:-}"
+# Resolved below, once this session's own pid is known: GROK_LEADER_SOCKET
+# when the TUI passed it, else the socket of the leader the TUI itself
+# started (agmsg_grok_leader_socket_for), else empty.
+LEADER_SOCKET=""
 
 # NG1 (2026-11-15 real-machine round): $$ is this HOOK SCRIPT's own pid,
 # which is gone the instant this script exits -- the channel's pid-liveness
@@ -81,6 +84,7 @@ while [ "$_lookup_attempt" -lt "$_lookup_retries" ]; do
   [ "$_lookup_attempt" -lt "$_lookup_retries" ] && sleep "$_lookup_interval"
 done
 if [ -n "$_session_obj" ] && [ -n "$PID" ]; then
+  LEADER_SOCKET="$(agmsg_grok_leader_socket_for "$PID" "$GROK_HOME_RESOLVED" 2>/dev/null || true)"
   PID_START="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
   CWD="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi

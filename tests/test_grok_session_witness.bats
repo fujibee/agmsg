@@ -394,3 +394,58 @@ EOF
   grep -q '"first_turn_done": false' "$f"
   grep -q '"session_id": "sess2"' "$f"
 }
+
+# use_leader = true (what `agmsg delivery agmsgd` writes) puts the TUI in
+# leader mode without passing GROK_LEADER_SOCKET to its hooks (measured live,
+# Grok Build 1.0.77). The leader the TUI starts is its own child process, so
+# the hooks find it with one `ps` call. A stub ps stands in for the process
+# table: "<ppid> <args>" lines, the shape `ps -A -o ppid= -o args=` prints.
+_stub_ps() {   # <lines...>
+  mkdir -p "$TEST_SKILL_DIR/psbin"
+  { printf '#!/bin/sh\ncat <<"PSEOF"\n'; printf '%s\n' "$@"; printf 'PSEOF\n'; } > "$TEST_SKILL_DIR/psbin/ps"
+  chmod +x "$TEST_SKILL_DIR/psbin/ps"
+}
+
+@test "grok-session-start.sh: no GROK_LEADER_SOCKET, but the session's own child is a grok leader -> grok's default socket under GROK_HOME" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "    1 /sbin/launchd" "17031 /Users/x/.grok/bin/grok agent leader --no-exit-on-disconnect --relay-on-demand"
+  run env -u GROK_LEADER_SOCKET PATH="$TEST_SKILL_DIR/psbin:$PATH" GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$f"
+}
+
+@test "grok-session-start.sh: the child leader's own --leader-socket wins over the default" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17031 /usr/local/bin/grok agent leader --leader-socket /tmp/own.sock --relay-on-demand"
+  run env -u GROK_LEADER_SOCKET PATH="$TEST_SKILL_DIR/psbin:$PATH" GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -qF '"leader_socket": "/tmp/own.sock"' "$f"
+}
+
+@test "grok-session-start.sh: a grok leader that is NOT this session's child is not adopted; leader_socket stays empty" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "    1 /Users/x/.grok/bin/grok agent leader --no-exit-on-disconnect" "17031 /Users/x/.grok/bin/grok agent stdio"
+  run env -u GROK_LEADER_SOCKET PATH="$TEST_SKILL_DIR/psbin:$PATH" GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -qF '"leader_socket": ""' "$f"
+}
+
+@test "grok-stop.sh: fills an empty leader_socket in this session's witness once the session's own leader is found" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "    1 /sbin/launchd"
+  env -u GROK_LEADER_SOCKET PATH="$TEST_SKILL_DIR/psbin:$PATH" GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}' >/dev/null
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -qF '"leader_socket": ""' "$f"
+  _stub_ps "17031 /Users/x/.grok/bin/grok agent leader --relay-on-demand"
+  run env -u GROK_LEADER_SOCKET PATH="$TEST_SKILL_DIR/psbin:$PATH" GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$f"
+  grep -qF '"first_turn_done": true' "$f"
+}

@@ -186,6 +186,44 @@ EOF_GROK_PAIRS
 # (review on #1979, finding (1)): only when that witness's own recorded
 # owner is definitely gone, never merely because this Stop event's
 # session_id does not match it.
+# agmsg_grok_leader_socket_for <session_pid> <grok_home>
+#
+# The leader socket a grok-build session is attached to, for the witness.
+# GROK_LEADER_SOCKET first: a TUI started with --leader/--leader-socket
+# passes it to its hooks. A TUI that reached leader mode through
+# `use_leader = true` in config.toml (what `agmsg delivery agmsgd` writes)
+# passes nothing (measured live on Grok Build 1.0.77: neither the TUI, its
+# leader nor the hook shell carries it), so without this the witness of
+# every such seat recorded an empty socket and agmsgd never delivered to
+# it. Second, then: one `ps` call for a `grok agent leader` whose parent is
+# this session's own process -- the leader the TUI itself started. Its
+# --leader-socket if given, else GROK_HOME/leader.sock (grok's default).
+# Nothing found prints nothing: a plain, non-leader TUI keeps an empty
+# socket, so agmsgd still never connects (and never has a leader started)
+# for a seat that is not in leader mode -- the reason #1979 removed the
+# blind default-path fallback. A leader started by an earlier TUI and
+# shared by this one is not this session's child and is not adopted; that
+# seat keeps the "not in leader mode" reason. Not on Windows (MSYS ps has
+# no args column for native processes).
+agmsg_grok_leader_socket_for() {
+  local pid="$1" grok_home="$2" line args sock=""
+  if [ -n "${GROK_LEADER_SOCKET:-}" ]; then
+    printf '%s\n' "$GROK_LEADER_SOCKET"
+    return 0
+  fi
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|UCRT*|CLANG*) return 0 ;; esac
+  line="$(ps -A -o ppid= -o args= 2>/dev/null | awk -v p="$pid" '$1 == p && / agent leader( |$)/ && $2 ~ /grok$/ { sub(/^[[:space:]]*[0-9]+[[:space:]]+/, ""); print; exit }')" || line=""
+  [ -n "$line" ] || return 0
+  args=" $line "
+  case "$args" in
+    *" --leader-socket="*) sock="${args#* --leader-socket=}"; sock="${sock%% *}" ;;
+    *" --leader-socket "*) sock="${args#* --leader-socket }"; sock="${sock%% *}" ;;
+  esac
+  [ -n "$sock" ] || sock="$grok_home/leader.sock"
+  printf '%s\n' "$sock"
+}
+
 agmsg_grok_pid_definitely_dead() {
   local pid="$1"
   _agmsg_pid_valid "$pid" || return 1
