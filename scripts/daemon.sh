@@ -756,7 +756,7 @@ _wait_for_ready() {
 # then one `command -v` builtin per CLI -- no per-driver process.
 _tool_path_file() { printf '%s/run/agmsgd-tool-path' "$SKILL_DIR"; }
 _record_tool_path() {
-  local file bins bin found dir out="" old tmp
+  local file bins bin found dir out="" old="" tmp
   file="$(_tool_path_file)"
   bins="$(grep -h -E '^[[:space:]]*bin[[:space:]]*=' "$SCRIPT_DIR"/drivers/terminals/*/terminal.conf 2>/dev/null | LC_ALL=C sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/' || true)"
   for bin in $bins; do
@@ -769,7 +769,7 @@ _record_tool_path() {
     case ":$out:" in *":$dir:"*) continue ;; esac
     out="${out:+$out:}$dir"
   done
-  if [ -r "$file" ]; then
+  if [ -f "$file" ] && [ -r "$file" ]; then
     IFS= read -r old < "$file" || true
     local IFS=:
     for dir in $old; do
@@ -780,14 +780,38 @@ _record_tool_path() {
     done
     unset IFS
   fi
-  mkdir -p "$SKILL_DIR/run" 2>/dev/null || return 0
+  TOOL_PATH_RECORDED="$out"
+  # A failed write never fails start (agmsgd runs either way), but it is
+  # said, not swallowed: a seat in a herdr/tmux pane can stay unreachable.
+  local why=""
   tmp="$file.$$"
-  if printf '%s\n' "$out" > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
-  else
+  if ! mkdir -p "$SKILL_DIR/run" 2>/dev/null; then
+    why="could not create $SKILL_DIR/run"
+  elif [ -e "$file" ] && [ ! -f "$file" ]; then
+    why="$file is not a regular file"
+  elif ! printf '%s\n' "$out" > "$tmp" 2>/dev/null; then
+    why="could not write $tmp"
+    rm -f "$tmp" 2>/dev/null
+  elif ! mv -f "$tmp" "$file" 2>/dev/null; then
+    why="could not replace $file"
     rm -f "$tmp" 2>/dev/null
   fi
+  if [ -n "$why" ]; then
+    echo "agmsg daemon start: the terminal CLI directories (herdr, tmux) were not recorded: $why. agmsgd started by launchd/systemd may then not find them, and seats in those panes are not reached." >&2
+  fi
   return 0
+}
+
+# Run after start found agmsgd already running: agmsgd applies the record only
+# when it starts, and writes what it applied to run/agmsgd-tool-path.applied.
+# A record that now differs from that is not in effect until a restart; say
+# so with the commands that actually apply it.
+_tool_path_restart_hint() {
+  local applied=""
+  [ -n "${TOOL_PATH_RECORDED+x}" ] || return 0
+  [ -r "$SKILL_DIR/run/agmsgd-tool-path.applied" ] && { IFS= read -r applied < "$SKILL_DIR/run/agmsgd-tool-path.applied" || true; }
+  [ "$applied" = "$TOOL_PATH_RECORDED" ] && return 0
+  echo "agmsg daemon start: the running agmsgd uses the terminal CLI directories it read when it started ('${applied:-none}'); the ones found now ('${TOOL_PATH_RECORDED:-none}') take effect after: agmsg daemon stop, then agmsg daemon start"
 }
 
 cmd_start() {
@@ -809,6 +833,7 @@ cmd_start() {
   running_node="$(_resolve_node 2>/dev/null || true)"
   if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
+    _tool_path_restart_hint
     _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status

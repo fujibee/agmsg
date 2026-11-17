@@ -219,7 +219,7 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   assert.match(text, /Terminal poke test\/g4: agmsgd cannot reach this seat yet: no verified input-box check for type gemini/);
   // A resident agmsgd whose PATH lacks the pane's terminal CLI says which
   // CLI and what to do, not a generic "could not be checked".
-  assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(run agmsg daemon start from a shell where herdr works\)/);
+  assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(from a shell where herdr works, run agmsg daemon stop, then agmsg daemon start\)/);
 });
 
 test('grok queue seats are shown with the channel\'s own status vocabulary', async t => {

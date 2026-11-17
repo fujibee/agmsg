@@ -86,8 +86,9 @@ export async function startup(db, { installRoot, expectedDesired, expectedOpGen,
     }
     // Before the first poll: every channel's child process (terminal-nudge.sh
     // and the terminal drivers under it) inherits this PATH.
-    const addedToolDirs = extendPathFromRecord(installRoot);
-    if (addedToolDirs.length) logLine(installRoot, `startup: PATH += ${addedToolDirs.join(":")} (recorded terminal CLI directories)`);
+    const toolPath = extendPathFromRecord(installRoot);
+    if (toolPath.added.length) logLine(installRoot, `startup: PATH += ${toolPath.added.join(":")} (recorded terminal CLI directories)`);
+    if (toolPath.error) logLine(installRoot, `startup: terminal CLI directories: ${toolPath.error}; PATH left as started`);
     markReady(db, owned.gen);
     logLine(installRoot, `startup: gen ${owned.gen} ready at ${owned.socket}`);
     return { ok: true, gen: owned.gen, controlHandle, db };

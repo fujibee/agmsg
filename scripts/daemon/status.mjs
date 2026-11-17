@@ -381,7 +381,7 @@ function terminalPokeReasonText(reason) {
   // The readiness check could not even run the terminal's CLI: agmsgd's own
   // PATH lacks it (scripts/daemon/tool-path.mjs records it on start).
   const noCli = /^unknown:([a-z0-9_-]+)_not_on_path$/.exec(reason);
-  if (noCli) return `agmsgd cannot find ${noCli[1]} on its PATH (run agmsg daemon start from a shell where ${noCli[1]} works)`;
+  if (noCli) return `agmsgd cannot find ${noCli[1]} on its PATH (from a shell where ${noCli[1]} works, run agmsg daemon stop, then agmsg daemon start)`;
   const unknown = /^unknown:(.+)$/.exec(reason);
   if (unknown) return `readiness could not be checked (${unknown[1]})`;
   if (reason === "input_in_progress") return "input in progress (retrying)";

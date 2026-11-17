@@ -1253,3 +1253,27 @@ EOF
   refute grep -qxF "$TEST_SKILL_DIR/gone" "$TEST_SKILL_DIR/rec.lines"
   refute grep -qxF "relative/dir" "$TEST_SKILL_DIR/rec.lines"
 }
+
+@test "daemon.sh start: a record that cannot be written is warned about on stderr, and start still succeeds" {
+  _seed_install_db
+  _write_completion_record
+  mkdir -p "$TEST_SKILL_DIR/run/agmsgd-tool-path"
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  [[ "$output" == *"terminal CLI directories (herdr, tmux) were not recorded"* ]]
+}
+
+@test "daemon.sh start: already running with a newer record says to stop and start again, since agmsgd applies it only at startup" {
+  _seed_install_db
+  _write_completion_record
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  mkdir -p "$TEST_SKILL_DIR/clibin2"
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_SKILL_DIR/clibin2/herdr"
+  chmod +x "$TEST_SKILL_DIR/clibin2/herdr"
+  PATH="$TEST_SKILL_DIR/clibin2:$PATH" _run_with_deadline 15 bash "$DAEMON" start
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  _assert_start_result 'already running'
+  [[ "$output" == *"take effect after: agmsg daemon stop, then agmsg daemon start"* ]]
+}
