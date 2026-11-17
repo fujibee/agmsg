@@ -40,7 +40,7 @@ if [ -z "$SESSION_ID" ] && [ -n "$INPUT" ]; then
   SESSION_ID="$(printf '%s' "$INPUT" | sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi
 
-SEAT="$(agmsg_grok_resolve_seat "$PROJECT" 2>/dev/null || true)"
+SEAT="$(agmsg_grok_resolve_seat_for_session "$PROJECT" "$SESSION_ID" 2>/dev/null || true)"
 if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
   TEAM="${SEAT%%	*}"
   AGENT="${SEAT#*	}"

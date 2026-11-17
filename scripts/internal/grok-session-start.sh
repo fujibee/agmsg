@@ -97,7 +97,7 @@ fi
 if [ -z "$PID" ]; then
   _reason="SessionStart could not find session $SESSION_ID in $GROK_HOME_RESOLVED/active_sessions.json"
   echo "agmsg: grok-session-start.sh: $_reason; no witness written" >&2
-  _seat_for_pending="$(agmsg_grok_resolve_seat "$PROJECT" 2>/dev/null || true)"
+  _seat_for_pending="$(agmsg_grok_resolve_seat_for_session "$PROJECT" "$SESSION_ID" 2>/dev/null || true)"
   if [ -n "$_seat_for_pending" ]; then
     agmsg_write_atomic "$(agmsg_grok_pending_path "${_seat_for_pending%%	*}" "${_seat_for_pending#*	}")" "$_reason" || true
   fi
@@ -118,8 +118,12 @@ if [ -z "$CWD" ]; then
   [ -n "$CWD" ] || CWD="${PWD:-$PROJECT}"
 fi
 
-SEAT="$(agmsg_grok_resolve_seat "$PROJECT" 2>/dev/null || true)"
-[ -n "$SEAT" ] || exit 0   # ambiguous / unregistered project: nothing to attach
+SEAT="$(agmsg_grok_resolve_seat_for_session "$PROJECT" "$SESSION_ID" 2>/dev/null || true)"
+# Unregistered project (nothing to attach), OR 2+ registrations this call
+# could not narrow with anything it knows yet -- agmsg_grok_resolve_seat_for_session
+# itself already recorded the ambiguity reason on every candidate's own
+# pending file in that second case, so there is nothing further to do here.
+[ -n "$SEAT" ] || exit 0
 
 TEAM="${SEAT%%	*}"
 AGENT="${SEAT#*	}"

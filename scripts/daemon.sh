@@ -1157,9 +1157,41 @@ cmd_disable() {
 # It changes nothing, and never enables anything.
 cmd_offer() {
   local type="${1:-}" desired node_path found
+  # agmsgd delivers to a type one of two ways: a native channel written
+  # specifically for it (claude-code, codex, grok-build -- the grok-queue
+  # channel, #1973/#1979), or terminal-poke, which reaches any OTHER type
+  # whose own type.conf has not turned poke delivery off and names a
+  # verified input_prompt_marker (the same two checks the terminal-poke
+  # channel itself applies when building its own roster -- see
+  # terminal-poke-store.mjs's NATIVE_CHANNEL_TYPES and
+  # terminal-poke-types.mjs's pokeDeliveryEnabled/hasVerifiedInputBox).
+  # Offering unavailable to every non-claude-code/codex type regardless
+  # (the previous behavior here) meant grok-build and antigravity -- both
+  # of which agmsgd already has a working delivery path for -- showed
+  # "agmsgd does not deliver to <type> sessions" even though
+  # delivery-cli.sh's own agmsgd branch is reachable and correct for them;
+  # this offer gate was the one place still out of step with it.
   case "$type" in
-    claude-code|codex) ;;
-    *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+    claude-code|codex|grok-build) ;;
+    *)
+      node_path="$(_resolve_node)" || {
+        echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
+        return 0
+      }
+      found="$("$node_path" --input-type=module -e '
+        const { pokeDeliveryEnabled, hasVerifiedInputBox } = await import(process.argv[1]);
+        const [installRoot, type] = process.argv.slice(2);
+        if (!pokeDeliveryEnabled(installRoot, type)) { console.log("no_poke_delivery"); process.exit(0); }
+        if (!hasVerifiedInputBox(installRoot, type)) { console.log("no_input_box"); process.exit(0); }
+        console.log("ok");
+      ' "file://$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" "$SKILL_DIR" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
+      case "$found" in
+        ok) ;;
+        no_poke_delivery) echo "agmsgd=unavailable reason=$type has turned off poke delivery (poke_delivery=no in its type.conf)"; return 0 ;;
+        no_input_box) echo "agmsgd=unavailable reason=$type has no verified input box yet, so agmsgd has no way to deliver to it"; return 0 ;;
+        *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+      esac
+      ;;
   esac
   desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | LC_ALL=C tr -d '\r' || true)"
   if [ "$desired" = on ]; then

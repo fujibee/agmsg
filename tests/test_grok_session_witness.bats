@@ -83,13 +83,59 @@ EOF
   ! ls "$TEST_SKILL_DIR"/run/grok-seat.*.json >/dev/null 2>&1
 }
 
-@test "grok-session-start.sh: more than one grok-build seat for the project writes nothing (ambiguous, never guessed)" {
+@test "grok-session-start.sh: more than one grok-build seat for the project writes no witness, never guessed" {
   bash "$SCRIPTS/join.sh" t1 g1 grok-build "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/join.sh" t1 g2 grok-build "$TEST_PROJECT" >/dev/null
   write_active_sessions sess1 17031
   run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
   [ "$status" -eq 0 ]
   ! ls "$TEST_SKILL_DIR"/run/grok-seat.*.json >/dev/null 2>&1
+}
+
+# review on #1979-followup: an ambiguous project (2+ grok-build
+# registrations) used to leave BOTH hooks silently doing nothing -- no
+# witness (correct, never guess) AND no pending reason either, so `agmsg
+# daemon status` could not tell this apart from a project that never
+# configured grok-build at all. Both seats' own pending reason now names
+# the ambiguity so status can show it (review-criteria §10, class D: a
+# silent fallback is a bug).
+
+@test "grok-session-start.sh: an ambiguous project records WHY on every candidate's own pending reason" {
+  bash "$SCRIPTS/join.sh" t1 g1 grok-build "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" t1 g2 grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local pending_files=("$TEST_SKILL_DIR"/run/grok-seat-pending.*)
+  [ "${#pending_files[@]}" -eq 2 ]
+  grep -q "more than one grok-build registration" "${pending_files[0]}"
+  grep -q "t1/g1" "${pending_files[0]}"
+  grep -q "t1/g2" "${pending_files[0]}"
+}
+
+@test "grok-session-start.sh: an ambiguous project IS resolved when exactly one candidate's own witness already names this session" {
+  bash "$SCRIPTS/join.sh" t1 g1 grok-build "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" t1 g2 grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  # g1 already has a witness for THIS exact session (e.g. Stop wrote it
+  # first, or this is a hook re-fire) -- a confirmed fact, not a guess.
+  local key; key="$(printf 't1\x1fg1' | bash -c '. "$1"/lib/hash.sh; agmsg_sha1' _ "$SCRIPTS")"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '{"session_id": "sess1", "first_turn_done": false}' > "$TEST_SKILL_DIR/run/grok-seat.$key.json"
+  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  grep -q '"pid": "17031"' "$TEST_SKILL_DIR/run/grok-seat.$key.json"
+  ! ls "$TEST_SKILL_DIR"/run/grok-seat-pending.* >/dev/null 2>&1
+}
+
+@test "grok-stop.sh: an ambiguous project also records why on every candidate's own pending reason" {
+  bash "$SCRIPTS/join.sh" t1 g1 grok-build "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" t1 g2 grok-build "$TEST_PROJECT" >/dev/null
+  run env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-stop.sh" "$TEST_PROJECT" <<<'{}'
+  [ "$status" -eq 0 ]
+  local pending_files=("$TEST_SKILL_DIR"/run/grok-seat-pending.*)
+  [ "${#pending_files[@]}" -eq 2 ]
+  grep -q "more than one grok-build registration" "${pending_files[0]}"
 }
 
 @test "grok-session-start.sh: no matching active_sessions.json entry writes nothing, warns on stderr, records the pending reason" {

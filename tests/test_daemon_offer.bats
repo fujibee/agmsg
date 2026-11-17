@@ -80,3 +80,43 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   run bash "$SCRIPTS/daemon.sh" offer gemini
   [[ "$output" == "agmsgd=unavailable reason="* ]]
 }
+
+# review on #1979-followup: the above gate used to reject every type except
+# claude-code/codex outright, even grok-build (which has its own native
+# channel, grok-queue) and any type terminal-poke already delivers to
+# (antigravity, via its own input_prompt_marker). Offer now mirrors the
+# same two criteria terminal-poke-store.mjs/terminal-poke-types.mjs use to
+# build their own roster.
+
+@test "offer: grok-build is offered -- it has its own native channel (grok-queue)" {
+  run bash "$SCRIPTS/daemon.sh" offer grok-build
+  [ "$output" = "agmsgd=available" ]
+}
+
+@test "offer: a type with a verified input box (antigravity) is offered via terminal-poke" {
+  run bash "$SCRIPTS/daemon.sh" offer antigravity
+  [ "$output" = "agmsgd=available" ]
+}
+
+@test "offer: a type with no verified input box yet is not offered, and says so" {
+  run bash "$SCRIPTS/daemon.sh" offer gemini
+  [[ "$output" == "agmsgd=unavailable reason="*"no verified input box"* ]]
+}
+
+@test "offer: a type whose own type.conf turns poke delivery off is not offered, and says so" {
+  mkdir -p "$SCRIPTS/drivers/types/fake-poke-off"
+  cat > "$SCRIPTS/drivers/types/fake-poke-off/type.conf" <<'EOF'
+name=fake-poke-off
+input_prompt_marker=>
+poke_delivery=no
+EOF
+  run bash "$SCRIPTS/daemon.sh" offer fake-poke-off
+  [[ "$output" == "agmsgd=unavailable reason="*"turned off poke delivery"* ]]
+}
+
+@test "offer: no usable Node also disables a terminal-poke-eligible type's offer" {
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/bin/node"
+  chmod +x "$TEST_SKILL_DIR/bin/node"
+  run env PATH="$TEST_SKILL_DIR/bin:/usr/bin:/bin" bash "$SCRIPTS/daemon.sh" offer antigravity
+  [[ "$output" == "agmsgd=unavailable reason="*Node* ]]
+}
