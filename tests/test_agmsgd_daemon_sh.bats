@@ -1222,3 +1222,34 @@ EOF
   [ "$status" -eq 0 ]
   grep -q 'no usable Codex' <<<"$output"
 }
+
+# A resident manager starts agmsgd with a minimal PATH (launchd:
+# /usr/bin:/bin:/usr/sbin:/sbin), where herdr/tmux from ~/.local/bin or
+# Homebrew is not found and the terminal-poke channel can reach no pane.
+# start records where the terminal CLIs named by the bundled drivers'
+# `bin=` are found, for agmsgd to append to its own PATH.
+@test "daemon.sh start: records the directory of each terminal CLI it finds (terminal.conf bin=)" {
+  _seed_install_db
+  _write_completion_record
+  mkdir -p "$TEST_SKILL_DIR/clibin"
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_SKILL_DIR/clibin/herdr"
+  chmod +x "$TEST_SKILL_DIR/clibin/herdr"
+  PATH="$TEST_SKILL_DIR/clibin:$PATH" _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  tr ':' '\n' < "$TEST_SKILL_DIR/run/agmsgd-tool-path" | grep -qxF "$TEST_SKILL_DIR/clibin"
+}
+
+@test "daemon.sh start: a directory recorded earlier is kept while it exists, and dropped once it is gone" {
+  _seed_install_db
+  _write_completion_record
+  mkdir -p "$TEST_SKILL_DIR/kept"
+  printf '%s\n' "$TEST_SKILL_DIR/kept:$TEST_SKILL_DIR/gone:relative/dir" > "$TEST_SKILL_DIR/run/agmsgd-tool-path"
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  tr ':' '\n' < "$TEST_SKILL_DIR/run/agmsgd-tool-path" > "$TEST_SKILL_DIR/rec.lines"
+  grep -qxF "$TEST_SKILL_DIR/kept" "$TEST_SKILL_DIR/rec.lines"
+  refute grep -qxF "$TEST_SKILL_DIR/gone" "$TEST_SKILL_DIR/rec.lines"
+  refute grep -qxF "relative/dir" "$TEST_SKILL_DIR/rec.lines"
+}

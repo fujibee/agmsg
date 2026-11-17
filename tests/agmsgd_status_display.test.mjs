@@ -206,6 +206,7 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
       { seat: JSON.stringify(['test', 'g2']), state: 'unaddressable', reason: 'no_pane' },
       { seat: JSON.stringify(['test', 'g3']), state: 'unaddressable', reason: 'pane_gone' },
       { seat: JSON.stringify(['test', 'g4']), state: 'unaddressable', reason: 'no_verified_input_box:gemini' },
+      { seat: JSON.stringify(['test', 'g5']), state: 'pending', reason: 'unknown:herdr_not_on_path' },
     ],
   });
   const text = await runAsync(f.root);
@@ -216,6 +217,9 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   // scope decision (2026-11-14): a type with no real-pane-verified
   // input-box marker is shown, never silently hidden, even without --all.
   assert.match(text, /Terminal poke test\/g4: agmsgd cannot reach this seat yet: no verified input-box check for type gemini/);
+  // A resident agmsgd whose PATH lacks the pane's terminal CLI says which
+  // CLI and what to do, not a generic "could not be checked".
+  assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(run agmsg daemon start from a shell where herdr works\)/);
 });
 
 test('grok queue seats are shown with the channel\'s own status vocabulary', async t => {

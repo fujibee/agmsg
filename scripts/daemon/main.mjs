@@ -23,6 +23,7 @@ import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-stor
 import { createTerminalPokeChannel } from "./channels/terminal-poke.mjs";
 import { ensureTerminalPokeChannelSchema } from "./channels/terminal-poke-store.mjs";
 import { createGrokQueueChannel } from "./channels/grok-queue.mjs";
+import { extendPathFromRecord } from "./tool-path.mjs";
 import { ensureGrokQueueChannelSchema } from "./channels/grok-queue-store.mjs";
 
 import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
@@ -83,6 +84,10 @@ export async function startup(db, { installRoot, expectedDesired, expectedOpGen,
       logLine(installRoot, `startup: bind failed for gen ${owned.gen}: ${error.message}`);
       return { ok: false, reason: `bind failed: ${error.message}`, db };
     }
+    // Before the first poll: every channel's child process (terminal-nudge.sh
+    // and the terminal drivers under it) inherits this PATH.
+    const addedToolDirs = extendPathFromRecord(installRoot);
+    if (addedToolDirs.length) logLine(installRoot, `startup: PATH += ${addedToolDirs.join(":")} (recorded terminal CLI directories)`);
     markReady(db, owned.gen);
     logLine(installRoot, `startup: gen ${owned.gen} ready at ${owned.socket}`);
     return { ok: true, gen: owned.gen, controlHandle, db };

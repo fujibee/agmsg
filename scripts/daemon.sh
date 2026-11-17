@@ -744,6 +744,52 @@ _wait_for_ready() {
 # `start --only-if-op-gen N` is what an update uses to bring a daemon back: it
 # starts only if the intent is still the "on" at op_gen N the update saw, so a
 # stop/disable/start made by a person in the meantime is never undone.
+# The directories holding the terminal CLIs agmsgd's channels drive, as the
+# shell running this command finds them: each bundled terminal driver names
+# its CLI in terminal.conf's `bin=`. A resident manager starts agmsgd with a
+# minimal PATH (launchd: /usr/bin:/bin:/usr/sbin:/sbin) where herdr or tmux
+# from ~/.local/bin or Homebrew is not found, and every seat in such a pane
+# then goes undelivered. agmsgd appends these to its own PATH at startup
+# (scripts/daemon/tool-path.mjs). Recorded on every start, so an update (which
+# runs start) refreshes it; a CLI not found now keeps a directory recorded
+# earlier as long as that directory still exists. One grep for the manifests,
+# then one `command -v` builtin per CLI -- no per-driver process.
+_tool_path_file() { printf '%s/run/agmsgd-tool-path' "$SKILL_DIR"; }
+_record_tool_path() {
+  local file bins bin found dir out="" old tmp
+  file="$(_tool_path_file)"
+  bins="$(grep -h -E '^[[:space:]]*bin[[:space:]]*=' "$SCRIPT_DIR"/drivers/terminals/*/terminal.conf 2>/dev/null | LC_ALL=C sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/' || true)"
+  for bin in $bins; do
+    case "$bin" in */*|'') continue ;; esac
+    found="$(command -v "$bin" 2>/dev/null || true)"
+    case "$found" in /*) ;; *) continue ;; esac
+    dir="${found%/*}"
+    [ -n "$dir" ] || dir=/
+    case "$dir" in *:*|*[[:cntrl:]]*) continue ;; esac
+    case ":$out:" in *":$dir:"*) continue ;; esac
+    out="${out:+$out:}$dir"
+  done
+  if [ -r "$file" ]; then
+    IFS= read -r old < "$file" || true
+    local IFS=:
+    for dir in $old; do
+      case "$dir" in /*) ;; *) continue ;; esac
+      [ -d "$dir" ] || continue
+      case ":$out:" in *":$dir:"*) continue ;; esac
+      out="${out:+$out:}$dir"
+    done
+    unset IFS
+  fi
+  mkdir -p "$SKILL_DIR/run" 2>/dev/null || return 0
+  tmp="$file.$$"
+  if printf '%s\n' "$out" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+  return 0
+}
+
 cmd_start() {
   local only_gen=""
   case "${1:-}" in
@@ -754,6 +800,9 @@ cmd_start() {
     *) _usage; return 2 ;;
   esac
   _ensure_install_db_schema
+  # Before the "already running" answer below: a running agmsgd picks the
+  # record up at its next start (the update path restarts it).
+  [ "$(_os)" = windows ] || _record_tool_path
   local state
   state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
   local running_node
