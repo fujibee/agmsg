@@ -397,31 +397,47 @@ agmsg_install_op_pending_refuse() {
 agmsg_install_op_pending_begin() {
   local path="$1" kind="$2" install_path="$3" install_id="${4:-}" mode="${5:-legacy}"
   local op_id started_at path_sql kind_sql mode_sql id_sql started_sql install_id_sql json tmp
-  [ -n "$path" ] && [ -n "$kind" ] && [ -n "$install_path" ] || return 1
+  if [ -z "$path" ] || [ -z "$kind" ] || [ -z "$install_path" ]; then
+    echo "  ! incomplete-operation record: a required argument is empty (path='$path' kind='$kind' install='$install_path')" >&2
+    return 1
+  fi
   case "$kind:$mode" in
     install:install|install:update|uninstall:keep-data|uninstall:remove-data) ;;
-    *) return 1 ;;
+    *) echo "  ! incomplete-operation record: unsupported operation '$kind' with mode '$mode'" >&2; return 1 ;;
   esac
   agmsg_install_op_require || return 1
-  mkdir -p "$(dirname "$path")" || return 1
+  mkdir -p "$(dirname "$path")" || {
+    echo "  ! incomplete-operation record: could not create the directory of $path (mkdir rc=$?)" >&2
+    return 1
+  }
   if [ -e "$path" ] || [ -L "$path" ]; then
     echo "  ! an incomplete-operation record already exists at $path" >&2
     return 1
   fi
-  op_id="$(agmsg_sqlite_capture :memory: 'SELECT lower(hex(randomblob(16)));')" || return 1
-  case "$op_id" in ''|*[!0-9a-f]*) return 1 ;; esac
-  [ "${#op_id}" -eq 32 ] || return 1
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
-  path_sql="$(_agmsg_install_op_sql_quote "$install_path")" || return 1
-  kind_sql="$(_agmsg_install_op_sql_quote "$kind")" || return 1
-  mode_sql="$(_agmsg_install_op_sql_quote "$mode")" || return 1
-  id_sql="$(_agmsg_install_op_sql_quote "$op_id")" || return 1
-  started_sql="$(_agmsg_install_op_sql_quote "$started_at")" || return 1
-  install_id_sql="$(_agmsg_install_op_sql_quote "$install_id")" || return 1
-  json="$(agmsg_sqlite_capture :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','mode','$mode_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');")" || return 1
-  [ -n "$json" ] || return 1
-  tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || return 1
+  op_id="$(agmsg_sqlite_capture :memory: 'SELECT lower(hex(randomblob(16)));')" || {
+    echo "  ! incomplete-operation record: sqlite3 could not make an operation id (rc=$?)" >&2
+    return 1
+  }
+  case "$op_id" in ''|*[!0-9a-f]*) echo "  ! incomplete-operation record: sqlite3 returned an unusable operation id '$op_id'" >&2; return 1 ;; esac
+  [ "${#op_id}" -eq 32 ] || { echo "  ! incomplete-operation record: the operation id has ${#op_id} characters, not 32" >&2; return 1; }
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || { echo "  ! incomplete-operation record: date failed (rc=$?)" >&2; return 1; }
+  path_sql="$(_agmsg_install_op_sql_quote "$install_path")" || { echo "  ! incomplete-operation record: quoting the install path failed (rc=$?)" >&2; return 1; }
+  kind_sql="$(_agmsg_install_op_sql_quote "$kind")" || { echo "  ! incomplete-operation record: quoting the operation kind failed (rc=$?)" >&2; return 1; }
+  mode_sql="$(_agmsg_install_op_sql_quote "$mode")" || { echo "  ! incomplete-operation record: quoting the mode failed (rc=$?)" >&2; return 1; }
+  id_sql="$(_agmsg_install_op_sql_quote "$op_id")" || { echo "  ! incomplete-operation record: quoting the operation id failed (rc=$?)" >&2; return 1; }
+  started_sql="$(_agmsg_install_op_sql_quote "$started_at")" || { echo "  ! incomplete-operation record: quoting the start time failed (rc=$?)" >&2; return 1; }
+  install_id_sql="$(_agmsg_install_op_sql_quote "$install_id")" || { echo "  ! incomplete-operation record: quoting the install id failed (rc=$?)" >&2; return 1; }
+  json="$(agmsg_sqlite_capture :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','mode','$mode_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');")" || {
+    echo "  ! incomplete-operation record: sqlite3 could not build the record (rc=$?)" >&2
+    return 1
+  }
+  [ -n "$json" ] || { echo "  ! incomplete-operation record: sqlite3 built an empty record" >&2; return 1; }
+  tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || {
+    echo "  ! incomplete-operation record: mktemp failed in $(dirname "$path") (rc=$?)" >&2
+    return 1
+  }
   if ! printf '%s\n' "$json" > "$tmp"; then
+    echo "  ! incomplete-operation record: could not write $tmp" >&2
     rm -f "$tmp"
     return 1
   fi
@@ -431,7 +447,7 @@ agmsg_install_op_pending_begin() {
     echo "  ! an incomplete-operation record already exists at $path" >&2
     return 1
   fi
-  rm -f "$tmp" || return 1
+  rm -f "$tmp" || { echo "  ! incomplete-operation record: could not remove $tmp (rc=$?)" >&2; return 1; }
   AGMSG_INSTALL_OP_ID="$op_id"
   AGMSG_INSTALL_OP_MARKER="$path"
   agmsg_install_op_require
