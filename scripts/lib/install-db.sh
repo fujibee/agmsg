@@ -35,14 +35,22 @@ if ! declare -F agmsg_sqlite_capture >/dev/null 2>&1; then
 fi
 
 # How long the install's own sqlite3 calls on install.db wait for another writer
-# (agmsgd's shutdown, a concurrent `agmsg` command) before they give up. sqlite3's
-# default is 0: a call that meets a writer fails at once, which ended an update
-# with no output. A knob only so a test can make the wait short.
+# (agmsgd's shutdown, a concurrent `agmsg` command) before they give up, in ms.
+# sqlite3's default is 0: a call that meets a writer fails at once, which ended an
+# update with no output. AGMSG_INSTALL_DB_BUSY_MS changes it, for a test that needs a
+# short bound: digits only (anything else uses 5000), 0 means no wait (sqlite3's own
+# default), and a value above 600000 is 600000. sqlite3 itself cannot take more than
+# 2147483647, so the cap is also what keeps a huge number from wrapping to no wait.
 _agmsg_install_db_busy_ms() {
-  case "${AGMSG_INSTALL_DB_BUSY_MS:-}" in
-    ''|*[!0-9]*) printf '5000\n' ;;
-    *) printf '%s\n' "$AGMSG_INSTALL_DB_BUSY_MS" ;;
-  esac
+  local ms="${AGMSG_INSTALL_DB_BUSY_MS:-5000}"
+  case "$ms" in ''|*[!0-9]*) ms=5000 ;; esac
+  if [ "${#ms}" -gt 9 ]; then
+    ms=600000
+  else
+    ms=$((10#$ms))
+    [ "$ms" -le 600000 ] || ms=600000
+  fi
+  printf '%s\n' "$ms"
 }
 
 # Ensures install.db exists with its meta row: creates the table if absent,
