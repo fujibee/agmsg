@@ -504,7 +504,10 @@ AGMSG_UPDATE_STEP=""
 agmsg_install_update_exit_note() {   # <exit status>
   [ "$1" -ne 0 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ] || return 0
   [ -n "$AGMSG_UPDATE_STEP" ] || return 0
-  echo "  ! update stopped at: $AGMSG_UPDATE_STEP (exit status $1)" >&2
+  # Best effort: this runs in the EXIT trap under errexit, and a failed write (stderr
+  # closed, a full disk) must not end the trap before the cleanup that follows it or
+  # change the status the script is exiting with.
+  echo "  ! update stopped at: $AGMSG_UPDATE_STEP (exit status $1)" >&2 || true
 }
 
 agmsg_install_state_notice() {   # <skill_dir> <reason>
@@ -773,7 +776,7 @@ agmsg_reset_trash() {
 # INSTALLED_VERSION.
 agmsg_install_operation_exit() {
   local rc=$?
-  agmsg_install_update_exit_note "$rc"
+  agmsg_install_update_exit_note "$rc" || true
   if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
     agmsg_install_op_unlock
     AGMSG_INSTALL_OP_ACTIVE=false

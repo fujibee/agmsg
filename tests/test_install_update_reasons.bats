@@ -168,3 +168,16 @@ hold_install_db() {   # <seconds>
   has "update stopped at: listing the built-in drivers of $SK (exit status 9)"
   refute has "file(s) backed up"
 }
+
+@test "the note is best effort: with stderr closed the update still ends with its own status and releases the lock" {
+  shim_fail_on readlink '*/run' 7
+  HOME="$FAKE_HOME" PATH="$SHIMS:$PATH" run bash -c 'exec 2>&-; exec bash "$1" --update' _ "$REPO_ROOT/install.sh"
+  [ "$status" -eq 7 ]
+  # The lock database is free again: a writer with no wait gets it at once.
+  local i=0
+  until sqlite3 "$SK/.install-op/lock.db" "BEGIN EXCLUSIVE; COMMIT;" >/dev/null 2>&1; do
+    i=$((i + 1)); [ "$i" -lt 50 ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 50 ]
+}
