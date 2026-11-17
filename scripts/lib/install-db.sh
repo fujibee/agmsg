@@ -34,6 +34,17 @@ if ! declare -F agmsg_sqlite_capture >/dev/null 2>&1; then
   unset _agmsg_install_db_dir
 fi
 
+# How long the install's own sqlite3 calls on install.db wait for another writer
+# (agmsgd's shutdown, a concurrent `agmsg` command) before they give up. sqlite3's
+# default is 0: a call that meets a writer fails at once, which ended an update
+# with no output. A knob only so a test can make the wait short.
+_agmsg_install_db_busy_ms() {
+  case "${AGMSG_INSTALL_DB_BUSY_MS:-}" in
+    ''|*[!0-9]*) printf '5000\n' ;;
+    *) printf '%s\n' "$AGMSG_INSTALL_DB_BUSY_MS" ;;
+  esac
+}
+
 # Ensures install.db exists with its meta row: creates the table if absent,
 # and mints a fresh install_id (schema_version 1) only if the table has no
 # row yet. An --update over an install.db that already has a meta row
@@ -41,23 +52,24 @@ fi
 # existing one. Prints the (possibly just-created) install_id on success;
 # prints nothing and returns 1 on any sqlite failure.
 agmsg_install_db_ensure_meta() {   # <install_db_path>
-  local db="$1" id err rc
+  local db="$1" id err rc busy
+  busy="$(_agmsg_install_db_busy_ms)"
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
-  err="$(sqlite3 "$db" \
+  err="$(sqlite3 -cmd ".timeout $busy" "$db" \
     "CREATE TABLE IF NOT EXISTS meta (schema_version INTEGER NOT NULL, install_id TEXT NOT NULL);" \
     2>&1)" || {
     rc=$?
     echo "  ! install.db: creating the meta table failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
     return 1
   }
-  id="$(agmsg_sqlite_capture "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
+  id="$(agmsg_sqlite_capture -cmd ".timeout $busy" "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
     rc=$?
     echo "  ! install.db: reading the install id failed (sqlite3 rc=$rc): $db" >&2
     return 1
   }
   if [ -z "$id" ]; then
     id="$(compat_uuid7)"
-    err="$(sqlite3 "$db" \
+    err="$(sqlite3 -cmd ".timeout $busy" "$db" \
       "INSERT INTO meta (schema_version, install_id) VALUES (1, '$id');" \
       2>&1)" || {
       rc=$?
@@ -74,7 +86,8 @@ agmsg_install_db_ensure_meta() {   # <install_db_path>
 # `agmsg daemon enable` go through. Never touches an existing install_id.
 # Returns 1 on any sqlite failure.
 agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
-  local db="$1" schema="$2" col present err rc
+  local db="$1" schema="$2" col present err rc busy
+  busy="$(_agmsg_install_db_busy_ms)"
   # A writer elsewhere (agmsgd's own shutdown, a concurrent `agmsg` command)
   # can hold install.db for a moment -- `cmd_stop` confirms the DB row says
   # `none` before returning, not that the OS process has fully released its
@@ -92,19 +105,19 @@ agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
   for col in node_path node_version codex_path; do
     # One scalar per column: a multi-line result carries a CR on every line
     # from native Windows sqlite3.exe, which a name comparison would miss.
-    present="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT count(*) FROM pragma_table_info('meta') WHERE name = '$col';")" || {
+    present="$(agmsg_sqlite_capture -cmd ".timeout $busy" "$db" "SELECT count(*) FROM pragma_table_info('meta') WHERE name = '$col';")" || {
       rc=$?
       echo "  ! install.db: checking for meta column $col failed (sqlite3 rc=$rc): $db" >&2
       return 1
     }
     [ "$present" = 1 ] && continue
-    err="$(sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>&1)" || {
+    err="$(sqlite3 -cmd ".timeout $busy" "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>&1)" || {
       rc=$?
       echo "  ! install.db: adding meta column $col failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
       return 1
     }
   done
-  err="$(sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>&1)" || {
+  err="$(sqlite3 -cmd ".timeout $busy" "$db" < "$schema" 2>&1)" || {
     rc=$?
     echo "  ! install.db: applying $schema failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
     return 1

@@ -266,13 +266,13 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   [ -f "$db" ] || return 0
   # The intent as the update saw it; the start below only goes ahead if it is
   # still this one, so a stop or disable during the wait is not undone.
-  intent="$(sqlite3 "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null || true)"
+  intent="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null || true)"
   case "$intent" in on\|[0-9]*) op_gen="${intent#on|}" ;; *) return 0 ;; esac
   # Tells the "stopped while enabled" warning that this gap is the update's own
   # restart. It expires by age, so a killed update cannot silence it for good.
   date +%s > "$skill/run/agmsgd-updating" 2>/dev/null || true
   while [ "$waited" -lt 25 ]; do
-    state="$(sqlite3 "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "$state" = ready ] || break
     waited=$((waited + 1))
     sleep 1
@@ -615,7 +615,7 @@ agmsg_install_update_reading_hint() {   # <skill_dir> <release version>
 # one place so the wording, and later a different default, change here only.
 agmsg_install_daemon_hint() {   # <skill_dir>
   local skill="$1" desired
-  desired="$(sqlite3 -readonly "$skill/run/install.db" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
+  desired="$(sqlite3 -cmd '.timeout 1000' -readonly "$skill/run/install.db" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
   [ "$desired" != on ] || return 0
   printf '    agmsgd (beta) delivers notices to Claude Code and Codex sessions directly. Turn it on with: bash %q daemon enable\n' "$skill/scripts/agmsg"
 }
