@@ -1277,3 +1277,21 @@ EOF
   _assert_start_result 'already running'
   [[ "$output" == *"take effect after: agmsg daemon stop, then agmsg daemon start"* ]]
 }
+
+# The record writer runs inside cmd_start under errexit: a failed write AND a
+# failed cleanup of its own temp file must still reach the warning and let
+# start continue (review on #1988). Exercised on the function alone, with mv
+# and rm both failing, under the shell options daemon.sh runs with.
+@test "daemon.sh _record_tool_path: a failed replace whose temp cleanup also fails is reported, and the caller continues" {
+  mkdir -p "$TEST_SKILL_DIR/failbin" "$TEST_SKILL_DIR/rtp/run"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/failbin/mv"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/failbin/rm"
+  chmod +x "$TEST_SKILL_DIR/failbin/mv" "$TEST_SKILL_DIR/failbin/rm"
+  sed -n '/^_tool_path_file()/p;/^_record_tool_path()/,/^}/p' "$DAEMON" > "$TEST_SKILL_DIR/rtp/fn.sh"
+  run bash -c 'set -euo pipefail; . "$1"; SKILL_DIR="$2"; SCRIPT_DIR="$3"; PATH="$4:$PATH"; _record_tool_path; echo CONTINUED' _ \
+    "$TEST_SKILL_DIR/rtp/fn.sh" "$TEST_SKILL_DIR/rtp" "$SCRIPTS" "$TEST_SKILL_DIR/failbin"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "could not replace"
+  printf '%s\n' "$output" | grep -q "could not be removed"
+  printf '%s\n' "$output" | grep -q "CONTINUED"
+}

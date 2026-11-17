@@ -756,7 +756,7 @@ _wait_for_ready() {
 # then one `command -v` builtin per CLI -- no per-driver process.
 _tool_path_file() { printf '%s/run/agmsgd-tool-path' "$SKILL_DIR"; }
 _record_tool_path() {
-  local file bins bin found dir out="" old="" tmp
+  local file bins bin found dir out="" old=""
   file="$(_tool_path_file)"
   bins="$(grep -h -E '^[[:space:]]*bin[[:space:]]*=' "$SCRIPT_DIR"/drivers/terminals/*/terminal.conf 2>/dev/null | LC_ALL=C sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/' || true)"
   for bin in $bins; do
@@ -783,18 +783,26 @@ _record_tool_path() {
   TOOL_PATH_RECORDED="$out"
   # A failed write never fails start (agmsgd runs either way), but it is
   # said, not swallowed: a seat in a herdr/tmux pane can stay unreachable.
-  local why=""
-  tmp="$file.$$"
+  # The temp file is one mktemp just created (so it is ours and a regular
+  # file); it is the only path ever removed here, and a removal that fails is
+  # reported with the rest instead of ending start under errexit.
+  local why="" tmp=""
   if ! mkdir -p "$SKILL_DIR/run" 2>/dev/null; then
     why="could not create $SKILL_DIR/run"
   elif [ -e "$file" ] && [ ! -f "$file" ]; then
     why="$file is not a regular file"
+  elif ! tmp="$(mktemp "$SKILL_DIR/run/.agmsgd-tool-path.XXXXXX" 2>/dev/null)" || [ -z "$tmp" ]; then
+    tmp=""
+    why="could not create a temporary file in $SKILL_DIR/run"
   elif ! printf '%s\n' "$out" > "$tmp" 2>/dev/null; then
     why="could not write $tmp"
-    rm -f "$tmp" 2>/dev/null
   elif ! mv -f "$tmp" "$file" 2>/dev/null; then
     why="could not replace $file"
-    rm -f "$tmp" 2>/dev/null
+  else
+    tmp=""
+  fi
+  if [ -n "$tmp" ] && [ -f "$tmp" ]; then
+    rm -f -- "$tmp" 2>/dev/null || why="$why (and $tmp could not be removed)"
   fi
   if [ -n "$why" ]; then
     echo "agmsg daemon start: the terminal CLI directories (herdr, tmux) were not recorded: $why. agmsgd started by launchd/systemd may then not find them, and seats in those panes are not reached." >&2
