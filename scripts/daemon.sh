@@ -1239,9 +1239,88 @@ cmd_disable() {
 # It changes nothing, and never enables anything.
 cmd_offer() {
   local type="${1:-}" desired node_path found
+  # agmsgd delivers to a type one of two ways: a native channel written
+  # specifically for it (claude-code, codex, grok-build -- the grok-queue
+  # channel, #1973/#1979), or terminal-poke, which reaches any OTHER type
+  # whose own type.conf has not turned poke delivery off and names a
+  # verified input_prompt_marker (the same two checks the terminal-poke
+  # channel itself applies when building its own roster -- see
+  # terminal-poke-store.mjs's NATIVE_CHANNEL_TYPES and
+  # terminal-poke-types.mjs's pokeDeliveryEnabled/hasVerifiedInputBox).
+  # Offering unavailable to every non-claude-code/codex type regardless
+  # (the previous behavior here) meant grok-build and antigravity -- both
+  # of which agmsgd already has a working delivery path for -- showed
+  # "agmsgd does not deliver to <type> sessions" even though
+  # delivery-cli.sh's own agmsgd branch is reachable and correct for them;
+  # this offer gate was the one place still out of step with it.
   case "$type" in
-    claude-code|codex) ;;
-    *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+    claude-code|codex|grok-build) ;;
+    *)
+      node_path="$(_resolve_node)" || {
+        echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
+        return 0
+      }
+      # review on #1989: a hand-built 'file://'+native-path URL breaks for
+      # any install path containing a character '#' (or other URL-special
+      # bytes) must-encode-in-a-URL, and never converts a Windows native
+      # path at all (the codex/Windows branch below handles that with its
+      # own pwd -W -- this one did not). Both failures used to surface as
+      # the GENERIC "agmsgd does not deliver to <type> sessions", silently
+      # regressing an already-supported type's offer to unavailable with a
+      # misleading reason. Node receives the plain native path as an
+      # argument and converts it itself via pathToFileURL, which handles
+      # the encoding; any import/check failure is reported by its own
+      # message, not folded into the "unsupported type" case.
+      #
+      # pathToFileURL on win32 only does the right thing with an actual
+      # Windows path (C:\... or the C:/... mixed form) -- SCRIPT_DIR and
+      # SKILL_DIR under Git Bash are MSYS paths (/c/Users/...), which
+      # win32 Node's own path rules read as drive-relative, landing on
+      # something like file:///C:/c/Users/... instead (review, round 2).
+      # installRoot needs the SAME conversion: typeConfGet's own
+      # readFileSync(join(installRoot, ...)) runs under the same native
+      # node, so an unconverted installRoot fails to read type.conf and
+      # misreports every type as having no verified input box, not merely
+      # the module import. Converted here, same way the codex/Windows
+      # branch below already does it (prefer cygpath -w; cd+pwd -W when
+      # it is absent) -- never attempted off Windows, where these paths
+      # are already native.
+      local mod_path="$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" install_root="$SKILL_DIR" _native
+      if [ "$(_os)" = windows ]; then
+        if command -v cygpath >/dev/null 2>&1; then
+          _native="$(cygpath -w "$SCRIPT_DIR/daemon/channels" 2>/dev/null)" && [ -n "$_native" ] && mod_path="$_native\\terminal-poke-types.mjs"
+          _native="$(cygpath -w "$SKILL_DIR" 2>/dev/null)" && [ -n "$_native" ] && install_root="$_native"
+        else
+          _native="$(cd "$SCRIPT_DIR/daemon/channels" 2>/dev/null && pwd -W 2>/dev/null)" && [ -n "$_native" ] && mod_path="$_native/terminal-poke-types.mjs"
+          _native="$(cd "$SKILL_DIR" 2>/dev/null && pwd -W 2>/dev/null)" && [ -n "$_native" ] && install_root="$_native"
+        fi
+      fi
+      found="$("$node_path" --input-type=module -e '
+        const { pathToFileURL } = await import("node:url");
+        const [modPath, installRoot, type] = process.argv.slice(1);
+        let mod;
+        try {
+          mod = await import(pathToFileURL(modPath).href);
+        } catch (error) {
+          console.log("import_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
+          process.exit(0);
+        }
+        try {
+          if (!mod.pokeDeliveryEnabled(installRoot, type)) { console.log("no_poke_delivery"); process.exit(0); }
+          if (!mod.hasVerifiedInputBox(installRoot, type)) { console.log("no_input_box"); process.exit(0); }
+          console.log("ok");
+        } catch (error) {
+          console.log("check_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
+        }
+      ' "$mod_path" "$install_root" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
+      case "$found" in
+        ok) ;;
+        no_poke_delivery) echo "agmsgd=unavailable reason=$type has turned off poke delivery (poke_delivery=no in its type.conf)"; return 0 ;;
+        no_input_box) echo "agmsgd=unavailable reason=$type has no verified input box yet, so agmsgd has no way to deliver to it"; return 0 ;;
+        import_failed:*|check_failed:*) echo "agmsgd=unavailable reason=${found#*:}"; return 0 ;;
+        *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+      esac
+      ;;
   esac
   desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | LC_ALL=C tr -d '\r' || true)"
   if [ "$desired" = on ]; then

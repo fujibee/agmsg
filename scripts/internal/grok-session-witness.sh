@@ -67,6 +67,85 @@ agmsg_grok_resolve_seat() {
   printf '%s\t%s\n' "$team" "$agent"
 }
 
+# agmsg_grok_resolve_seat_for_session <project> <session_id>
+#
+# Same job as agmsg_grok_resolve_seat, plus one real narrowing step for the
+# case that function gives up on: more than one grok-build registration for
+# this project. A session's own witness file already names the one
+# session_id it belongs to (written by a prior SessionStart/Stop for this
+# very session, e.g. a hook re-fire) -- if exactly one candidate's witness
+# already carries THIS session id, that candidate is a confirmed fact, not
+# a guess, and is returned. If none do (the ordinary first-event case) or
+# more than one somehow does (should not happen; treated the same as none,
+# never picked between), this is genuinely undecidable with what is known
+# right now.
+#
+# On that undecidable path, with 2+ candidates, this ALSO records why on
+# every candidate's own pending-reason file (review on #1979-followup: the
+# previous behavior was silent here -- SEAT came back empty and neither
+# hook wrote anything, so `agmsg daemon status` could not say more than
+# "not on agmsgd delivery, or no SessionStart has run" for any of them,
+# indistinguishable from a project that simply never configured grok-build
+# at all). Naming the candidates, never picking one, keeps the fix itself
+# from becoming the kind of guess it exists to rule out.
+#
+# Prints "<team>\t<agent>" and returns 0 only when resolved (uniquely
+# registered, or uniquely narrowed by session id); prints nothing, returns
+# 1, otherwise -- including the zero-registrations case, which is a
+# different situation (not ambiguous, just absent) and gets no pending
+# reason written here.
+agmsg_grok_resolve_seat_for_session() {
+  local project="$1" sid="${2:-}" pairs n pair t a wpath wsid match="" names=""
+  pairs="$("${SCRIPT_DIR:?SCRIPT_DIR is not set}/identities.sh" "$project" grok-build 2>/dev/null || true)"
+  n="$(printf '%s\n' "$pairs" | grep -c '.' || true)"
+  if [ "${n:-0}" -eq 1 ]; then
+    pair="$(printf '%s\n' "$pairs" | head -1)"
+    t="${pair%%	*}"
+    a="${pair#*	}"
+    [ -n "$t" ] && [ -n "$a" ] && [ "$t" != "$a" ] || return 1
+    printf '%s\t%s\n' "$t" "$a"
+    return 0
+  fi
+  [ "${n:-0}" -ge 2 ] || return 1
+
+  if [ -n "$sid" ]; then
+    while IFS= read -r pair; do
+      [ -n "$pair" ] || continue
+      t="${pair%%	*}"
+      a="${pair#*	}"
+      [ -n "$t" ] && [ -n "$a" ] && [ "$t" != "$a" ] || continue
+      wpath="$(agmsg_grok_witness_path "$t" "$a")"
+      [ -f "$wpath" ] || continue
+      wsid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$wpath" 2>/dev/null | head -1)"
+      [ -n "$wsid" ] && [ "$wsid" = "$sid" ] || continue
+      if [ -n "$match" ]; then
+        match=""
+        break
+      fi
+      match="$t"$'\t'"$a"
+    done <<EOF_GROK_PAIRS
+$pairs
+EOF_GROK_PAIRS
+    if [ -n "$match" ]; then
+      printf '%s\n' "$match"
+      return 0
+    fi
+  fi
+
+  names="$(printf '%s\n' "$pairs" | awk -F'\t' '{ printf "%s%s/%s", (NR>1?", ":""), $1, $2 }')"
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    t="${pair%%	*}"
+    a="${pair#*	}"
+    [ -n "$t" ] && [ -n "$a" ] || continue
+    agmsg_write_atomic "$(agmsg_grok_pending_path "$t" "$a")" \
+      "this project has more than one grok-build registration ($names) and nothing yet distinguishes which one this session belongs to; remove the extra registration to resolve" || true
+  done <<EOF_GROK_PAIRS
+$pairs
+EOF_GROK_PAIRS
+  return 1
+}
+
 # agmsg_grok_active_session_lookup <active_sessions.json> <session_id>
 #
 # Real-machine round, 2026-11-15 (NG1): a hook's own pid ($$) is the hook
