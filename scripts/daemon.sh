@@ -1186,10 +1186,33 @@ cmd_offer() {
       # the GENERIC "agmsgd does not deliver to <type> sessions", silently
       # regressing an already-supported type's offer to unavailable with a
       # misleading reason. Node receives the plain native path as an
-      # argument instead and converts it itself via pathToFileURL, which
-      # handles both encoding and (on win32) the drive-letter form; any
-      # import/check failure is reported by its own message, not folded
-      # into the "unsupported type" case.
+      # argument and converts it itself via pathToFileURL, which handles
+      # the encoding; any import/check failure is reported by its own
+      # message, not folded into the "unsupported type" case.
+      #
+      # pathToFileURL on win32 only does the right thing with an actual
+      # Windows path (C:\... or the C:/... mixed form) -- SCRIPT_DIR and
+      # SKILL_DIR under Git Bash are MSYS paths (/c/Users/...), which
+      # win32 Node's own path rules read as drive-relative, landing on
+      # something like file:///C:/c/Users/... instead (review, round 2).
+      # installRoot needs the SAME conversion: typeConfGet's own
+      # readFileSync(join(installRoot, ...)) runs under the same native
+      # node, so an unconverted installRoot fails to read type.conf and
+      # misreports every type as having no verified input box, not merely
+      # the module import. Converted here, same way the codex/Windows
+      # branch below already does it (prefer cygpath -w; cd+pwd -W when
+      # it is absent) -- never attempted off Windows, where these paths
+      # are already native.
+      local mod_path="$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" install_root="$SKILL_DIR" _native
+      if [ "$(_os)" = windows ]; then
+        if command -v cygpath >/dev/null 2>&1; then
+          _native="$(cygpath -w "$SCRIPT_DIR/daemon/channels" 2>/dev/null)" && [ -n "$_native" ] && mod_path="$_native\\terminal-poke-types.mjs"
+          _native="$(cygpath -w "$SKILL_DIR" 2>/dev/null)" && [ -n "$_native" ] && install_root="$_native"
+        else
+          _native="$(cd "$SCRIPT_DIR/daemon/channels" 2>/dev/null && pwd -W 2>/dev/null)" && [ -n "$_native" ] && mod_path="$_native/terminal-poke-types.mjs"
+          _native="$(cd "$SKILL_DIR" 2>/dev/null && pwd -W 2>/dev/null)" && [ -n "$_native" ] && install_root="$_native"
+        fi
+      fi
       found="$("$node_path" --input-type=module -e '
         const { pathToFileURL } = await import("node:url");
         const [modPath, installRoot, type] = process.argv.slice(1);
@@ -1207,7 +1230,7 @@ cmd_offer() {
         } catch (error) {
           console.log("check_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
         }
-      ' "$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" "$SKILL_DIR" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
+      ' "$mod_path" "$install_root" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
       case "$found" in
         ok) ;;
         no_poke_delivery) echo "agmsgd=unavailable reason=$type has turned off poke delivery (poke_delivery=no in its type.conf)"; return 0 ;;

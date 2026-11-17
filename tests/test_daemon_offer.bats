@@ -141,3 +141,28 @@ EOF
   run bash "$SCRIPTS/daemon.sh" offer antigravity
   [[ "$output" == "agmsgd=unavailable reason="* && "$output" != *"does not deliver to antigravity sessions"* ]]
 }
+
+# review on #1989, round 2: SCRIPT_DIR/SKILL_DIR under Git Bash are MSYS
+# paths (/c/Users/...), which win32 Node's own pathToFileURL/readFileSync
+# read as drive-relative rather than as the real path -- both the module
+# path and installRoot need converting to a real Windows path before
+# being handed to node, the same way the codex/Windows branch already
+# does it (cygpath -w preferred; cd+pwd -W when cygpath is absent, not
+# exercised here since bash's own pwd builtin cannot be stubbed via PATH).
+@test "offer: on Windows (Git Bash), both the module path and installRoot are converted via cygpath -w before reaching node" {
+  printf '#!/bin/sh\n[ "$1" = "-s" ] && { echo "MINGW64_NT-10.0"; exit 0; }\necho "MINGW64_NT-10.0"\n' > "$TEST_SKILL_DIR/bin/uname"
+  printf '#!/bin/sh\n[ "$1" = "-w" ] && printf "WINCONV:%%s\\n" "$2"\n' > "$TEST_SKILL_DIR/bin/cygpath"
+  chmod +x "$TEST_SKILL_DIR/bin/uname" "$TEST_SKILL_DIR/bin/cygpath"
+  local real_node; real_node="$(command -v node)"
+  cat > "$TEST_SKILL_DIR/bin/node" <<EOF_NODE_STUB
+#!/bin/sh
+if [ "\$1" = "--input-type=module" ]; then
+  echo "\$@" > "$TEST_SKILL_DIR/node-argv-capture.txt"
+fi
+exec "$real_node" "\$@"
+EOF_NODE_STUB
+  chmod +x "$TEST_SKILL_DIR/bin/node"
+  run env PATH="$TEST_SKILL_DIR/bin:$PATH" AGMSG_NODE="$TEST_SKILL_DIR/bin/node" bash "$SCRIPTS/daemon.sh" offer antigravity
+  grep -q 'WINCONV:.*daemon/channels' "$TEST_SKILL_DIR/node-argv-capture.txt"
+  [ "$(grep -o 'WINCONV:' "$TEST_SKILL_DIR/node-argv-capture.txt" | wc -l)" -eq 2 ]
+}
