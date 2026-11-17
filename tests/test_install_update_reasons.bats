@@ -81,7 +81,10 @@ hold_install_db() {   # [seconds]
   # Wait until the hold is real: a second writer must be refused.
   local i=0
   while sqlite3 "$SK/run/install.db" "CREATE TABLE IF NOT EXISTS probe_hold(x);" >/dev/null 2>&1; do
-    sqlite3 "$SK/run/install.db" "DROP TABLE probe_hold;" >/dev/null 2>&1
+    # A DROP that loses the race to the holder fails; that is the hold arriving, not
+    # a failure of the helper (and a leftover probe table changes nothing the tests
+    # read: every test has its own database).
+    sqlite3 "$SK/run/install.db" "DROP TABLE probe_hold;" >/dev/null 2>&1 || true
     i=$((i + 1)); [ "$i" -lt 300 ] || break
     sleep 0.1
   done
