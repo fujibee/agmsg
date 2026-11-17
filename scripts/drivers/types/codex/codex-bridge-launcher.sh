@@ -270,10 +270,32 @@ pair_registered() {  # $1 = pair, $2 = newline-separated list
   return 1
 }
 
+# Only the seat dispatcher retries its monitor's failed readiness clear.
+# Role children inherit the flag but never duplicate this work. No extra
+# resident or handoff wait is introduced; failed clears retry at most every 5s.
+MONITOR_NOTICE_DIRTY="${AGMSG_CODEX_MONITOR_NOTICE_DIRTY:-0}"
+MONITOR_NOTICE_NEXT=0
+MONITOR_NOTICE_COMPONENT=""
+monitor_notice_retry() {
+  [ "$MONITOR_NOTICE_DIRTY" = 1 ] && [ -z "$ROLE_PAIR" ] || return 0
+  [ "$SECONDS" -ge "$MONITOR_NOTICE_NEXT" ] || return 0
+  MONITOR_NOTICE_NEXT=$((SECONDS + 5))
+  if ! declare -F down_notice_clear >/dev/null 2>&1; then
+    source "$SCRIPT_DIR/../../../lib/down-notice.sh"
+  fi
+  if [ -z "$MONITOR_NOTICE_COMPONENT" ]; then
+    MONITOR_NOTICE_COMPONENT="codex-monitor.$(printf '%s' "$PROJECT_PHYS" | agmsg_sha1).$(printf '%s' "$SEAT_KEY" | agmsg_sha1)"
+  fi
+  if down_notice_clear "$MONITOR_NOTICE_COMPONENT"; then MONITOR_NOTICE_DIRTY=0; fi
+  return 0
+}
+# End monitor notice recovery
+
 POLL_STEPS=(0.3 0.6 1.2 2)
 poll_index=0
 poll_reset() { poll_index=0; }
 poll_sleep() {
+  monitor_notice_retry
   sleep "${POLL_STEPS[$poll_index]}"
   [ "$poll_index" -lt 3 ] && poll_index=$((poll_index + 1))
   return 0

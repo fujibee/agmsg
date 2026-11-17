@@ -244,6 +244,19 @@ agmsg_delivery_status() {
 
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
+  # A live launcher can be waiting for safe identity evidence rather than
+  # delivering. Show its durable recovery state alongside bridge liveness.
+  if ! declare -F down_notice_list >/dev/null 2>&1; then
+    source "${SKILL_DIR:-}/scripts/lib/down-notice.sh"
+  fi
+  local notice_component notice_state notice_since notice_reason notice_recovery notice_project_hash
+  notice_project_hash="$(printf '%s' "$(agmsg_canonical_path "$project" 2>/dev/null || printf '%s' "$project")" | agmsg_sha1)"
+  while IFS=$'\t' read -r notice_component notice_state notice_since notice_reason notice_recovery; do
+    case "$notice_component" in
+      codex-identity."$notice_project_hash".*|codex-thread."$notice_project_hash".*|codex-bridge."$notice_project_hash".*|codex-watch."$notice_project_hash".*|codex-monitor."$notice_project_hash".*)
+        printf 'Codex delivery: %s: %s (recover with: %s)\n' "$notice_state" "$notice_reason" "$notice_recovery" ;;
+    esac
+  done < <(down_notice_list)
   local pairs found=0 any_alive=0
   _AGMSG_CODEX_LOADED_PROBED=""
   _AGMSG_CODEX_LOADED_COUNT=""
