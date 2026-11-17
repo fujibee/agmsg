@@ -1022,26 +1022,22 @@ _herdr_peek_impl() {
 # prefetch op below, in its own shell, and observe -- which runs in a command
 # substitution and so cannot fill a cache itself -- reads that copy. With no
 # prefetch (any other caller) observe asks herdr itself, as it always did.
-_HERDR_AGENT_LIST_CACHE=""
+# One slot, for the socket last prefetched, holding the list already escaped for
+# SQL: a roster that alternates between sockets refetches at each switch, which is
+# what it did for every member before. (An earlier shape kept every socket's list
+# in one string and searched it with a pattern per member; that cost more user time
+# than the herdr call it saved once the list reached a few KB.)
+_HERDR_AGENT_LIST_SOCK="-"
+_HERDR_AGENT_LIST_ESC=""
 terminal_team_prefetch() {
-  local id="$1" list
+  local id="$1" sock list q="'"
   command -v herdr >/dev/null 2>&1 || return 0
   _herdr_pane_id_ok "$id" || return 0
-  _herdr_cached_agent_list "$id" >/dev/null && return 0
+  sock="$(_herdr_sock_of "$id")"
+  [ "$_HERDR_AGENT_LIST_SOCK" = "x$sock" ] && return 0
   list="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 0
-  # Records are framed by control characters herdr's JSON cannot carry (an answer
-  # may well span lines); one that somehow holds them is not cached, and observe
-  # asks for it itself.
-  case "$list" in *$'\x1d'*|*$'\x1e'*) return 0 ;; esac
-  _HERDR_AGENT_LIST_CACHE="$_HERDR_AGENT_LIST_CACHE"$'\x1e'"$(_herdr_sock_of "$id")"$'\x1d'"$list"
-}
-
-_herdr_cached_agent_list() {   # <id> -> the prefetched list for this id's socket, or rc 1
-  local mark rest
-  mark=$'\x1e'"$(_herdr_sock_of "$1")"$'\x1d'
-  case "$_HERDR_AGENT_LIST_CACHE" in *"$mark"*) ;; *) return 1 ;; esac
-  rest="${_HERDR_AGENT_LIST_CACHE#*"$mark"}"
-  printf '%s' "${rest%%$'\x1e'*}"
+  _HERDR_AGENT_LIST_ESC="${list//$q/$q$q}"
+  _HERDR_AGENT_LIST_SOCK="x$sock"
 }
 
 terminal_team_observe() {
@@ -1050,9 +1046,13 @@ terminal_team_observe() {
   _herdr_pane_id_ok "$id" || return 13
   bare="$(_herdr_bare_of "$id")"
   pane_json="$(_herdr_cli "$id" pane get "$bare" 2>/dev/null)" || return 10
-  agents_json="$(_herdr_cached_agent_list "$id")" || agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
   pesc="${pane_json//$q/$q$q}"
-  aesc="${agents_json//$q/$q$q}"
+  if [ "$_HERDR_AGENT_LIST_SOCK" = "x$(_herdr_sock_of "$id")" ]; then
+    aesc="$_HERDR_AGENT_LIST_ESC"
+  else
+    agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
+    aesc="${agents_json//$q/$q$q}"
+  fi
   # Two different facts were collapsed into one value here, and the one this
   # exists to repair travelled the ambiguous half. The agent list was already
   # fetched successfully above (`|| return 10`), so reaching this point means the

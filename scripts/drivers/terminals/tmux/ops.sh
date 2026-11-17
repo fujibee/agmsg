@@ -31,23 +31,22 @@ terminal_describe() {
 # for it once per roster through the optional prefetch op, in its own shell (the
 # location read below runs in a command substitution and cannot keep a cache);
 # with no prefetch, terminal_where asks tmux itself, as it always did.
-_TMUX_PANE_LIST_CACHE=""
+_TMUX_PANE_LIST_SOCK="-"
+_TMUX_PANE_LIST=""
 terminal_team_prefetch() {
-  local id="$1" list
+  local id="$1" sock list
   command -v tmux >/dev/null 2>&1 || return 0
   case "$(_tmux_bare_of "$id")" in %*) : ;; *) return 0 ;; esac
-  _tmux_cached_pane_list "$id" >/dev/null && return 0
+  sock="$(_tmux_sock_of "$id")"
+  [ "$_TMUX_PANE_LIST_SOCK" = "x$sock" ] && return 0
   list="$(_tmux_do "$id" list-panes -a -F '#{pane_id}|#{window_id}' 2>/dev/null)" || return 0
-  case "$list" in *$'\x1d'*|*$'\x1e'*) return 0 ;; esac
-  _TMUX_PANE_LIST_CACHE="$_TMUX_PANE_LIST_CACHE"$'\x1e'"$(_tmux_sock_of "$id")"$'\x1d'"$list"
+  _TMUX_PANE_LIST="$list"
+  _TMUX_PANE_LIST_SOCK="x$sock"
 }
 
 _tmux_cached_pane_list() {   # <id> -> the prefetched listing for this id's server, or rc 1
-  local mark rest
-  mark=$'\x1e'"$(_tmux_sock_of "$1")"$'\x1d'
-  case "$_TMUX_PANE_LIST_CACHE" in *"$mark"*) ;; *) return 1 ;; esac
-  rest="${_TMUX_PANE_LIST_CACHE#*"$mark"}"
-  printf '%s' "${rest%%$'\x1e'*}"
+  [ "$_TMUX_PANE_LIST_SOCK" = "x$(_tmux_sock_of "$1")" ] || return 1
+  printf '%s' "$_TMUX_PANE_LIST"
 }
 
 # READ op: print the window containing <id>. This answers WHERE only and never
