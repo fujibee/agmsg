@@ -88,12 +88,33 @@ hold_install_db() {   # <seconds>
   has "(exit status 1)"
 }
 
-@test "install.db held for a short while: the update waits for the writer and goes through" {
-  hold_install_db 2
-  update
+# The helpers themselves, called straight after the hold is confirmed: with no wait
+# they fail at once (so removing the .timeout turns these red every time, whatever
+# the runner's speed), with it they come back only after the writer lets go.
+@test "ensure_meta waits for a writer that lets go instead of failing at once" {
+  hold_install_db 4
+  AGMSG_INSTALL_DB_BUSY_MS=15000 run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$REPO_ROOT" "$SK/run/install.db"
   [ "$status" -eq 0 ]
-  refute has "update stopped at"
-  refute has "creating the meta table failed"
+  [ -n "$output" ]
+}
+
+@test "apply_schema waits for a writer that lets go instead of failing at once" {
+  hold_install_db 4
+  AGMSG_INSTALL_DB_BUSY_MS=15000 run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_apply_schema "$2" "$1/scripts/daemon/schema.sql"' _ "$REPO_ROOT" "$SK/run/install.db"
+  [ "$status" -eq 0 ]
+}
+
+@test "the wait knob: empty, text and negative use the default; 0 is no wait; a huge number is capped" {
+  busy() { AGMSG_INSTALL_DB_BUSY_MS="$1" bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT"; }
+  [ "$(busy '')" = 5000 ]
+  [ "$(busy abc)" = 5000 ]
+  [ "$(busy -1)" = 5000 ]
+  [ "$(busy 0)" = 0 ]
+  [ "$(busy 00500)" = 500 ]
+  [ "$(busy 600001)" = 600000 ]
+  [ "$(busy 99999999999999999999)" = 600000 ]
+  [ "$(busy 2147483648)" = 600000 ]
+  [ "$(env -u AGMSG_INSTALL_DB_BUSY_MS bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT")" = 5000 ]
 }
 
 @test "install.db held, the wait is bounded by AGMSG_INSTALL_DB_BUSY_MS: the update stops near it, not after the default" {
