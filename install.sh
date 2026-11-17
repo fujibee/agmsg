@@ -824,6 +824,12 @@ agmsg_install_op_withdraw_unchanged() {
     AGMSG_INSTALL_OP_ID=""
     AGMSG_INSTALL_OP_MARKER=""
     echo "  ~ nothing was changed, so no incomplete-operation record is kept" >&2
+  elif [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    # The file is gone; only the lock check after removing it failed. Say what
+    # is true, not that the marker stays.
+    AGMSG_INSTALL_OP_ID=""
+    AGMSG_INSTALL_OP_MARKER=""
+    echo "  ~ nothing was changed, so no incomplete-operation record is kept (the lock could not be confirmed again after it was removed)" >&2
   else
     echo "  ! could not take back the incomplete-operation record $marker; it stays, and the next run needs: bash $(printf '%q' "$SCRIPT_DIR/install.sh") --cmd $(printf '%q' "$CMD_NAME") --update --recover $op_id" >&2
   fi
@@ -887,16 +893,17 @@ agmsg_install_operation_begin() {
     return 1
   fi
   agmsg_install_op_require || return 1
-  # Only an install.db that was already there counts as "nothing changed" when its
-  # meta row cannot be read or created: on an update the table and row are there, so
-  # that step writes nothing. (A fresh install.db would be a change.)
-  local install_db_existed=false
-  [ ! -f "$install_db" ] || install_db_existed=true
-  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || {
+  # Nothing has changed only if the very first statement of ensure_meta failed
+  # (status 3): a failed statement writes nothing and none ran after it. A later
+  # failure (the read of the id, the insert) comes after a CREATE that may have made
+  # the table, so the marker stays.
+  local meta_rc=0
+  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || meta_rc=$?
+  if [ "$meta_rc" -ne 0 ]; then
     echo "  ! could not read or create install.db's meta row: $install_db" >&2
-    [ "$operation_mode:$install_db_existed" != update:true ] || agmsg_install_op_withdraw_unchanged
+    [ "$operation_mode:$meta_rc" != update:3 ] || agmsg_install_op_withdraw_unchanged
     return 1
-  }
+  fi
   agmsg_install_op_require || return 1
   if [ -z "$AGMSG_INSTALL_ID" ]; then
     echo "  ! could not read or create install.db's meta row" >&2

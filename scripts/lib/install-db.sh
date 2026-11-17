@@ -62,7 +62,9 @@ _agmsg_install_db_busy_ms() {
 # row yet. An --update over an install.db that already has a meta row
 # leaves its install_id exactly as it was -- this never overwrites an
 # existing one. Prints the (possibly just-created) install_id on success;
-# prints nothing and returns 1 on any sqlite failure.
+# prints nothing and returns 1 on any sqlite failure -- except 3, which says the
+# very first statement (CREATE TABLE IF NOT EXISTS) failed, so nothing was written:
+# a statement that fails changes nothing, and no later one ran.
 agmsg_install_db_ensure_meta() {   # <install_db_path>
   local db="$1" id err rc busy
   busy="$(_agmsg_install_db_busy_ms)"
@@ -72,7 +74,7 @@ agmsg_install_db_ensure_meta() {   # <install_db_path>
     2>&1)" || {
     rc=$?
     echo "  ! install.db: creating the meta table failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
-    return 1
+    return 3
   }
   id="$(agmsg_sqlite_capture -cmd ".timeout $busy" "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
     rc=$?

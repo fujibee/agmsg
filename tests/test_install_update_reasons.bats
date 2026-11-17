@@ -272,3 +272,29 @@ marker() { printf '%s' "$SK/run/install-op-incomplete.json"; }
   refute has "nothing was changed"
   [ -f "$(marker)" ]
 }
+
+@test "stopped after ensure_meta already created the table: the marker stays" {
+  # The meta table is gone, so the CREATE that runs first makes it, and only then
+  # does the read of the install id fail. That is a change, so no marker is taken back.
+  sqlite3 "$SK/run/install.db" "DROP TABLE meta;"
+  shim_fail_on sqlite3 '*SELECT\ install_id*' 5
+  update
+  [ "$status" -eq 1 ]
+  has "reading the install id failed"
+  refute has "nothing was changed"
+  [ -f "$(marker)" ]
+}
+
+@test "a marker that was removed but whose lock re-check then failed is reported as removed, not as staying" {
+  awk '/^agmsg_install_op_withdraw_unchanged\(\) \{/,/^\}/' "$REPO_ROOT/install.sh" > "$BATS_TEST_TMPDIR/withdraw.sh"
+  [ -s "$BATS_TEST_TMPDIR/withdraw.sh" ]
+  local m="$BATS_TEST_TMPDIR/marker.json"
+  : > "$m"
+  AGMSG_INSTALL_OP_MARKER="$m" AGMSG_INSTALL_OP_ID=abc SCRIPT_DIR=/x CMD_NAME=y \
+    run bash -c 'source "$1"; agmsg_install_op_pending_remove() { rm -f "$1"; return 1; }; agmsg_install_op_withdraw_unchanged; echo "ID=[$AGMSG_INSTALL_OP_ID]"' _ "$BATS_TEST_TMPDIR/withdraw.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$m" ]
+  has "nothing was changed, so no incomplete-operation record is kept"
+  refute has "it stays"
+  has "ID=[]"
+}
