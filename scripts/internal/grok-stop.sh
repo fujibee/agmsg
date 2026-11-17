@@ -55,6 +55,10 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
       # TUI's own leader was up, or by an agmsg that could not find it)
       # gets the socket filled in here when the leader is found now.
       NEW_CONTENT="$(LC_ALL=C sed 's/"first_turn_done"[[:space:]]*:[[:space:]]*false/"first_turn_done": true/' "$WITNESS_PATH" 2>/dev/null || true)"
+      # Pending-reason handling waits for the witness commit, same order as
+      # the recovery branch below: a failed write must not leave the old
+      # empty-socket witness with no reason beside it.
+      _pending_after=""   # keep | clear | <reason to record>
       case "$NEW_CONTENT" in
         *'"leader_socket": ""'*)
           _wpid="$(printf '%s' "$NEW_CONTENT" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -1)"
@@ -62,15 +66,25 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
           if [ -n "$LEADER_SOCKET" ]; then
             _sock_json="$(printf '%s' "$LEADER_SOCKET" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g')"
             NEW_CONTENT="${NEW_CONTENT/\"leader_socket\": \"\"/\"leader_socket\": \"$_sock_json\"}"
-            rm -f "$_pending_path" 2>/dev/null || true
+            _pending_after=clear
           elif [ -n "${LEADER_SOCKET_UNKNOWN:-}" ]; then
-            agmsg_write_atomic "$_pending_path" "${LEADER_SOCKET_UNKNOWN:-}" || true
+            _pending_after="${LEADER_SOCKET_UNKNOWN:-}"
           else
-            rm -f "$_pending_path" 2>/dev/null || true
+            _pending_after=clear
           fi
           ;;
       esac
-      [ -n "$NEW_CONTENT" ] && agmsg_write_atomic "$WITNESS_PATH" "$NEW_CONTENT" || true
+      if [ -n "$NEW_CONTENT" ]; then
+        if agmsg_write_atomic "$WITNESS_PATH" "$NEW_CONTENT"; then
+          case "$_pending_after" in
+            '') ;;
+            clear) rm -f "$_pending_path" 2>/dev/null || true ;;
+            *) agmsg_write_atomic "$_pending_path" "$_pending_after" || true ;;
+          esac
+        else
+          agmsg_write_atomic "$_pending_path" "Stop found session $SESSION_ID but could not update the witness at $WITNESS_PATH" || true
+        fi
+      fi
     else
       # review on #1979, finding (1): a DIFFERENT session's own witness is
       # sitting there -- originally always left alone (a correct guard

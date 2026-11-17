@@ -237,7 +237,12 @@ agmsg_grok_leader_socket_for() {
     [ "${comm##*/}" = grok ] || continue
     if [ -r "$proc/$cpid/cmdline" ]; then
       # Exact argv, one element per line (NUL-separated in the kernel).
-      args="$(tr '\0' '\n' < "$proc/$cpid/cmdline" 2>/dev/null)" || continue
+      # A grok child whose argv cannot be read is "could not tell", never
+      # silently skipped into "no leader".
+      if ! args="$(tr '\0' '\n' < "$proc/$cpid/cmdline" 2>/dev/null)" || [ -z "$args" ]; then
+        printf 'unknown\ncould not read the arguments of grok process %s to tell whether it is the leader\n' "$cpid"
+        return 0
+      fi
       [ "$(printf '%s\n' "$args" | sed -n '2p')" = agent ] || continue
       [ "$(printf '%s\n' "$args" | sed -n '3p')" = leader ] || continue
       found_leader=1
@@ -249,7 +254,10 @@ agmsg_grok_leader_socket_for() {
 $args
 ARGV_END
     else
-      args="$(LC_ALL=C ps -p "$cpid" -o args= 2>/dev/null)" || continue
+      if ! args="$(LC_ALL=C ps -p "$cpid" -o args= 2>/dev/null)" || [ -z "$args" ]; then
+        printf 'unknown\ncould not read the arguments of grok process %s to tell whether it is the leader\n' "$cpid"
+        return 0
+      fi
       case "$args" in "$comm agent leader"|"$comm agent leader "*) ;; *) continue ;; esac
       found_leader=1
       rest="${args#"$comm agent leader"}"

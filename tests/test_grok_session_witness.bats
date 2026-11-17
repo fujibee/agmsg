@@ -539,3 +539,34 @@ _witness() { ls "$TEST_SKILL_DIR"/run/grok-seat.*.json; }
   grep -qF '"first_turn_done": true' "$f"
   [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
 }
+
+@test "grok leader lookup: the table lists a grok child but its own argv cannot be read -> 'could not tell', never 'no leader'" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  # no args.17032: `ps -p 17032 -o args=` prints nothing (the process vanished, or was not readable)
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "could not read the arguments of grok process 17032" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
+@test "grok-stop.sh: socket found but the witness update itself fails -> the reason is recorded, the old pending is not just cleared" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  : > "$TEST_SKILL_DIR/psbin/fail"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  local f; f="$(_witness)"
+  grep -qF '"leader_socket": ""' "$f"
+  rm -f "$TEST_SKILL_DIR/psbin/fail"
+  _stub_args 17032 "/usr/local/bin/grok agent leader"
+  # mv into the witness file fails; every other mv (the pending reason) still works.
+  local realmv; realmv="$(command -v mv)"
+  printf '#!/bin/sh\nfor last in "$@"; do :; done\ncase "$last" in *grok-seat.*.json) exit 1 ;; esac\nexec "%s" "$@"\n' "$realmv" > "$TEST_SKILL_DIR/psbin/mv"
+  chmod +x "$TEST_SKILL_DIR/psbin/mv"
+  _run_hook grok-stop.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$f"
+  grep -q "could not update the witness" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
