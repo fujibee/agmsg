@@ -262,17 +262,27 @@ agmsg_install_stop_daemon() {   # <skill_dir>
 }
 
 agmsg_install_restart_daemon() {   # <skill_dir>
-  local skill="$1" db="$1/run/install.db" intent op_gen state waited=0
+  local skill="$1" db="$1/run/install.db" intent op_gen state waited=0 read_rc
   [ -f "$db" ] || return 0
   # The intent as the update saw it; the start below only goes ahead if it is
   # still this one, so a stop or disable during the wait is not undone.
-  intent="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null || true)"
+  # A read that fails is not "off": say so, and leave the restart to the user
+  # (this is the same outcome as before, now with a reason; nothing new stops).
+  intent="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null)" || {
+    read_rc=$?
+    echo "  ! agmsgd: could not read its setting in $db (sqlite3 exit status $read_rc), so it was not restarted after the update. Check it with: bash $(printf '%q' "$skill/scripts/agmsg") daemon status" >&2
+    return 0
+  }
   case "$intent" in on\|[0-9]*) op_gen="${intent#on|}" ;; *) return 0 ;; esac
   # Tells the "stopped while enabled" warning that this gap is the update's own
   # restart. It expires by age, so a killed update cannot silence it for good.
   date +%s > "$skill/run/agmsgd-updating" 2>/dev/null || true
   while [ "$waited" -lt 25 ]; do
-    state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null)" || {
+      read_rc=$?
+      echo "  ! agmsgd: could not read its state in $db (sqlite3 exit status $read_rc); starting it without waiting for the old one to exit" >&2
+      break
+    }
     [ "$state" = ready ] || break
     waited=$((waited + 1))
     sleep 1
@@ -622,8 +632,13 @@ agmsg_install_update_reading_hint() {   # <skill_dir> <release version>
 # One line pointing at agmsgd, only while it is off. Never turns it on. Kept in
 # one place so the wording, and later a different default, change here only.
 agmsg_install_daemon_hint() {   # <skill_dir>
-  local skill="$1" desired
-  desired="$(sqlite3 -cmd '.timeout 1000' -readonly "$skill/run/install.db" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
+  local skill="$1" desired read_rc
+  desired="$(sqlite3 -cmd '.timeout 1000' -readonly "$skill/run/install.db" "SELECT desired FROM daemon_intent;" 2>/dev/null)" || {
+    read_rc=$?
+    # Unknown is not "off": do not point at turning it on.
+    printf '    agmsgd: its setting in %s could not be read (sqlite3 exit status %s), so no suggestion about it is made here. Check it with: bash %q daemon status\n' "$skill/run/install.db" "$read_rc" "$skill/scripts/agmsg"
+    return 0
+  }
   [ "$desired" != on ] || return 0
   printf '    agmsgd (beta) delivers notices to Claude Code and Codex sessions directly. Turn it on with: bash %q daemon enable\n' "$skill/scripts/agmsg"
 }
