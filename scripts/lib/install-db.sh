@@ -62,19 +62,23 @@ _agmsg_install_db_busy_ms() {
 # row yet. An --update over an install.db that already has a meta row
 # leaves its install_id exactly as it was -- this never overwrites an
 # existing one. Prints the (possibly just-created) install_id on success;
-# prints nothing and returns 1 on any sqlite failure -- except 3, which says the
-# very first statement (CREATE TABLE IF NOT EXISTS) failed, so nothing was written:
-# a statement that fails changes nothing, and no later one ran.
+# prints nothing and returns 1 on any sqlite failure -- except 3, which says that
+# install.db was already there before the call and its very first statement (CREATE
+# TABLE IF NOT EXISTS) failed because the file was busy or locked (sqlite3 status 5
+# or 6): nothing ran, so nothing was written. Any other failure (a full disk, a file
+# this call created, a later statement) is 1, because something may have changed.
 agmsg_install_db_ensure_meta() {   # <install_db_path>
-  local db="$1" id err rc busy
+  local db="$1" id err rc busy existed=false
   busy="$(_agmsg_install_db_busy_ms)"
+  [ ! -f "$db" ] || existed=true
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
   err="$(sqlite3 -cmd ".timeout $busy" "$db" \
     "CREATE TABLE IF NOT EXISTS meta (schema_version INTEGER NOT NULL, install_id TEXT NOT NULL);" \
     2>&1)" || {
     rc=$?
     echo "  ! install.db: creating the meta table failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
-    return 3
+    [ "$existed" = true ] && { [ "$rc" -eq 5 ] || [ "$rc" -eq 6 ]; } && return 3
+    return 1
   }
   id="$(agmsg_sqlite_capture -cmd ".timeout $busy" "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
     rc=$?

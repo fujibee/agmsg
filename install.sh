@@ -818,21 +818,26 @@ agmsg_install_write_recovery_helper() {
 # cannot be taken back it stays, with the reason. It never changes the status the
 # update stops with.
 agmsg_install_op_withdraw_unchanged() {
-  local marker="${AGMSG_INSTALL_OP_MARKER:-}" op_id="${AGMSG_INSTALL_OP_ID:-}"
+  local marker="${AGMSG_INSTALL_OP_MARKER:-}" op_id="${AGMSG_INSTALL_OP_ID:-}" remove_rc=0
   [ -n "$marker" ] && [ -n "$op_id" ] || return 0
-  if agmsg_install_op_pending_remove "$marker" "$op_id"; then
-    AGMSG_INSTALL_OP_ID=""
-    AGMSG_INSTALL_OP_MARKER=""
-    echo "  ~ nothing was changed, so no incomplete-operation record is kept" >&2
-  elif [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
-    # The file is gone; only the lock check after removing it failed. Say what
-    # is true, not that the marker stays.
-    AGMSG_INSTALL_OP_ID=""
-    AGMSG_INSTALL_OP_MARKER=""
-    echo "  ~ nothing was changed, so no incomplete-operation record is kept (the lock could not be confirmed again after it was removed)" >&2
-  else
-    echo "  ! could not take back the incomplete-operation record $marker; it stays, and the next run needs: bash $(printf '%q' "$SCRIPT_DIR/install.sh") --cmd $(printf '%q' "$CMD_NAME") --update --recover $op_id" >&2
-  fi
+  agmsg_install_op_pending_remove "$marker" "$op_id" || remove_rc=$?
+  case "$remove_rc" in
+    0)
+      AGMSG_INSTALL_OP_ID=""
+      AGMSG_INSTALL_OP_MARKER=""
+      echo "  ~ nothing was changed, so no incomplete-operation record is kept" >&2
+      ;;
+    2)
+      # pending_remove says it removed the record and only the lock check after
+      # that failed: not a guess from whether the file can be seen.
+      AGMSG_INSTALL_OP_ID=""
+      AGMSG_INSTALL_OP_MARKER=""
+      echo "  ~ nothing was changed, so no incomplete-operation record is kept (the lock could not be confirmed again after it was removed)" >&2
+      ;;
+    *)
+      echo "  ! could not take back the incomplete-operation record $marker (it may still be there, and this cannot be checked from here); if the next run refuses because of it, it needs: bash $(printf '%q' "$SCRIPT_DIR/install.sh") --cmd $(printf '%q' "$CMD_NAME") --update --recover $op_id" >&2
+      ;;
+  esac
   return 0
 }
 
