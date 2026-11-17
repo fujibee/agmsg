@@ -68,6 +68,22 @@ jobs:
       - name: Verify derived files are in sync
         run: bash scripts/release/sync-version.sh --check
 
+      # Release notes for a stable tag are the tag's own CHANGELOG.md section.
+      # A release that arrives through an integration branch is one
+      # `release: X.Y.Z` squash commit, which git-cliff skips, so notes built
+      # from commits come out missing the PRs inside it. There is no fallback
+      # to commits here: a missing or empty section fails the job with the
+      # reason (see RELEASING.md for what to do then).
+      #
+      # This runs BEFORE `npm publish`: npm versions are immutable, so a
+      # failure after publishing would leave the version public with no
+      # Release. Failing here stops the run while nothing is public yet.
+      - name: Release notes from CHANGELOG.md
+        if: ${{ !contains(steps.ver.outputs.version, '-') }}
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bash scripts/release/changelog-section.sh "$VERSION" CHANGELOG.md > RELEASE_NOTES.md
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -109,10 +125,10 @@ jobs:
           # it does not travel back with the dist-tag.
           npm publish --access public --provenance --tag "$DIST_TAG"
 
-      # Build release notes for this tag from Conventional Commits, matching
-      # the CHANGELOG.md format. `--latest` emits only the newest release's
-      # section; `--strip header` drops the file preamble.
-      - name: Generate release notes
+      # A prerelease leaves CHANGELOG.md untouched by design (see RELEASING.md),
+      # so its notes still come from the commits.
+      - name: Release notes from commits (prerelease)
+        if: ${{ contains(steps.ver.outputs.version, '-') }}
         uses: orhun/git-cliff-action@v4.8.0
         id: cliff
         with:
@@ -131,7 +147,7 @@ jobs:
             echo "Release v$VERSION already exists — skipping"
             exit 0
           fi
-          # Fall back to a minimal note if git-cliff produced nothing.
+          # Prerelease only: a stable tag never gets here with empty notes.
           if [ ! -s RELEASE_NOTES.md ]; then
             echo "Release $VERSION. See [commit history](../../commits/v$VERSION) for details." > RELEASE_NOTES.md
           fi

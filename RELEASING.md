@@ -34,7 +34,8 @@ cut that way — and the script used to refuse them outright (#679).
 
 **Prereleases skip the changelog.** A version with a prerelease suffix
 (`1.2.0-rc.4`) leaves `CHANGELOG.md` untouched; the GitHub Release notes come
-from `release.yml`'s own `git-cliff --latest`. Writing the section on an
+from `release.yml`'s own `git-cliff --latest` (the one case where notes still come from commits).
+Writing the section on an
 integration branch would later merge into `main` a section for a version `main`
 never had.
 
@@ -58,8 +59,22 @@ which:
    otherwise. npm reads nothing from the version string on its own — without
    the flag, `1.2.0-rc.4` would land on `latest` exactly like `1.2.0` and every
    `npx agmsg` would get it.
-4. Generates the release notes for the tag with git-cliff and creates a
-   GitHub Release from them.
+4. Creates a GitHub Release from the release notes. For a stable tag the notes
+   are the `[X.Y.Z]` section of `CHANGELOG.md` in the tag's tree, taken by
+   `scripts/release/changelog-section.sh` **before** `npm publish` (right after
+   the derived-files check), so a bad section stops the run while nothing is
+   public. A prerelease has no section by design and uses git-cliff.
+
+**If the run stops at "Release notes from CHANGELOG.md":** the tag's
+`CHANGELOG.md` has no `## [X.Y.Z]` section, or the section is empty. The step
+prints which. Nothing was published, and the tag's tree is fixed, so a re-run
+cannot fix it. Put the section into `CHANGELOG.md` through a PR, then delete the
+tag and push it again on the new commit:
+
+```bash
+git push origin :refs/tags/v1.0.4 && git tag -d v1.0.4
+# merge the CHANGELOG fix, then tag the new commit and push the tag
+```
 
 ### Manual steps (if you'd rather not use the script)
 
