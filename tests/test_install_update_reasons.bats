@@ -27,12 +27,19 @@ setup() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg >/dev/null 2>&1
 }
 
-# The holder (a single sqlite3 that ends by itself) is this test's own child; wait
-# for it rather than signal anything. Nothing is removed here: the runner removes
-# BATS_TEST_TMPDIR.
+# The holder (a single sqlite3 that ends by itself) is this test's own child; it is
+# released by creating a file it watches, and waited for, never signalled. Nothing is
+# removed here: the runner removes BATS_TEST_TMPDIR.
 teardown() {
+  release_install_db
+}
+
+# Let go of the hold now (a file the holder is watching) and wait for it to end.
+release_install_db() {
   if [ -n "$HOLDER_PID" ]; then
+    : > "$BATS_TEST_TMPDIR/release-hold"
     wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
   fi
 }
 
@@ -55,15 +62,29 @@ update() {
 
 has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
 
-# Another sqlite3 takes install.db's write lock and holds it for <seconds>, then
-# ends by itself (one process: BEGIN EXCLUSIVE, then a bounded sleep).
-hold_install_db() {   # <seconds>
-  sqlite3 "$SK/run/install.db" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
+# Another sqlite3 takes install.db's write lock and holds it, then ends by itself
+# (one process: BEGIN EXCLUSIVE, then a wait). With <seconds> it holds for that long;
+# with none it holds until release_install_db, so a test that needs the update to
+# meet the hold does not depend on how fast the runner is (a 120 s bound ends a test
+# that forgot to release).
+hold_install_db() {   # [seconds]
+  local wait_cmd
+  if [ -n "${1:-}" ]; then
+    wait_cmd="sleep $1"
+  else
+    wait_cmd="n=0; while [ ! -e '$BATS_TEST_TMPDIR/release-hold' ] && [ \$n -lt 1200 ]; do sleep 0.1; n=\$((n + 1)); done"
+  fi
+  # .timeout first: the readiness probe below writes too, and a holder that met it
+  # mid-write without a wait would give up at once and never hold anything.
+  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell $wait_cmd" >/dev/null 2>&1 &
   HOLDER_PID=$!
   # Wait until the hold is real: a second writer must be refused.
   local i=0
   while sqlite3 "$SK/run/install.db" "CREATE TABLE IF NOT EXISTS probe_hold(x);" >/dev/null 2>&1; do
-    sqlite3 "$SK/run/install.db" "DROP TABLE probe_hold;" >/dev/null 2>&1
+    # A DROP that loses the race to the holder fails; that is the hold arriving, not
+    # a failure of the helper (and a leftover probe table changes nothing the tests
+    # read: every test has its own database).
+    sqlite3 "$SK/run/install.db" "DROP TABLE probe_hold;" >/dev/null 2>&1 || true
     i=$((i + 1)); [ "$i" -lt 300 ] || break
     sleep 0.1
   done
@@ -77,7 +98,7 @@ hold_install_db() {   # <seconds>
 }
 
 @test "install.db held past the wait: the update names the table, sqlite's rc and the file, and still exits 1" {
-  hold_install_db 6
+  hold_install_db
   export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
@@ -120,15 +141,18 @@ hold_install_db() {   # <seconds>
   [ "$(env -u AGMSG_INSTALL_DB_BUSY_MS bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT")" = 5000 ]
 }
 
-@test "install.db held, the wait is bounded by AGMSG_INSTALL_DB_BUSY_MS: the update stops near it, not after the default" {
-  hold_install_db 8
-  export AGMSG_INSTALL_DB_BUSY_MS=500
-  local t0=$SECONDS
-  update
-  [ "$status" -eq 1 ]
-  has "creating the meta table failed"
-  # The holder lets go after 8 s; stopping earlier than that is the bound at work.
-  [ $((SECONDS - t0)) -lt 8 ]
+# The knob has to reach sqlite3. This reads what the helpers pass instead of timing a
+# call, so it does not depend on how fast the runner is.
+@test "the wait knob reaches sqlite3: every call on install.db passes .timeout with the set value, none the default" {
+  local real log="$BATS_TEST_TMPDIR/sqlite-args.log"
+  real="$(command -v sqlite3)"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$log'" "exec $real \"\$@\"" > "$SHIMS/sqlite3"
+  chmod +x "$SHIMS/sqlite3"
+  AGMSG_INSTALL_DB_BUSY_MS=700 PATH="$SHIMS:$PATH" run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2" >/dev/null && agmsg_install_db_apply_schema "$2" "$1/scripts/daemon/schema.sql"' _ "$REPO_ROOT" "$SK/run/install.db"
+  [ "$status" -eq 0 ]
+  [ -s "$log" ]
+  refute grep -q -- '.timeout 5000' "$log"
+  [ "$(grep -c -- '-cmd .timeout 700 ' "$log")" -eq "$(grep -c . "$log")" ]
 }
 
 @test "the incomplete-operation record cannot be made: mktemp failure names the step and the directory" {
@@ -191,4 +215,17 @@ hold_install_db() {   # <seconds>
   [ "$status" -eq 9 ]
   has "update stopped at: listing the built-in drivers of $SK (exit status 9)"
   refute has "file(s) backed up"
+}
+
+@test "the note is best effort: with stderr closed the update still ends with its own status and releases the lock" {
+  shim_fail_on readlink '*/run' 7
+  HOME="$FAKE_HOME" PATH="$SHIMS:$PATH" run bash -c 'exec 2>&-; exec bash "$1" --update' _ "$REPO_ROOT/install.sh"
+  [ "$status" -eq 7 ]
+  # The lock database is free again: a writer with no wait gets it at once.
+  local i=0
+  until sqlite3 "$SK/.install-op/lock.db" "BEGIN EXCLUSIVE; COMMIT;" >/dev/null 2>&1; do
+    i=$((i + 1)); [ "$i" -lt 50 ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 50 ]
 }
