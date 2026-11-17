@@ -88,7 +88,9 @@ case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_c
 . "$_agmsg_crlf_d/sqlite-crlf.sh"
 unset _agmsg_crlf_d
 
-_AGMSG_TERMINAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+_agmsg_tl_d="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_tl_d" in */*) _agmsg_tl_d="${_agmsg_tl_d%/*}" ;; *) _agmsg_tl_d=. ;; esac
+_AGMSG_TERMINAL_LIB_DIR="$(cd "$_agmsg_tl_d" 2>/dev/null && pwd)"
+unset _agmsg_tl_d
 
 # Pull in the axis-generic registry (bases + trust) if not already sourced.
 if ! declare -F agmsg_driver_bases >/dev/null 2>&1; then
@@ -130,7 +132,16 @@ EOF
 agmsg_terminal_get() {
   local name="$1" key="$2" def="${3:-}" dir line val
   dir="$(agmsg_terminal_dir "$name")" || { printf '%s\n' "$def"; return 0; }
-  line="$( { grep -E "^[[:space:]]*${key}[[:space:]]*=" "$dir/terminal.conf" 2>/dev/null || true; } | head -1)"
+  # The first line that names the key, read in this shell: the grep|head pair this
+  # replaces was two process starts per manifest key, and a roster read asks for a
+  # dozen keys per member. Same pattern (ERE), same first-match, same text.
+  line=""
+  if [ -r "$dir/terminal.conf" ]; then
+    local _l
+    while IFS= read -r _l || [ -n "$_l" ]; do
+      if [[ "$_l" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then line="$_l"; break; fi
+    done < "$dir/terminal.conf" 2>/dev/null || true
+  fi
   if [ -z "$line" ]; then
     printf '%s\n' "$def"
     return 0
@@ -215,7 +226,7 @@ EOF
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
+_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_prefetch terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
 # two sides need the same list and neither owns it: the drivers emit them, and

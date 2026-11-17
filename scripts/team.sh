@@ -227,6 +227,27 @@ _member_delivery() {
   case "$first" in mode:\ *) printf '%s' "${first#mode: }" ;; *) printf 'unknown:delivery_status_malformed' ;; esac
 }
 
+# One answer per (type, project) for the whole listing. delivery.sh status is a
+# whole script start (it sources the type registry, storage, the hook-file
+# primitives and the terminal registry before it answers) and its answer is the
+# same for every member registered under one project, so a fifty-member roster
+# started it fifty times for a few dozen distinct answers. The cache lives in a
+# variable, not a file, and is filled from the current shell: _member_delivery
+# runs in a command substitution, which would lose it.
+_DELIVERY_CACHE=""
+_DELIVERY=""
+_member_delivery_cached() {
+  local type="$1" project="$2" key rest
+  key="$type"$'\t'"$project"
+  rest="${_DELIVERY_CACHE#*$'\n'"$key"$'\x1f'}"
+  if [ "$rest" != "$_DELIVERY_CACHE" ]; then
+    _DELIVERY="${rest%%$'\n'*}"
+    return 0
+  fi
+  _DELIVERY="$(_member_delivery "$type" "$project")"
+  _DELIVERY_CACHE="$_DELIVERY_CACHE"$'\n'"$key"$'\x1f'"$_DELIVERY"
+}
+
 JSON_FIRST=1
 # A trailing, optional 21st argument: a type's own extra tool-like label
 # (see scripts/drivers/types/ext-tool/_row.sh's _ext_tool_name for the one
@@ -305,7 +326,8 @@ _member_status() {
       return 0
     fi
   fi
-  delivery="$(_member_delivery "$type" "$project")"
+  _member_delivery_cached "$type" "$project"
+  delivery="$_DELIVERY"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
     reason=terminal_support_not_loaded
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
@@ -339,6 +361,16 @@ _member_status() {
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "$delivery" "$reason" cannot
     return 0
+  fi
+  # Loaded here, in this shell, so the optional prefetch below can fill a cache the
+  # location and identity reads (each a command substitution) are then forked
+  # with. A load that fails is reported by agmsg_team_location itself, as before.
+  if agmsg_terminal_load "$terminal" >/dev/null 2>&1 \
+    && declare -F terminal_team_prefetch >/dev/null 2>&1; then
+    # An optional driver op: fetch, once, anything that is one answer for the whole
+    # terminal instance rather than one per pane (herdr's agent list, tmux's pane
+    # listing). A driver without the op is read exactly as before.
+    terminal_team_prefetch "$pane" || true
   fi
   location="$(agmsg_team_location "$terminal" "$pane")"
   IFS="$(printf '\t')" read -r terminal pane container <<EOF

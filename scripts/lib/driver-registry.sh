@@ -33,7 +33,9 @@ case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_c
 . "$_agmsg_crlf_d/sqlite-crlf.sh"
 unset _agmsg_crlf_d
 
-_AGMSG_DRIVER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+_agmsg_dl_d="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_dl_d" in */*) _agmsg_dl_d="${_agmsg_dl_d%/*}" ;; *) _agmsg_dl_d=. ;; esac
+_AGMSG_DRIVER_LIB_DIR="$(cd "$_agmsg_dl_d" 2>/dev/null && pwd)"
+unset _agmsg_dl_d
 
 if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   # shellcheck disable=SC1091

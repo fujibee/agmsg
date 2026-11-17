@@ -704,16 +704,21 @@ terminal_despawn() {
 # query that does not contain the pane is an unanswered location query, so it is
 # unknown/10 rather than a claim that the pane is gone.
 terminal_where() {
-  local id="$1" json rc=0 esc container present
+  local id="$1" json rc=0 esc container present bare out q="'" tab=$'\t'
   command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
   _herdr_pane_id_ok "$id" || { echo unsupported; return 13; }
-  json="$(_herdr_cli "$id" pane layout --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
+  bare="$(_herdr_bare_of "$id")"
+  json="$(_herdr_cli "$id" pane layout --pane "$bare" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$json" ] || { echo unknown; return 10; }
-  esc="$(printf '%s' "$json" | LC_ALL=C sed "s/'/''/g")"
-  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$(_herdr_bare_of "$id")" | LC_ALL=C sed "s/'/''/g")'" 2>/dev/null)" \
+  # One sqlite3 for both facts (was two, plus a sed for each escape): the count of
+  # panes that are this pane, and the tab. The quote doubling is the same one the
+  # sed made, done in the shell. The two come back as columns of one TAB-separated
+  # row; the container is everything after the first tab, as before.
+  esc="${json//$q/$q$q}"
+  out="$(sqlite3 -separator "$tab" :memory: "SELECT (SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '${bare//$q/$q$q}'), COALESCE(json_extract('$esc','\$.result.layout.tab_id'),'')" 2>/dev/null)" \
     || { echo unknown; return 10; }
-  container="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.layout.tab_id')" 2>/dev/null)" \
-    || { echo unknown; return 10; }
+  present="${out%%"$tab"*}"
+  container="${out#*"$tab"}"
   if [ "$present" != 1 ] || [ -z "$container" ]; then
     echo unknown
     echo "herdr: the layout answered but did not contain '$id'; pane existence must be checked separately" >&2
@@ -1012,17 +1017,42 @@ _herdr_peek_impl() {
 
 # Optional team.sh observation extension. Prints activity, visible pane label,
 # terminal agent key, and CLI terminal title as four TAB-separated fields.
+# The agent list is one answer per herdr socket, not one per pane: it names every
+# agent in the instance. team.sh asks for it once per roster through the optional
+# prefetch op below, in its own shell, and observe -- which runs in a command
+# substitution and so cannot fill a cache itself -- reads that copy. With no
+# prefetch (any other caller) observe asks herdr itself, as it always did.
+_HERDR_AGENT_LIST_CACHE=""
+terminal_team_prefetch() {
+  local id="$1" list
+  command -v herdr >/dev/null 2>&1 || return 0
+  _herdr_pane_id_ok "$id" || return 0
+  _herdr_cached_agent_list "$id" >/dev/null && return 0
+  list="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 0
+  # Records are framed by control characters herdr's JSON cannot carry (an answer
+  # may well span lines); one that somehow holds them is not cached, and observe
+  # asks for it itself.
+  case "$list" in *$'\x1d'*|*$'\x1e'*) return 0 ;; esac
+  _HERDR_AGENT_LIST_CACHE="$_HERDR_AGENT_LIST_CACHE"$'\x1e'"$(_herdr_sock_of "$id")"$'\x1d'"$list"
+}
+
+_herdr_cached_agent_list() {   # <id> -> the prefetched list for this id's socket, or rc 1
+  local mark rest
+  mark=$'\x1e'"$(_herdr_sock_of "$1")"$'\x1d'
+  case "$_HERDR_AGENT_LIST_CACHE" in *"$mark"*) ;; *) return 1 ;; esac
+  rest="${_HERDR_AGENT_LIST_CACHE#*"$mark"}"
+  printf '%s' "${rest%%$'\x1e'*}"
+}
+
 terminal_team_observe() {
-  local id="$1" pane_json agents_json pesc aesc activity label key title
+  local id="$1" pane_json agents_json pesc aesc activity label key title bare out q="'" tab=$'\t'
   command -v herdr >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
-  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
-  agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
-  pesc="$(printf '%s' "$pane_json" | LC_ALL=C sed "s/'/''/g")"
-  aesc="$(printf '%s' "$agents_json" | LC_ALL=C sed "s/'/''/g")"
-  activity="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing')" 2>/dev/null)" || return 10
-  label="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.label'),'unknown:pane_label_missing')" 2>/dev/null)" || return 10
-  title="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.terminal_title'),'unknown:terminal_title_missing')" 2>/dev/null)" || return 10
+  bare="$(_herdr_bare_of "$id")"
+  pane_json="$(_herdr_cli "$id" pane get "$bare" 2>/dev/null)" || return 10
+  agents_json="$(_herdr_cached_agent_list "$id")" || agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
+  pesc="${pane_json//$q/$q$q}"
+  aesc="${agents_json//$q/$q$q}"
   # Two different facts were collapsed into one value here, and the one this
   # exists to repair travelled the ambiguous half. The agent list was already
   # fetched successfully above (`|| return 10`), so reaching this point means the
@@ -1045,7 +1075,16 @@ terminal_team_observe() {
   #
   # The nesting does the split: the inner COALESCE fires only when a row matched,
   # the outer one only when none did.
-  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$(_herdr_bare_of "$id")" | LC_ALL=C sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
+  # All four fields in ONE sqlite3 (it was four, plus the sed each one needed), as
+  # four columns of one TAB-separated row. Each value is cut at its trailing
+  # newlines, as the command substitution that used to hold it did. A tab inside a
+  # value leaves a tab in the last column, and a newline leaves a second line; both
+  # fail the check below, as they did when the four were joined afterwards.
+  out="$(sqlite3 -separator "$tab" :memory: "SELECT rtrim(COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing'),char(10)), rtrim(COALESCE(json_extract('$pesc','\$.result.pane.label'),'unknown:pane_label_missing'),char(10)), rtrim(COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='${bare//$q/$q$q}' LIMIT 1),'unknown:pane_not_in_agent_list'),char(10)), rtrim(COALESCE(json_extract('$pesc','\$.result.pane.terminal_title'),'unknown:terminal_title_missing'),char(10))" 2>/dev/null)" || return 10
+  case "$out" in *$'\n'*|*$'\r'*) return 10 ;; esac
+  activity="${out%%"$tab"*}"; out="${out#*"$tab"}"
+  label="${out%%"$tab"*}"; out="${out#*"$tab"}"
+  key="${out%%"$tab"*}"; title="${out#*"$tab"}"
   case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
   printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
 }

@@ -1,0 +1,35 @@
+Team: bench
+
+  norec (claude-code) — /tmp/agmsg-roster-proj0   [unknown unknown:no_placement_record @unknown:no_placement_record activity=unknown:no_placement_record delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj0/.claude/settings.local.json -- this project may not be registered) identity=unverified reach=cannot:no_placement_record]
+    pane_label=unknown:no_placement_record
+    agent_key=unknown:no_placement_record
+    cli_session=unknown:no_placement_record
+  remote1 (remote) — n/a:remote_registration   [n/a:remote n/a:no_local_registration @n/a:no_local_registration activity=n/a:no_local_registration delivery=n/a:no_local_registration identity=n/a reach=cannot:remote_registration]
+  s1 (claude-code) — /tmp/agmsg-roster-proj1   [herdr w1:p1 @t1 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj1/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=a70191e1d32f64e614e4a15ce,actual=k1)
+  s10 (claude-code) — /tmp/agmsg-roster-proj2   [herdr w1:p10 @t10 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj2/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=ace59f8e8dd056f9193d72dfd,actual=k10)
+  s11 (claude-code) — /tmp/agmsg-roster-proj3   [herdr w1:p11 @t11 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj3/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=af92e7c40c8a2d4cfbfad75f5,actual=k11)
+  s12 (codex) — /tmp/agmsg-roster-proj0   [herdr w1:p12 @t12 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj0/.codex/hooks.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=aa477094c46f2e73b85cdabd7,actual=k12)
+  s2 (claude-code) — /tmp/agmsg-roster-proj2   [herdr w1:p2 @t2 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj2/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=a809bf04bf5cda49c03ac5158,actual=k2)
+herdr: the layout answered but did not contain 'w1:p3'; pane existence must be checked separately
+  s3 (codex) — /tmp/agmsg-roster-proj3   [herdr w1:p3 @unknown:location_rc_10 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj3/.codex/hooks.json -- this project may not be registered) identity=mismatch reach=unknown:location_rc_10]
+    agent_key=mismatch(expected=afbc08f3772b71d36672b32a2,actual=k3)
+  s4 (claude-code) — /tmp/agmsg-roster-proj0   [herdr w1:p4 @t4 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj0/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=ad2f94de538102533c8356ab4,actual=k4)
+  s5 (claude-code) — /tmp/agmsg-roster-proj1   [herdr w1:p5 @t5 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj1/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    pane_label=mismatch(expected=bench:s5,actual=it's:s5)
+    agent_key=mismatch(expected=ad958765f7d8ab9fd27af1c8c,actual=k5)
+  s6 (codex) — /tmp/agmsg-roster-proj2   [herdr w1:p6 @t6 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj2/.codex/hooks.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=aac40dfb0a76906d8226666e3,actual=k6)
+  s7 (claude-code) — /tmp/agmsg-roster-proj3   [herdr w1:p7 @t7 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj3/.claude/settings.local.json -- this project may not be registered) identity=unverified reach=can:peek,poke,arrange]
+    agent_key=unknown:pane_not_in_agent_list
+  s8 (claude-code) — /tmp/agmsg-roster-proj0   [herdr w1:p8 @t8 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj0/.claude/settings.local.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=a0e97681729b0fdf046f90025,actual=k8)
+  s9 (codex) — /tmp/agmsg-roster-proj1   [herdr w1:p9 @t9 activity=idle delivery=off (unrecognized: no settings file found at /tmp/agmsg-roster-proj1/.codex/hooks.json -- this project may not be registered) identity=mismatch reach=can:peek,poke,arrange]
+    agent_key=mismatch(expected=a9eb6ee8ab88cbeed3fc6cb84,actual=absent:agent_key_unset)
+
+14 member(s)

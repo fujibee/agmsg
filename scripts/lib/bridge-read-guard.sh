@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Type-neutral read reservation hook installed around storage readers.
-_AGMSG_BRIDGE_CORE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_agmsg_bg_d="${BASH_SOURCE[0]}"; case "$_agmsg_bg_d" in */*) _agmsg_bg_d="${_agmsg_bg_d%/*}" ;; *) _agmsg_bg_d=. ;; esac
+_AGMSG_BRIDGE_CORE_LIB="$(cd "$_agmsg_bg_d" && pwd)"
+unset _agmsg_bg_d
 _AGMSG_BRIDGE_SKILL_DIR="$(cd "$_AGMSG_BRIDGE_CORE_LIB/../.." && pwd)"
 
 # shellcheck disable=SC1091

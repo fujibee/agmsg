@@ -56,7 +56,9 @@ unset _agmsg_entry_dir
 if ! declare -F agmsg_validate_team_name >/dev/null 2>&1; then
   if [ -n "${BASH_SOURCE[0]:-}" ]; then
     # shellcheck disable=SC1091
-    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/validate.sh"
+    _agmsg_st_d="${BASH_SOURCE[0]}"; case "$_agmsg_st_d" in */*) _agmsg_st_d="${_agmsg_st_d%/*}" ;; *) _agmsg_st_d=. ;; esac
+    source "$(cd "$_agmsg_st_d" && pwd)/validate.sh"
+    unset _agmsg_st_d
   elif [ -n "${SKILL_DIR:-}" ]; then
     # BASH_SOURCE empty — see agmsg_storage_dir for when that happens.
     # shellcheck disable=SC1091
@@ -70,7 +72,9 @@ fi
 if ! declare -F compat_uuid7 >/dev/null 2>&1; then
   if [ -n "${BASH_SOURCE[0]:-}" ]; then
     # shellcheck disable=SC1091
-    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/compat.sh"
+    _agmsg_st_d="${BASH_SOURCE[0]}"; case "$_agmsg_st_d" in */*) _agmsg_st_d="${_agmsg_st_d%/*}" ;; *) _agmsg_st_d=. ;; esac
+    source "$(cd "$_agmsg_st_d" && pwd)/compat.sh"
+    unset _agmsg_st_d
   elif [ -n "${SKILL_DIR:-}" ]; then
     # shellcheck disable=SC1091
     source "$SKILL_DIR/scripts/lib/compat.sh"
@@ -125,7 +129,9 @@ agmsg_storage_dir() {
   fi
   local lib_dir skill_dir
   if [ -n "${BASH_SOURCE[0]:-}" ]; then
-    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _agmsg_dd_1="${BASH_SOURCE[0]}"; case "$_agmsg_dd_1" in */*) _agmsg_dd_1="${_agmsg_dd_1%/*}" ;; *) _agmsg_dd_1=. ;; esac
+    lib_dir="$(cd "$_agmsg_dd_1" && pwd)"
+    unset _agmsg_dd_1
     skill_dir="$(cd "$lib_dir/../.." && pwd)"
   elif [ -n "${SKILL_DIR:-}" ]; then
     # BASH_SOURCE empty — e.g. Claude Code sandbox runs Bash via pipe/eval
@@ -206,7 +212,9 @@ _agmsg_partition_load() {
   # going through agmsg_storage_load. Same guarded pull-in that uses.
   if ! command -v agmsg_driver_for_team >/dev/null 2>&1; then
     local _lib
-    _lib="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+    _agmsg_dd_2="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_dd_2" in */*) _agmsg_dd_2="${_agmsg_dd_2%/*}" ;; *) _agmsg_dd_2=. ;; esac
+    _lib="$(cd "$_agmsg_dd_2" 2>/dev/null && pwd)"
+    unset _agmsg_dd_2
     # shellcheck disable=SC1091
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
   fi
@@ -631,7 +639,9 @@ _agmsg_runtime_lock_resource_sql() {
 
 agmsg_storage_ensure_initialized() {
   local lib_dir init_script
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _agmsg_dd_3="${BASH_SOURCE[0]}"; case "$_agmsg_dd_3" in */*) _agmsg_dd_3="${_agmsg_dd_3%/*}" ;; *) _agmsg_dd_3=. ;; esac
+  lib_dir="$(cd "$_agmsg_dd_3" && pwd)"
+  unset _agmsg_dd_3
   init_script="$lib_dir/../internal/init-db.sh"
   AGMSG_STORAGE_PATH="$(agmsg_storage_dir)" bash "$init_script" >/dev/null
 }
@@ -686,7 +696,9 @@ agmsg_runtime_lock_release() {
 # escaper rather than reach for either (#669).
 if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   # shellcheck disable=SC1091
-  source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/sqlpath.sh"
+  _agmsg_dd_5="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_dd_5" in */*) _agmsg_dd_5="${_agmsg_dd_5%/*}" ;; *) _agmsg_dd_5=. ;; esac
+  source "$(cd "$_agmsg_dd_5" && pwd)/sqlpath.sh"
+  unset _agmsg_dd_5
 fi
 
 # Escape an arbitrary scalar for safe interpolation into a SQL string literal
@@ -741,7 +753,9 @@ agmsg_storage_load() {
   # Pull in the axis-generic registry once (its functions may not be sourced yet).
   if ! command -v agmsg_driver_bases >/dev/null 2>&1; then
     local _lib
-    _lib="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+    _agmsg_dd_4="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_dd_4" in */*) _agmsg_dd_4="${_agmsg_dd_4%/*}" ;; *) _agmsg_dd_4=. ;; esac
+    _lib="$(cd "$_agmsg_dd_4" 2>/dev/null && pwd)"
+    unset _agmsg_dd_4
     # shellcheck disable=SC1091
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
   fi
@@ -756,7 +770,9 @@ agmsg_storage_load() {
     fi
     # shellcheck disable=SC1090
     . "$file" || return 1
-    . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bridge-read-guard.sh" || return 1
+    _agmsg_dd_6="${BASH_SOURCE[0]}"; case "$_agmsg_dd_6" in */*) _agmsg_dd_6="${_agmsg_dd_6%/*}" ;; *) _agmsg_dd_6=. ;; esac
+    . "$(cd "$_agmsg_dd_6" && pwd)/bridge-read-guard.sh" || return 1
+    unset _agmsg_dd_6
     agmsg_bridge_guard_install || return 1
     _AGMSG_STORAGE_LOADED="$name"
     return 0
