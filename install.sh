@@ -270,7 +270,7 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   # (this is the same outcome as before, now with a reason; nothing new stops).
   intent="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null)" || {
     read_rc=$?
-    echo "  ! agmsgd: could not read its setting in $db (sqlite3 exit status $read_rc), so it was not restarted after the update. Check it with: bash $(printf '%q' "$skill/scripts/agmsg") daemon status" >&2
+    echo "  ! agmsgd: could not read its setting in $db (sqlite3 exit status $read_rc), so it was not restarted after the update. Check it with: bash $(printf '%q' "$skill/scripts/agmsg") daemon status" >&2 || true
     return 0
   }
   case "$intent" in on\|[0-9]*) op_gen="${intent#on|}" ;; *) return 0 ;; esac
@@ -280,7 +280,7 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   while [ "$waited" -lt 25 ]; do
     state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null)" || {
       read_rc=$?
-      echo "  ! agmsgd: could not read its state in $db (sqlite3 exit status $read_rc); starting it without waiting for the old one to exit" >&2
+      echo "  ! agmsgd: could not read its state in $db (sqlite3 exit status $read_rc); starting it without waiting for the old one to exit" >&2 || true
       break
     }
     [ "$state" = ready ] || break
@@ -636,7 +636,7 @@ agmsg_install_daemon_hint() {   # <skill_dir>
   desired="$(sqlite3 -cmd '.timeout 1000' -readonly "$skill/run/install.db" "SELECT desired FROM daemon_intent;" 2>/dev/null)" || {
     read_rc=$?
     # Unknown is not "off": do not point at turning it on.
-    printf '    agmsgd: its setting in %s could not be read (sqlite3 exit status %s), so no suggestion about it is made here. Check it with: bash %q daemon status\n' "$skill/run/install.db" "$read_rc" "$skill/scripts/agmsg"
+    printf '    agmsgd: its setting in %s could not be read (sqlite3 exit status %s), so no suggestion about it is made here. Check it with: bash %q daemon status\n' "$skill/run/install.db" "$read_rc" "$skill/scripts/agmsg" || true
     return 0
   }
   [ "$desired" != on ] || return 0

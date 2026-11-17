@@ -234,7 +234,7 @@ _agmsg_daemon_self_heal() {
   # automatic restart was skipped and why.
   gen="$(sqlite3 -cmd '.timeout 1000' -readonly "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT op_gen FROM daemon_intent;' 2>/dev/null)" || {
     gen_rc=$?
-    echo "agmsg: could not read agmsgd's setting in $_AGMSG_DAEMON_ROOT/run/install.db (sqlite3 exit status $gen_rc); the automatic restart was skipped this time" >&2
+    echo "agmsg: could not read agmsgd's setting in $_AGMSG_DAEMON_ROOT/run/install.db (sqlite3 exit status $gen_rc); the automatic restart was skipped this time" >&2 || true
     return 0
   }
   case "$gen" in ''|*[!0-9]*) return 0 ;; esac

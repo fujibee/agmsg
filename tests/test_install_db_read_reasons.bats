@@ -84,10 +84,43 @@ has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
   : > "$FAKE/scripts/daemon.sh"
   fail_sqlite_on 'daemon_intent'
   mkdir -p "$FAKE/scripts/lib"
-  cp "$REPO_ROOT"/scripts/lib/{daemon-state.sh,instance-id.sh,down-notice.sh,shquote.sh} "$FAKE/scripts/lib/"
+  # The whole lib directory: daemon-state.sh sources instance-id.sh, which sources
+  # compat.sh, and a missing one prints an error that would hide behind a green test.
+  cp -R "$REPO_ROOT"/scripts/lib/. "$FAKE/scripts/lib/"
   PATH="$SHIMS:$PATH" run bash -c 'set -u; source "$1/scripts/lib/daemon-state.sh"; _agmsg_daemon_self_heal' _ "$FAKE"
   [ "$status" -eq 0 ]
+  refute has "No such file"
   has "could not read agmsgd's setting in"
   has "(sqlite3 exit status 5)"
   has "the automatic restart was skipped this time"
+}
+
+# The diagnostics are best effort: with stderr closed (a failed write) every case ends
+# with the status and the progress it had without them.
+
+@test "restart_daemon with stderr closed: an unreadable intent still returns 0 and does not start" {
+  printf '%s\n' '#!/usr/bin/env bash' 'echo started > "$(dirname "$0")/started"' > "$FAKE/scripts/daemon.sh"
+  chmod +x "$FAKE/scripts/daemon.sh"
+  fail_sqlite_on 'daemon_intent'
+  PATH="$SHIMS:$PATH" run bash -c 'set -euo pipefail; source "$1"; exec 2>&-; agmsg_install_restart_daemon "$2"' _ "$fns" "$FAKE"
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE/scripts/started" ]
+}
+
+@test "restart_daemon with stderr closed: an unreadable state still goes on to start" {
+  printf '%s\n' '#!/usr/bin/env bash' 'echo started > "$(dirname "$0")/started"; echo "agmsg daemon start: running"' > "$FAKE/scripts/daemon.sh"
+  chmod +x "$FAKE/scripts/daemon.sh"
+  fail_sqlite_on 'daemon_owner'
+  PATH="$SHIMS:$PATH" run bash -c 'set -euo pipefail; source "$1"; exec 2>&-; agmsg_install_restart_daemon "$2"' _ "$fns" "$FAKE"
+  [ "$status" -eq 0 ]
+  [ -e "$FAKE/scripts/started" ]
+}
+
+@test "self-heal with stderr closed: an unreadable intent still returns 0" {
+  : > "$FAKE/scripts/daemon.sh"
+  fail_sqlite_on 'daemon_intent'
+  mkdir -p "$FAKE/scripts/lib"
+  cp -R "$REPO_ROOT"/scripts/lib/. "$FAKE/scripts/lib/"
+  PATH="$SHIMS:$PATH" run bash -c 'set -euo pipefail; source "$1/scripts/lib/daemon-state.sh"; exec 2>&-; _agmsg_daemon_self_heal' _ "$FAKE"
+  [ "$status" -eq 0 ]
 }
