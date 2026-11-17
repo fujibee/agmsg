@@ -527,7 +527,7 @@ terminal_team_observe() {
 # still answers correctly either way.
 terminal_team_input_ready() {
   local id="$1" expected="$2" facts in_mode pane_pid pane_tty tpgid group line line_pgid line_command first bare matched=1
-  command -v tmux >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
+  command -v tmux >/dev/null 2>&1 || { printf 'unknown:tmux_not_on_path\n'; return 2; }
   # Strip the socket for the kind test and `-t`, and route the query to the
   # server the ref names — see terminal_team_observe. Here the stakes are the
   # pane's pid and tty: reading them off another server's same-numbered pane

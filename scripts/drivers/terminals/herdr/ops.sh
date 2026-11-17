@@ -1057,7 +1057,7 @@ terminal_team_observe() {
 # the foreground process group.
 terminal_team_input_ready() {
   local id="$1" expected="$2" raw escaped kind status rc=0
-  command -v herdr >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
+  command -v herdr >/dev/null 2>&1 || { printf 'unknown:herdr_not_on_path\n'; return 2; }
   _herdr_pane_id_ok "$id" || { printf 'unknown:invalid_pane_id\n'; return 2; }
   raw="$(_herdr_cli "$id" agent get "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then

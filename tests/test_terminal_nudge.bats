@@ -233,5 +233,5 @@ EOF
   local hp; hp="$(_terminal_less_path)"
   run env PATH="$hp" bash "$SCRIPTS/internal/terminal-nudge.sh" testteam agy1 --body-file <(printf 'hi')
   [ "$status" -eq 0 ]
-  _out_has "state=unknown:terminal_unreachable"
+  _out_has "state=unknown:herdr_not_on_path"
 }

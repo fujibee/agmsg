@@ -744,6 +744,84 @@ _wait_for_ready() {
 # `start --only-if-op-gen N` is what an update uses to bring a daemon back: it
 # starts only if the intent is still the "on" at op_gen N the update saw, so a
 # stop/disable/start made by a person in the meantime is never undone.
+# The directories holding the terminal CLIs agmsgd's channels drive, as the
+# shell running this command finds them: each bundled terminal driver names
+# its CLI in terminal.conf's `bin=`. A resident manager starts agmsgd with a
+# minimal PATH (launchd: /usr/bin:/bin:/usr/sbin:/sbin) where herdr or tmux
+# from ~/.local/bin or Homebrew is not found, and every seat in such a pane
+# then goes undelivered. agmsgd appends these to its own PATH at startup
+# (scripts/daemon/tool-path.mjs). Recorded on every start, so an update (which
+# runs start) refreshes it; a CLI not found now keeps a directory recorded
+# earlier as long as that directory still exists. One grep for the manifests,
+# then one `command -v` builtin per CLI -- no per-driver process.
+_tool_path_file() { printf '%s/run/agmsgd-tool-path' "$SKILL_DIR"; }
+_record_tool_path() {
+  local file bins bin found dir out="" old=""
+  file="$(_tool_path_file)"
+  bins="$(grep -h -E '^[[:space:]]*bin[[:space:]]*=' "$SCRIPT_DIR"/drivers/terminals/*/terminal.conf 2>/dev/null | LC_ALL=C sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/' || true)"
+  for bin in $bins; do
+    case "$bin" in */*|'') continue ;; esac
+    found="$(command -v "$bin" 2>/dev/null || true)"
+    case "$found" in /*) ;; *) continue ;; esac
+    dir="${found%/*}"
+    [ -n "$dir" ] || dir=/
+    case "$dir" in *:*|*[[:cntrl:]]*) continue ;; esac
+    case ":$out:" in *":$dir:"*) continue ;; esac
+    out="${out:+$out:}$dir"
+  done
+  if [ -f "$file" ] && [ -r "$file" ]; then
+    IFS= read -r old < "$file" || true
+    local IFS=:
+    for dir in $old; do
+      case "$dir" in /*) ;; *) continue ;; esac
+      [ -d "$dir" ] || continue
+      case ":$out:" in *":$dir:"*) continue ;; esac
+      out="${out:+$out:}$dir"
+    done
+    unset IFS
+  fi
+  TOOL_PATH_RECORDED="$out"
+  # A failed write never fails start (agmsgd runs either way), but it is
+  # said, not swallowed: a seat in a herdr/tmux pane can stay unreachable.
+  # The temp file is one mktemp just created (so it is ours and a regular
+  # file); it is the only path ever removed here, and a removal that fails is
+  # reported with the rest instead of ending start under errexit.
+  local why="" tmp=""
+  if ! mkdir -p "$SKILL_DIR/run" 2>/dev/null; then
+    why="could not create $SKILL_DIR/run"
+  elif [ -e "$file" ] && [ ! -f "$file" ]; then
+    why="$file is not a regular file"
+  elif ! tmp="$(mktemp "$SKILL_DIR/run/.agmsgd-tool-path.XXXXXX" 2>/dev/null)" || [ -z "$tmp" ]; then
+    tmp=""
+    why="could not create a temporary file in $SKILL_DIR/run"
+  elif ! printf '%s\n' "$out" > "$tmp" 2>/dev/null; then
+    why="could not write $tmp"
+  elif ! mv -f "$tmp" "$file" 2>/dev/null; then
+    why="could not replace $file"
+  else
+    tmp=""
+  fi
+  if [ -n "$tmp" ] && [ -f "$tmp" ]; then
+    rm -f -- "$tmp" 2>/dev/null || why="$why (and $tmp could not be removed)"
+  fi
+  if [ -n "$why" ]; then
+    echo "agmsg daemon start: the terminal CLI directories (herdr, tmux) were not recorded: $why. agmsgd started by launchd/systemd may then not find them, and seats in those panes are not reached." >&2
+  fi
+  return 0
+}
+
+# Run after start found agmsgd already running: agmsgd applies the record only
+# when it starts, and writes what it applied to run/agmsgd-tool-path.applied.
+# A record that now differs from that is not in effect until a restart; say
+# so with the commands that actually apply it.
+_tool_path_restart_hint() {
+  local applied=""
+  [ -n "${TOOL_PATH_RECORDED+x}" ] || return 0
+  [ -r "$SKILL_DIR/run/agmsgd-tool-path.applied" ] && { IFS= read -r applied < "$SKILL_DIR/run/agmsgd-tool-path.applied" || true; }
+  [ "$applied" = "$TOOL_PATH_RECORDED" ] && return 0
+  echo "agmsg daemon start: the running agmsgd uses the terminal CLI directories it read when it started ('${applied:-none}'); the ones found now ('${TOOL_PATH_RECORDED:-none}') take effect after: agmsg daemon stop, then agmsg daemon start"
+}
+
 cmd_start() {
   local only_gen=""
   case "${1:-}" in
@@ -754,12 +832,16 @@ cmd_start() {
     *) _usage; return 2 ;;
   esac
   _ensure_install_db_schema
+  # Before the "already running" answer below: a running agmsgd picks the
+  # record up at its next start (the update path restarts it).
+  [ "$(_os)" = windows ] || _record_tool_path
   local state
   state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
   local running_node
   running_node="$(_resolve_node 2>/dev/null || true)"
   if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
+    _tool_path_restart_hint
     _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status
