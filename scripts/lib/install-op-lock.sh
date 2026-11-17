@@ -480,13 +480,16 @@ agmsg_install_op_pending_set_state() {
   agmsg_install_op_require
 }
 
+# Status: 0 removed and the lock still held; 2 removed, and then the lock could not
+# be confirmed again; 1 anything else, including every stop before the removal and a
+# removal that failed (the record may still be there).
 agmsg_install_op_pending_remove() {
   local path="$1" op_id="$2"
   agmsg_install_op_require || return 1
   agmsg_install_op_pending_validate "$path" || return 1
   [ "$AGMSG_INSTALL_OP_PENDING_ID" = "$op_id" ] || return 1
   rm -f "$path" || return 1
-  agmsg_install_op_require
+  agmsg_install_op_require || return 2
 }
 
 agmsg_install_op_pending_complete() {

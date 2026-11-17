@@ -27,12 +27,19 @@ setup() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg >/dev/null 2>&1
 }
 
-# The holder (a single sqlite3 that ends by itself) is this test's own child; wait
-# for it rather than signal anything. Nothing is removed here: the runner removes
-# BATS_TEST_TMPDIR.
+# The holder (a single sqlite3 that ends by itself) is this test's own child; it is
+# released by creating a file it watches, and waited for, never signalled. Nothing is
+# removed here: the runner removes BATS_TEST_TMPDIR.
 teardown() {
+  release_install_db
+}
+
+# Let go of the hold now (a file the holder is watching) and wait for it to end.
+release_install_db() {
   if [ -n "$HOLDER_PID" ]; then
+    : > "$BATS_TEST_TMPDIR/release-hold"
     wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
   fi
 }
 
@@ -55,17 +62,29 @@ update() {
 
 has() { printf '%s\n' "$output" | grep -qF -- "$1"; }
 
-# Another sqlite3 takes install.db's write lock and holds it for <seconds>, then
-# ends by itself (one process: BEGIN EXCLUSIVE, then a bounded sleep).
-hold_install_db() {   # <seconds>
+# Another sqlite3 takes install.db's write lock and holds it, then ends by itself
+# (one process: BEGIN EXCLUSIVE, then a wait). With <seconds> it holds for that long;
+# with none it holds until release_install_db, so a test that needs the update to
+# meet the hold does not depend on how fast the runner is (a 120 s bound ends a test
+# that forgot to release).
+hold_install_db() {   # [seconds]
+  local wait_cmd
+  if [ -n "${1:-}" ]; then
+    wait_cmd="sleep $1"
+  else
+    wait_cmd="n=0; while [ ! -e '$BATS_TEST_TMPDIR/release-hold' ] && [ \$n -lt 1200 ]; do sleep 0.1; n=\$((n + 1)); done"
+  fi
   # .timeout first: the readiness probe below writes too, and a holder that met it
   # mid-write without a wait would give up at once and never hold anything.
-  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell sleep $1" >/dev/null 2>&1 &
+  sqlite3 "$SK/run/install.db" ".timeout 10000" "BEGIN EXCLUSIVE;" ".shell $wait_cmd" >/dev/null 2>&1 &
   HOLDER_PID=$!
   # Wait until the hold is real: a second writer must be refused.
   local i=0
   while sqlite3 "$SK/run/install.db" "CREATE TABLE IF NOT EXISTS probe_hold(x);" >/dev/null 2>&1; do
-    sqlite3 "$SK/run/install.db" "DROP TABLE probe_hold;" >/dev/null 2>&1
+    # A DROP that loses the race to the holder fails; that is the hold arriving, not
+    # a failure of the helper (and a leftover probe table changes nothing the tests
+    # read: every test has its own database).
+    sqlite3 "$SK/run/install.db" "DROP TABLE probe_hold;" >/dev/null 2>&1 || true
     i=$((i + 1)); [ "$i" -lt 300 ] || break
     sleep 0.1
   done
@@ -79,7 +98,7 @@ hold_install_db() {   # <seconds>
 }
 
 @test "install.db held past the wait: the update names the table, sqlite's rc and the file, and still exits 1" {
-  hold_install_db 6
+  hold_install_db
   export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
@@ -122,15 +141,14 @@ hold_install_db() {   # <seconds>
   [ "$(env -u AGMSG_INSTALL_DB_BUSY_MS bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT")" = 5000 ]
 }
 
-@test "install.db held, the wait is bounded by AGMSG_INSTALL_DB_BUSY_MS: the update stops near it, not after the default" {
-  hold_install_db 8
-  export AGMSG_INSTALL_DB_BUSY_MS=500
+@test "install.db held, the wait is bounded by AGMSG_INSTALL_DB_BUSY_MS: ensure_meta gives up near it, not after the default" {
+  hold_install_db
   local t0=$SECONDS
-  update
-  [ "$status" -eq 1 ]
-  has "creating the meta table failed"
-  # The holder lets go after 8 s; stopping earlier than that is the bound at work.
-  [ $((SECONDS - t0)) -lt 8 ]
+  AGMSG_INSTALL_DB_BUSY_MS=700 run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$REPO_ROOT" "$SK/run/install.db"
+  # 3 = install.db was there and its first statement failed on a busy file.
+  [ "$status" -eq 3 ]
+  # The default wait is 5 s; a call that gave up in under 4 s used the knob.
+  [ $((SECONDS - t0)) -lt 4 ]
 }
 
 @test "the incomplete-operation record cannot be made: mktemp failure names the step and the directory" {
@@ -216,16 +234,15 @@ hold_install_db() {   # <seconds>
 marker() { printf '%s' "$SK/run/install-op-incomplete.json"; }
 
 @test "stopped before any change: the marker is taken back, and the next update goes through" {
-  hold_install_db 6
+  hold_install_db
   export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
   has "update stopped at: starting the install operation"
   has "nothing was changed, so no incomplete-operation record is kept"
   [ ! -e "$(marker)" ]
-  # The holder lets go on its own; its own wait, not a signal.
-  wait "$HOLDER_PID" || true
-  HOLDER_PID=""
+  # Let go now (the holder watches a file), then wait for it to end.
+  release_install_db
   unset AGMSG_INSTALL_DB_BUSY_MS
   update
   [ "$status" -eq 0 ]
@@ -252,7 +269,7 @@ marker() { printf '%s' "$SK/run/install-op-incomplete.json"; }
   [ -f "$(marker)" ]
   cp "$(marker)" "$BATS_TEST_TMPDIR/marker.before"
   rm -f "$SHIMS/mv"
-  hold_install_db 6
+  hold_install_db
   export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
@@ -262,13 +279,117 @@ marker() { printf '%s' "$SK/run/install-op-incomplete.json"; }
 }
 
 @test "a marker that cannot be taken back stays, with the reason and the recovery command" {
-  hold_install_db 6
+  hold_install_db
   export AGMSG_INSTALL_DB_BUSY_MS=300
   shim_fail_on rm '*install-op-incomplete.json'
   update
   [ "$status" -eq 1 ]
   has "could not take back the incomplete-operation record"
+  has "it may still be there"
   has "--update --recover "
+  refute has "nothing was changed"
+  [ -f "$(marker)" ]
+}
+
+@test "stopped after ensure_meta already created the table: the marker stays" {
+  # The meta table is gone, so the CREATE that runs first makes it, and only then
+  # does the read of the install id fail. That is a change, so no marker is taken back.
+  sqlite3 "$SK/run/install.db" "DROP TABLE meta;"
+  shim_fail_on sqlite3 '*SELECT\ install_id*' 5
+  update
+  [ "$status" -eq 1 ]
+  has "reading the install id failed"
+  refute has "nothing was changed"
+  [ -f "$(marker)" ]
+}
+
+# What the withdraw says follows the status pending_remove returns, not a look at
+# whether the file can be seen (a parent directory that cannot be searched hides a
+# file that is still there).
+withdraw_with() {   # <stub body for agmsg_install_op_pending_remove> <marker path>
+  awk '/^agmsg_install_op_withdraw_unchanged\(\) \{/,/^\}/' "$REPO_ROOT/install.sh" > "$BATS_TEST_TMPDIR/withdraw.sh"
+  [ -s "$BATS_TEST_TMPDIR/withdraw.sh" ]
+  AGMSG_INSTALL_OP_MARKER="$2" AGMSG_INSTALL_OP_ID=abc SCRIPT_DIR=/x CMD_NAME=y \
+    run bash -c 'source "$1"; agmsg_install_op_pending_remove() { '"$3"'; }; agmsg_install_op_withdraw_unchanged; echo "ID=[$AGMSG_INSTALL_OP_ID]"' _ "$BATS_TEST_TMPDIR/withdraw.sh"
+}
+
+@test "withdraw: status 0 (removed) says nothing was changed and clears the operation id" {
+  local m="$BATS_TEST_TMPDIR/marker.json"; : > "$m"
+  withdraw_with x "$m" 'rm -f "$1"; return 0'
+  [ "$status" -eq 0 ]
+  has "nothing was changed, so no incomplete-operation record is kept"
+  refute has "lock could not be confirmed"
+  has "ID=[]"
+}
+
+@test "withdraw: status 2 (removed, then the lock re-check failed) says so, and clears the operation id" {
+  local m="$BATS_TEST_TMPDIR/marker.json"; : > "$m"
+  withdraw_with x "$m" 'rm -f "$1"; return 2'
+  [ "$status" -eq 0 ]
+  has "nothing was changed, so no incomplete-operation record is kept (the lock could not be confirmed again after it was removed)"
+  has "ID=[]"
+}
+
+@test "withdraw: status 1 says the record may still be there and names the recovery command, even if the file cannot be seen" {
+  local m="$BATS_TEST_TMPDIR/no-such-dir/marker.json"
+  withdraw_with x "$m" 'return 1'
+  [ "$status" -eq 0 ]
+  has "could not take back the incomplete-operation record"
+  has "it may still be there"
+  has "--update --recover abc"
+  refute has "nothing was changed"
+  has "ID=[abc]"
+}
+
+@test "pending_remove: removed, then the lock re-check fails: status 2 and the file is gone" {
+  local m="$BATS_TEST_TMPDIR/marker.json"; : > "$m"
+  run bash -c '. "$1/scripts/lib/install-op-lock.sh"
+    n=0
+    agmsg_install_op_require() { n=$((n + 1)); [ "$n" -lt 2 ]; }
+    agmsg_install_op_pending_validate() { AGMSG_INSTALL_OP_PENDING_ID=abc; }
+    agmsg_install_op_pending_remove "$2" abc' _ "$REPO_ROOT" "$m"
+  [ "$status" -eq 2 ]
+  [ ! -e "$m" ]
+}
+
+@test "pending_remove: a first lock check that fails removes nothing: status 1 and the file stays" {
+  local m="$BATS_TEST_TMPDIR/marker.json"; : > "$m"
+  run bash -c '. "$1/scripts/lib/install-op-lock.sh"
+    agmsg_install_op_require() { return 1; }
+    agmsg_install_op_pending_remove "$2" abc' _ "$REPO_ROOT" "$m"
+  [ "$status" -eq 1 ]
+  [ -f "$m" ]
+}
+
+# ensure_meta says "nothing was written" (status 3) only for an install.db that was
+# there before the call, when its first statement failed on a busy or locked file.
+ensure_meta_rc() {   # <sqlite3 status the first statement fails with> <db path>
+  shim_fail_on sqlite3 '*CREATE\ TABLE\ IF\ NOT\ EXISTS\ meta*' "$1"
+  PATH="$SHIMS:$PATH" run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$REPO_ROOT" "$2"
+}
+
+@test "ensure_meta: an existing install.db whose first statement is busy (5) or locked (6) returns 3" {
+  ensure_meta_rc 5 "$SK/run/install.db"
+  [ "$status" -eq 3 ]
+  ensure_meta_rc 6 "$SK/run/install.db"
+  [ "$status" -eq 3 ]
+}
+
+@test "ensure_meta: a full disk (13) on an existing install.db returns 1, not 3" {
+  ensure_meta_rc 13 "$SK/run/install.db"
+  [ "$status" -eq 1 ]
+}
+
+@test "ensure_meta: busy on an install.db that was not there returns 1, not 3" {
+  ensure_meta_rc 5 "$BATS_TEST_TMPDIR/fresh/install.db"
+  [ "$status" -eq 1 ]
+}
+
+@test "a full disk on the first statement of an existing install.db: the update stops and the marker stays" {
+  shim_fail_on sqlite3 '*CREATE\ TABLE\ IF\ NOT\ EXISTS\ meta*' 13
+  update
+  [ "$status" -eq 1 ]
+  has "creating the meta table failed"
   refute has "nothing was changed"
   [ -f "$(marker)" ]
 }
