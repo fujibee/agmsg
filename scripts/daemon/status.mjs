@@ -472,7 +472,7 @@ function formatGrokQueueSeats(inventory, all) {
     // seat whose hooks genuinely tried and came up empty (Linux
     // real-machine round, 2026-11-15) -- an actionable finding, not a
     // routine, expected-forever absence.
-    const pendingWitnessReason = /^(?:not_registered_for_agmsgd|process_gone|witness_malformed|witness_incomplete):(.+)$/.exec(seat.reason ?? "")?.[1];
+    const pendingWitnessReason = /^(?:not_registered_for_agmsgd|process_gone|witness_malformed|witness_incomplete|leader_socket_unknown):(.+)$/.exec(seat.reason ?? "")?.[1];
     if (pendingWitnessReason) {
       lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: ${pendingWitnessReason}`);
       continue;

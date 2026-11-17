@@ -50,9 +50,41 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
   if [ -f "$WITNESS_PATH" ]; then
     _wsid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WITNESS_PATH" 2>/dev/null | head -1)"
     if [ "$_wsid" = "$SESSION_ID" ]; then
-      # The witness this Stop event is actually for: advance it.
+      # The witness this Stop event is actually for: advance it. A witness
+      # written with an empty leader_socket (SessionStart ran before the
+      # TUI's own leader was up, or by an agmsg that could not find it)
+      # gets the socket filled in here when the leader is found now.
       NEW_CONTENT="$(LC_ALL=C sed 's/"first_turn_done"[[:space:]]*:[[:space:]]*false/"first_turn_done": true/' "$WITNESS_PATH" 2>/dev/null || true)"
-      [ -n "$NEW_CONTENT" ] && agmsg_write_atomic "$WITNESS_PATH" "$NEW_CONTENT" || true
+      # Pending-reason handling waits for the witness commit, same order as
+      # the recovery branch below: a failed write must not leave the old
+      # empty-socket witness with no reason beside it.
+      _pending_after=""   # keep | clear | <reason to record>
+      case "$NEW_CONTENT" in
+        *'"leader_socket": ""'*)
+          _wpid="$(printf '%s' "$NEW_CONTENT" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -1)"
+          agmsg_grok_resolve_leader_socket "$_wpid" "${GROK_HOME:-$HOME/.grok}"
+          if [ -n "$LEADER_SOCKET" ]; then
+            _sock_json="$(printf '%s' "$LEADER_SOCKET" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g')"
+            NEW_CONTENT="${NEW_CONTENT/\"leader_socket\": \"\"/\"leader_socket\": \"$_sock_json\"}"
+            _pending_after=clear
+          elif [ -n "${LEADER_SOCKET_UNKNOWN:-}" ]; then
+            _pending_after="${LEADER_SOCKET_UNKNOWN:-}"
+          else
+            _pending_after=clear
+          fi
+          ;;
+      esac
+      if [ -n "$NEW_CONTENT" ]; then
+        if agmsg_write_atomic "$WITNESS_PATH" "$NEW_CONTENT"; then
+          case "$_pending_after" in
+            '') ;;
+            clear) rm -f "$_pending_path" 2>/dev/null || true ;;
+            *) agmsg_write_atomic "$_pending_path" "$_pending_after" || true ;;
+          esac
+        else
+          agmsg_write_atomic "$_pending_path" "Stop found session $SESSION_ID but could not update the witness at $WITNESS_PATH" || true
+        fi
+      fi
     else
       # review on #1979, finding (1): a DIFFERENT session's own witness is
       # sitting there -- originally always left alone (a correct guard
@@ -83,13 +115,14 @@ if [ -n "$SEAT" ] && [ -n "$SESSION_ID" ]; then
     # SessionStart) creates the witness directly as already past its
     # first turn -- this Stop event IS that first turn's own end.
     GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
-    LEADER_SOCKET="${GROK_LEADER_SOCKET:-}"
+    LEADER_SOCKET=""
     _session_obj="$(agmsg_grok_active_session_lookup "$GROK_HOME_RESOLVED/active_sessions.json" "$SESSION_ID" 2>/dev/null || true)"
     _pid=""
     if [ -n "$_session_obj" ]; then
       _pid="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
     fi
     if [ -n "$_pid" ]; then
+      agmsg_grok_resolve_leader_socket "$_pid" "$GROK_HOME_RESOLVED"
       _pid_start="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
       _cwd="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
       if [ -z "$_cwd" ]; then
@@ -118,7 +151,11 @@ EOF
       # the original bug this file exists to fix. Only clear it on an
       # actual write success; record why otherwise.
       if agmsg_write_atomic "$WITNESS_PATH" "$_content"; then
-        rm -f "$_pending_path" 2>/dev/null || true
+        if [ -n "${LEADER_SOCKET_UNKNOWN:-}" ]; then
+          agmsg_write_atomic "$_pending_path" "${LEADER_SOCKET_UNKNOWN:-}" || true
+        else
+          rm -f "$_pending_path" 2>/dev/null || true
+        fi
       else
         agmsg_write_atomic "$_pending_path" "Stop found session $SESSION_ID but could not write the witness to $WITNESS_PATH" || true
       fi

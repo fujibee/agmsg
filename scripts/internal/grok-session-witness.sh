@@ -186,6 +186,122 @@ EOF_GROK_PAIRS
 # (review on #1979, finding (1)): only when that witness's own recorded
 # owner is definitely gone, never merely because this Stop event's
 # session_id does not match it.
+# agmsg_grok_leader_socket_for <session_pid> <grok_home>
+#
+# The leader socket a grok-build session is attached to, for the witness.
+# Prints two lines: a verdict, then a value.
+#   found    <socket>   the socket to record
+#   none     (empty)    confirmed: this session has no leader of its own
+#   unknown  <reason>   could not tell -- the caller records the reason
+#
+# GROK_LEADER_SOCKET first: a TUI started with --leader/--leader-socket
+# passes it to its hooks. A TUI that reached leader mode through
+# `use_leader = true` in config.toml (what `agmsg delivery agmsgd` writes)
+# passes nothing (measured live on Grok Build 1.0.77: neither the TUI, its
+# leader nor the hook shell carries it), so without this every such seat's
+# witness recorded an empty socket and agmsgd never delivered to it.
+#
+# Otherwise: the leader the TUI itself started is its own child. One
+# `ps -A -o pid= -o ppid= -o comm=` lists children by separate pid/ppid
+# columns with the command last (so a path with spaces stays whole); a
+# child counts only when its executable's basename is exactly `grok` and
+# its argv begins exactly `agent leader` -- read from /proc/<pid>/cmdline
+# where it exists (NUL-separated, exact), else from `ps -o args=` checked
+# against the exact executable path ps gave as its prefix. Its
+# --leader-socket is read without splitting on spaces: from cmdline, or on
+# macOS from the leader's own bound unix socket (`lsof -U`, one call, only
+# when the flag is present). With no flag, grok's default
+# GROK_HOME/leader.sock.
+#
+# A plain, non-leader TUI is "none": the witness keeps an empty socket, so
+# agmsgd still never connects to (or has a leader started for) a seat that
+# is not in leader mode. A leader started by an earlier TUI and shared by
+# this one is not this session's child and is not adopted. Not on Windows.
+agmsg_grok_leader_socket_for() {
+  local pid="$1" grok_home="$2" table rc=0 cpid cppid comm args rest sock="" found_leader=0 arg prev="" lsof_out
+  # The /proc root, overridable only so a test can stand in for it on any OS.
+  local proc="${AGMSG_GROK_PROC_DIR:-/proc}"
+  if [ -n "${GROK_LEADER_SOCKET:-}" ]; then
+    printf 'found\n%s\n' "$GROK_LEADER_SOCKET"
+    return 0
+  fi
+  case "$pid" in ''|*[!0-9]*) printf 'unknown\nno session process id to look for its leader under\n'; return 0 ;; esac
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|UCRT*|CLANG*) printf 'unknown\nfinding grok'"'"'s leader by its process is not supported on Windows; start grok with --leader-socket\n'; return 0 ;; esac
+  table="$(LC_ALL=C ps -A -o pid= -o ppid= -o comm= 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$table" ]; then
+    printf 'unknown\ncould not list processes to find grok'"'"'s leader (ps exit %s: %s)\n' "$rc" "$(printf '%s\n' "$table" | head -1)"
+    return 0
+  fi
+  while read -r cpid cppid comm; do
+    [ "$cppid" = "$pid" ] || continue
+    [ "${comm##*/}" = grok ] || continue
+    if [ -r "$proc/$cpid/cmdline" ]; then
+      # Exact argv, one element per line (NUL-separated in the kernel).
+      # A grok child whose argv cannot be read is "could not tell", never
+      # silently skipped into "no leader".
+      if ! args="$(tr '\0' '\n' < "$proc/$cpid/cmdline" 2>/dev/null)" || [ -z "$args" ]; then
+        printf 'unknown\ncould not read the arguments of grok process %s to tell whether it is the leader\n' "$cpid"
+        return 0
+      fi
+      [ "$(printf '%s\n' "$args" | sed -n '2p')" = agent ] || continue
+      [ "$(printf '%s\n' "$args" | sed -n '3p')" = leader ] || continue
+      found_leader=1
+      while IFS= read -r arg; do
+        case "$prev" in --leader-socket) sock="$arg"; break ;; esac
+        case "$arg" in --leader-socket=*) sock="${arg#--leader-socket=}"; break ;; esac
+        prev="$arg"
+      done <<ARGV_END
+$args
+ARGV_END
+    else
+      if ! args="$(LC_ALL=C ps -p "$cpid" -o args= 2>/dev/null)" || [ -z "$args" ]; then
+        printf 'unknown\ncould not read the arguments of grok process %s to tell whether it is the leader\n' "$cpid"
+        return 0
+      fi
+      case "$args" in "$comm agent leader"|"$comm agent leader "*) ;; *) continue ;; esac
+      found_leader=1
+      rest="${args#"$comm agent leader"}"
+      case " $rest " in
+        *" --leader-socket "*|*" --leader-socket="*)
+          lsof_out="$(lsof -a -p "$cpid" -U -Fn 2>/dev/null | sed -n 's/^n\(\/.*\)$/\1/p' | sort -u)" || lsof_out=""
+          if [ -n "$lsof_out" ] && [ "$(printf '%s\n' "$lsof_out" | grep -c .)" -eq 1 ]; then
+            sock="$lsof_out"
+          else
+            printf 'unknown\ngrok'"'"'s leader (pid %s) was started with --leader-socket, but its socket path could not be read\n' "$cpid"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+    break
+  done <<TABLE_END
+$table
+TABLE_END
+  if [ "$found_leader" -eq 0 ]; then
+    printf 'none\n\n'
+    return 0
+  fi
+  [ -n "$sock" ] || sock="$grok_home/leader.sock"
+  printf 'found\n%s\n' "$sock"
+}
+
+# Reads agmsg_grok_leader_socket_for's two lines into LEADER_SOCKET and
+# LEADER_SOCKET_UNKNOWN (the reason, when the verdict was "unknown").
+# shellcheck disable=SC2034  # LEADER_SOCKET / LEADER_SOCKET_UNKNOWN are read by the sourcing hook
+agmsg_grok_resolve_leader_socket() {   # <session_pid> <grok_home>
+  local out verdict value
+  out="$(agmsg_grok_leader_socket_for "$1" "$2" 2>/dev/null || true)"
+  verdict="$(printf '%s\n' "$out" | sed -n '1p')"
+  value="$(printf '%s\n' "$out" | sed -n '2p')"
+  LEADER_SOCKET=""
+  LEADER_SOCKET_UNKNOWN=""
+  case "$verdict" in
+    found) LEADER_SOCKET="$value" ;;
+    none) ;;
+    *) LEADER_SOCKET_UNKNOWN="${value:-could not tell whether grok has a leader for this session}" ;;
+  esac
+}
+
 agmsg_grok_pid_definitely_dead() {
   local pid="$1"
   _agmsg_pid_valid "$pid" || return 1

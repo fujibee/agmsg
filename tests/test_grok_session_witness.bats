@@ -394,3 +394,179 @@ EOF
   grep -q '"first_turn_done": false' "$f"
   grep -q '"session_id": "sess2"' "$f"
 }
+
+# use_leader = true (what `agmsg delivery agmsgd` writes) puts the TUI in
+# leader mode without passing GROK_LEADER_SOCKET to its hooks (measured live,
+# Grok Build 1.0.77). The leader the TUI starts is its own child, so the hooks
+# find it from the process table. A stub ps stands in for that table:
+#   ps -A -o pid= -o ppid= -o comm=   -> psbin/table  ("<pid> <ppid> <comm>")
+#   ps -p <pid> -o args=              -> psbin/args.<pid>
+# and a stub lsof prints psbin/lsof.<pid>. AGMSG_GROK_PROC_DIR points at a
+# fake /proc (or at nothing, for the macOS-style ps args path).
+_stub_ps() {   # <table lines...>
+  local d="$TEST_SKILL_DIR/psbin"
+  mkdir -p "$d"
+  printf '%s\n' "$@" > "$d/table"
+  cat > "$d/ps" <<'PS'
+#!/bin/sh
+d="$(dirname "$0")"
+[ -f "$d/fail" ] && { echo "ps: Operation not permitted" >&2; exit 1; }
+if [ "$1" = "-p" ]; then cat "$d/args.$2" 2>/dev/null; exit 0; fi
+cat "$d/table"
+PS
+  cat > "$d/lsof" <<'LS'
+#!/bin/sh
+d="$(dirname "$0")"
+for a in "$@"; do case "$prev" in -p) pid="$a" ;; esac; prev="$a"; done
+cat "$d/lsof.$pid" 2>/dev/null
+LS
+  chmod +x "$d/ps" "$d/lsof"
+}
+_stub_args() { printf '%s\n' "$2" > "$TEST_SKILL_DIR/psbin/args.$1"; }
+_stub_lsof() { printf '%s\n' "p$1" "f9" "n$2" > "$TEST_SKILL_DIR/psbin/lsof.$1"; }
+_stub_cmdline() {   # <pid> <argv...>  (a fake /proc/<pid>/cmdline, NUL-separated)
+  local pid="$1"; shift
+  mkdir -p "$TEST_SKILL_DIR/fakeproc/$pid"
+  printf '%s\0' "$@" > "$TEST_SKILL_DIR/fakeproc/$pid/cmdline"
+}
+# Runs a hook with the stubs first on PATH and GROK_LEADER_SOCKET unset.
+_run_hook() {   # <hook> <proc dir>
+  run env -u GROK_LEADER_SOCKET PATH="$TEST_SKILL_DIR/psbin:$PATH" AGMSG_GROK_PROC_DIR="$2" GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/$1" "$TEST_PROJECT" <<<'{}'
+}
+_witness() { ls "$TEST_SKILL_DIR"/run/grok-seat.*.json; }
+
+@test "grok leader lookup (ps args): the session's own child 'grok agent leader' -> grok's default socket under GROK_HOME" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "    1     0 /sbin/launchd" "17032 17031 /Users/x/.grok/bin/grok"
+  _stub_args 17032 "/Users/x/.grok/bin/grok agent leader --no-exit-on-disconnect --relay-on-demand"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$(_witness)"
+}
+
+@test "grok leader lookup (ps args): an executable path with spaces is matched whole" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /Users/First Last/.grok/bin/grok"
+  _stub_args 17032 "/Users/First Last/.grok/bin/grok agent leader --relay-on-demand"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$(_witness)"
+}
+
+@test "grok leader lookup (ps args): a --leader-socket with spaces is read whole from the leader's own bound socket" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent leader --leader-socket /tmp/my project/leader.sock"
+  _stub_lsof 17032 "/tmp/my project/leader.sock"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  grep -qF '"leader_socket": "/tmp/my project/leader.sock"' "$(_witness)"
+}
+
+@test "grok leader lookup (ps args): --leader-socket=<path> form, same" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent leader --leader-socket=/tmp/my project/l.sock"
+  _stub_lsof 17032 "/tmp/my project/l.sock"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  grep -qF '"leader_socket": "/tmp/my project/l.sock"' "$(_witness)"
+}
+
+@test "grok leader lookup (/proc cmdline): exact argv, socket with spaces in both flag forms" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 grok"
+  _stub_cmdline 17032 "/home/a b/.grok/bin/grok" agent leader --leader-socket "/tmp/my project/leader.sock"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/fakeproc"
+  grep -qF '"leader_socket": "/tmp/my project/leader.sock"' "$(_witness)"
+  rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
+  _stub_cmdline 17032 "/home/a b/.grok/bin/grok" agent leader "--leader-socket=/tmp/x y/l.sock"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/fakeproc"
+  grep -qF '"leader_socket": "/tmp/x y/l.sock"' "$(_witness)"
+}
+
+@test "grok leader lookup: not grok (notgrok), not a leader (agent stdio), and a leader that is not this session's child are none of them adopted" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/notgrok" "17033 17031 /usr/local/bin/grok" "17034     1 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/notgrok agent leader"
+  _stub_args 17033 "/usr/local/bin/grok agent stdio --leader"
+  _stub_args 17034 "/usr/local/bin/grok agent leader --no-exit-on-disconnect"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  # Confirmed no leader of its own: no pending reason, so status says "not in leader mode".
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+}
+
+@test "grok leader lookup: ps failing is 'could not tell', recorded as the pending reason -- never folded into 'no leader'" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  : > "$TEST_SKILL_DIR/psbin/fail"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "could not list processes to find grok's leader (ps exit 1: ps: Operation not permitted)" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
+@test "grok leader lookup: --leader-socket given but its path cannot be read is 'could not tell'" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent leader --leader-socket /tmp/s.sock"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "was started with --leader-socket, but its socket path could not be read" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
+@test "grok-stop.sh: fills an empty leader_socket in this session's witness once the session's own leader is found, and clears the pending reason" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  : > "$TEST_SKILL_DIR/psbin/fail"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  local f; f="$(_witness)"
+  grep -qF '"leader_socket": ""' "$f"
+  ls "$TEST_SKILL_DIR"/run/grok-seat-pending.* >/dev/null
+  rm -f "$TEST_SKILL_DIR/psbin/fail"
+  _stub_args 17032 "/usr/local/bin/grok agent leader --relay-on-demand"
+  _run_hook grok-stop.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$f"
+  grep -qF '"first_turn_done": true' "$f"
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+}
+
+@test "grok leader lookup: the table lists a grok child but its own argv cannot be read -> 'could not tell', never 'no leader'" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  # no args.17032: `ps -p 17032 -o args=` prints nothing (the process vanished, or was not readable)
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "could not read the arguments of grok process 17032" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
+@test "grok-stop.sh: socket found but the witness update itself fails -> the reason is recorded, the old pending is not just cleared" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  : > "$TEST_SKILL_DIR/psbin/fail"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  local f; f="$(_witness)"
+  grep -qF '"leader_socket": ""' "$f"
+  rm -f "$TEST_SKILL_DIR/psbin/fail"
+  _stub_args 17032 "/usr/local/bin/grok agent leader"
+  # mv into the witness file fails; every other mv (the pending reason) still works.
+  local realmv; realmv="$(command -v mv)"
+  printf '#!/bin/sh\nfor last in "$@"; do :; done\ncase "$last" in *grok-seat.*.json) exit 1 ;; esac\nexec "%s" "$@"\n' "$realmv" > "$TEST_SKILL_DIR/psbin/mv"
+  chmod +x "$TEST_SKILL_DIR/psbin/mv"
+  _run_hook grok-stop.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$f"
+  grep -q "could not update the witness" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}

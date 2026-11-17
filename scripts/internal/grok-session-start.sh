@@ -42,7 +42,12 @@ GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
 # process there against the user's REAL ~/.grok (real-machine review, finding
 # A, 2026-11-15). An empty leader_socket here is what makes the channel's own
 # in-process connect probe refuse to spawn anything for this seat at all.
-LEADER_SOCKET="${GROK_LEADER_SOCKET:-}"
+# Resolved below, once this session's own pid is known: GROK_LEADER_SOCKET
+# when the TUI passed it, else the socket of the leader the TUI itself
+# started (agmsg_grok_leader_socket_for), else empty. LEADER_SOCKET_UNKNOWN
+# carries the reason when that could not be told either way.
+LEADER_SOCKET=""
+LEADER_SOCKET_UNKNOWN=""
 
 # NG1 (2026-11-15 real-machine round): $$ is this HOOK SCRIPT's own pid,
 # which is gone the instant this script exits -- the channel's pid-liveness
@@ -81,6 +86,7 @@ while [ "$_lookup_attempt" -lt "$_lookup_retries" ]; do
   [ "$_lookup_attempt" -lt "$_lookup_retries" ] && sleep "$_lookup_interval"
 done
 if [ -n "$_session_obj" ] && [ -n "$PID" ]; then
+  agmsg_grok_resolve_leader_socket "$PID" "$GROK_HOME_RESOLVED"
   PID_START="$(printf '%s' "$_session_obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
   CWD="$(printf '%s' "$_session_obj" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi
@@ -171,7 +177,13 @@ EOF
 # something rather than reverting to an unexplained absence.
 _pending_path="$(agmsg_grok_pending_path "$TEAM" "$AGENT")"
 if agmsg_write_atomic "$WITNESS_PATH" "$CONTENT"; then
-  rm -f "$_pending_path" 2>/dev/null || true
+  # An empty socket the lookup could not vouch for is not "not in leader
+  # mode": keep why, for status to show instead of that reason.
+  if [ -n "$LEADER_SOCKET_UNKNOWN" ]; then
+    agmsg_write_atomic "$_pending_path" "$LEADER_SOCKET_UNKNOWN" || true
+  else
+    rm -f "$_pending_path" 2>/dev/null || true
+  fi
 else
   agmsg_write_atomic "$_pending_path" "SessionStart found session $SESSION_ID but could not write the witness to $WITNESS_PATH" || true
 fi
