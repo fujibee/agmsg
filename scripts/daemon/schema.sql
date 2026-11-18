@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS daemon_owner (
   executor_pid INTEGER,
   executor_started_at TEXT,
   executor_boot_id TEXT,
+  executor_pid_ns TEXT,
   socket TEXT,
   version TEXT,
   started_at TEXT,

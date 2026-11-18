@@ -14,7 +14,7 @@ import {
   stopNormally,
   takeOwnership,
 } from "../scripts/daemon/owner.mjs";
-import { bootId, isAlive } from "../scripts/daemon/executor.mjs";
+import { bootId, isAlive, pidNamespace } from "../scripts/daemon/executor.mjs";
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "agmsgd-owner-test-"));
@@ -150,6 +150,34 @@ for (const missingExecutor of [false, true]) {
     }
   });
 }
+
+test("takeOwnership records the executor's pid namespace and does not take over from another one", () => {
+  const { dir, db } = freshDb();
+  try {
+    const first = takeOwnership(db, { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "v1" });
+    markReady(db, first.gen);
+    const recorded = db.prepare("SELECT executor_pid_ns FROM daemon_owner").get().executor_pid_ns;
+    assert.equal(recorded, pidNamespace(), "the claim records this executor's pid namespace");
+
+    if (process.platform === "linux") {
+      // An owner recorded in another pid namespace (a launcher seen from inside a
+      // sandbox, or the reverse) cannot be checked: never take over from it.
+      const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+      db.prepare("UPDATE daemon_owner SET executor_pid = ?, executor_boot_id = ?, executor_pid_ns = ? WHERE gen = ?").run(
+        dead.pid,
+        bootId(),
+        "pid:[4026500000]",
+        first.gen,
+      );
+      const second = takeOwnership(db, { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "v2" });
+      assert.equal(second.ok, false);
+      assert.match(second.reason, /cannot be determined/);
+    }
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("takeOwnership refuses when the intent changed since the launcher observed it", () => {
   const { dir, db } = freshDb();
