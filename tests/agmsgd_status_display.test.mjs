@@ -206,6 +206,7 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
       { seat: JSON.stringify(['test', 'g2']), state: 'unaddressable', reason: 'no_pane' },
       { seat: JSON.stringify(['test', 'g3']), state: 'unaddressable', reason: 'pane_gone' },
       { seat: JSON.stringify(['test', 'g4']), state: 'unaddressable', reason: 'no_verified_input_box:gemini' },
+      { seat: JSON.stringify(['test', 'g5']), state: 'pending', reason: 'unknown:herdr_not_on_path' },
     ],
   });
   const text = await runAsync(f.root);
@@ -216,6 +217,9 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   // scope decision (2026-11-14): a type with no real-pane-verified
   // input-box marker is shown, never silently hidden, even without --all.
   assert.match(text, /Terminal poke test\/g4: agmsgd cannot reach this seat yet: no verified input-box check for type gemini/);
+  // A resident agmsgd whose PATH lacks the pane's terminal CLI says which
+  // CLI and what to do, not a generic "could not be checked".
+  assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(from a shell where herdr works, run agmsg daemon stop, then agmsg daemon start\)/);
 });
 
 test('grok queue seats are shown with the channel\'s own status vocabulary', async t => {
@@ -227,6 +231,7 @@ test('grok queue seats are shown with the channel\'s own status vocabulary', asy
       { seat: JSON.stringify(['test', 'ga3']), state: 'unaddressable', reason: 'process_gone' },
       { seat: JSON.stringify(['test', 'ga4']), state: 'unaddressable', reason: 'first_turn_pending' },
       { seat: JSON.stringify(['test', 'ga5']), state: 'pending', reason: 'nudge_timeout' },
+      { seat: JSON.stringify(['test', 'ga6']), state: 'unaddressable', reason: "leader_socket_unknown:could not list processes to find grok's leader (ps exit 1: denied)" },
     ],
   });
   const text = await runAsync(f.root);
@@ -235,6 +240,8 @@ test('grok queue seats are shown with the channel\'s own status vocabulary', asy
   assert.match(text, /Grok queue test\/ga3: session process gone/);
   assert.match(text, /Grok queue test\/ga4: pending: first turn not complete yet/);
   assert.match(text, /Grok queue test\/ga5: pending: nudge_timeout/);
+  // An empty socket the hooks could not vouch for shows why, not "not in leader mode".
+  assert.match(text, /Grok queue test\/ga6: agmsgd cannot reach this seat: could not list processes to find grok's leader \(ps exit 1: denied\)/);
 });
 
 test('grok queue seats not yet on agmsgd delivery are hidden without --all, shown with it', async t => {
