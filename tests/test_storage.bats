@@ -167,11 +167,13 @@ SH
 @test "send: concurrent fan-out to N recipients all land (no SQLITE_BUSY)" {
   # Without a busy_timeout, concurrent writers fail with SQLITE_BUSY(5) and the
   # sends silently drop. With the wrapper they wait and all land. See #114.
-  local x
+  local x pids=()
   for x in 1 2 3 4 5 6 7 8 9 10; do
     ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) 3>&- &
+    pids+=("$!")
   done
-  wait
+  # Wait for these PIDs only: a bare `wait` would also wait for bats' timeout watcher.
+  for x in "${pids[@]}"; do wait "$x" || true; done
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
     "SELECT COUNT(*) FROM events WHERE type='message_sent' AND from_agent='leader';")
@@ -183,11 +185,13 @@ SH
   # doesn't exist yet. Without idempotent init + INSERT retry, the losers abort
   # on "already exists" / "no such table" and drop. See #114.
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/freshstore"
-  local x
+  local x pids=()
   for x in 1 2 3 4 5 6 7 8 9 10; do
     ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) 3>&- &
+    pids+=("$!")
   done
-  wait
+  # Wait for these PIDs only: a bare `wait` would also wait for bats' timeout watcher.
+  for x in "${pids[@]}"; do wait "$x" || true; done
   local n
   n=$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "SELECT COUNT(*) FROM events WHERE type='message_sent';")
   [ "$n" -eq 10 ]

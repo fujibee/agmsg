@@ -1781,7 +1781,9 @@ _boot_line_executable() {
   # app-server is up. What the inner run's teardown does -- or does not do -- is
   # then read off the process list, by the temp dir the inner test reported.
   local marker="$TEST_SKILL_DIR/inner-dir" inner
-  run env AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH="$marker" \
+  # The inner bats must not inherit BATS_TEST_TIMEOUT: its own timeout watcher
+  # (a background sleep) would keep this test's output pipe open until it ran out.
+  run env -u BATS_TEST_TIMEOUT AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH="$marker" \
     bats -f "reaches the real binary WITH --remote \\(argv" "$BATS_TEST_DIRNAME/test_spawn.bats"
   grep -q '^not ok 1 ' <<<"$output"
   inner="$(cat "$marker")"

@@ -177,15 +177,17 @@ collect_engine_pids() {
   export AGMSG_NODE="$(write_fake_node)"
   source "$SCRIPTS/lib/sync-autostart.sh"
 
-  local i outdir="$TEST_SKILL_DIR/race"
+  local i outdir="$TEST_SKILL_DIR/race" pids=()
   mkdir -p "$outdir"
   for i in 1 2 3 4 5; do
     (
       agmsg_sync_autostart "$SCRIPTS/remote.sh" testteam > "$outdir/$i.out" 2>&1
       printf '%s\n' "$?" > "$outdir/$i.rc"
     ) &
+    pids+=("$!")
   done
-  wait
+  # Wait for these PIDs only: a bare `wait` would also wait for bats' timeout watcher.
+  for i in "${pids[@]}"; do wait "$i" || true; done
   collect_engine_pids
 
   # Every caller succeeded — the losers of the race are not failures.
