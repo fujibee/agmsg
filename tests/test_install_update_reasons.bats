@@ -97,8 +97,9 @@ hold_install_db() {   # [seconds]
   refute has "update stopped at"
 }
 
-@test "install.db held by another writer: the update names the table, sqlite's rc and the file, and still exits 1" {
+@test "install.db held past the wait: the update names the table, sqlite's rc and the file, and still exits 1" {
   hold_install_db
+  export AGMSG_INSTALL_DB_BUSY_MS=300
   update
   [ "$status" -eq 1 ]
   has "install.db: creating the meta table failed (sqlite3 rc="
@@ -106,6 +107,52 @@ hold_install_db() {   # [seconds]
   has "could not read or create install.db's meta row"
   has "update stopped at: starting the install operation"
   has "(exit status 1)"
+}
+
+# The helpers themselves, called straight after the hold is confirmed: with no wait
+# they fail at once (so removing the .timeout turns these red every time, whatever
+# the runner's speed), with it they come back only after the writer lets go.
+@test "ensure_meta waits for a writer that lets go instead of failing at once" {
+  hold_install_db 4
+  AGMSG_INSTALL_DB_BUSY_MS=15000 run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$REPO_ROOT" "$SK/run/install.db"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "apply_schema waits for a writer that lets go instead of failing at once" {
+  hold_install_db 4
+  AGMSG_INSTALL_DB_BUSY_MS=15000 run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_apply_schema "$2" "$1/scripts/daemon/schema.sql"' _ "$REPO_ROOT" "$SK/run/install.db"
+  [ "$status" -eq 0 ]
+}
+
+@test "the wait knob: empty, text and negative use the default; 0 is no wait; a huge number is capped" {
+  busy() { AGMSG_INSTALL_DB_BUSY_MS="$1" bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT"; }
+  [ "$(busy '')" = 5000 ]
+  [ "$(busy abc)" = 5000 ]
+  [ "$(busy -1)" = 5000 ]
+  [ "$(busy 0)" = 0 ]
+  [ "$(busy 00500)" = 500 ]
+  [ "$(busy 0000000000)" = 0 ]
+  [ "$(busy 0000000500)" = 500 ]
+  [ "$(busy 000000000000000000000500)" = 500 ]
+  [ "$(busy 600001)" = 600000 ]
+  [ "$(busy 99999999999999999999)" = 600000 ]
+  [ "$(busy 2147483648)" = 600000 ]
+  [ "$(env -u AGMSG_INSTALL_DB_BUSY_MS bash -c '. "$1/scripts/lib/install-db.sh"; _agmsg_install_db_busy_ms' _ "$REPO_ROOT")" = 5000 ]
+}
+
+# The knob has to reach sqlite3. This reads what the helpers pass instead of timing a
+# call, so it does not depend on how fast the runner is.
+@test "the wait knob reaches sqlite3: every call on install.db passes .timeout with the set value, none the default" {
+  local real log="$BATS_TEST_TMPDIR/sqlite-args.log"
+  real="$(command -v sqlite3)"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$log'" "exec $real \"\$@\"" > "$SHIMS/sqlite3"
+  chmod +x "$SHIMS/sqlite3"
+  AGMSG_INSTALL_DB_BUSY_MS=700 PATH="$SHIMS:$PATH" run bash -c '. "$1/scripts/lib/install-db.sh"; agmsg_install_db_ensure_meta "$2" >/dev/null && agmsg_install_db_apply_schema "$2" "$1/scripts/daemon/schema.sql"' _ "$REPO_ROOT" "$SK/run/install.db"
+  [ "$status" -eq 0 ]
+  [ -s "$log" ]
+  refute grep -q -- '.timeout 5000' "$log"
+  [ "$(grep -c -- '-cmd .timeout 700 ' "$log")" -eq "$(grep -c . "$log")" ]
 }
 
 @test "the incomplete-operation record cannot be made: mktemp failure names the step and the directory" {
