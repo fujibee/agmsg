@@ -421,6 +421,11 @@ function formatTerminalPokeSeats(inventory, all) {
       lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat (no native channel, no pane)`);
       continue;
     }
+    const ambiguous = /^ambiguous:(.+)$/.exec(seat.reason ?? "")?.[1];
+    if (ambiguous) {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat: more than one pane runs this seat's agent in its project (${ambiguous}); run an agmsg command from the right one so it is recorded`);
+      continue;
+    }
     if (seat.reason === "pane_gone") {
       lines.push(`Terminal poke ${label}: pane gone`);
       continue;

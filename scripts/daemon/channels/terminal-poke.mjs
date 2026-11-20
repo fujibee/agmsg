@@ -109,10 +109,13 @@ function createSendAttempt(db, { seat, upTo, expectedOpGen }, now) {
 // class A -- nothing here stops agmsg, it only defers one write). A seat no
 // channel can reach at all is shown in status (§10 class D), never silently
 // dropped.
-function classifyNudgeState(state) {
+function classifyNudgeState(state, detail = "") {
   if (state === "notified") return { confirm: true, seatState: "notified", reason: "" };
   if (state === "no_pane") return { confirm: false, seatState: "unaddressable", reason: "no_pane" };
   if (state === "pane_gone") return { confirm: false, seatState: "unaddressable", reason: "pane_gone" };
+  // More than one pane runs this seat's agent in its project: nothing is typed into
+  // any of them, and the candidates are shown.
+  if (state === "ambiguous") return { confirm: false, seatState: "unaddressable", reason: `ambiguous:${detail}` };
   if (state.startsWith("not_ready:")) return { confirm: false, seatState: "pending", reason: state };
   if (state.startsWith("unknown:")) return { confirm: false, seatState: "pending", reason: state };
   if (state === "busy") return { confirm: false, seatState: "pending", reason: "input_in_progress" };
@@ -253,6 +256,8 @@ export function createTerminalPokeChannel({
         scriptPath: nudgeScriptPath,
         team,
         agent,
+        type,
+        project,
         body: nudgeText(type, cmdName),
         timeoutMs,
         env,
@@ -269,7 +274,7 @@ export function createTerminalPokeChannel({
       return;
     }
 
-    const classified = classifyNudgeState(result.state);
+    const classified = classifyNudgeState(result.state, result.reason);
     if (classified.confirm) {
       setQueueState(db, id, "confirmed");
       pendingBackoff.delete(key);

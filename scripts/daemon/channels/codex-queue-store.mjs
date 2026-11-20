@@ -199,6 +199,15 @@ export function readUnreadSnapshot(db, team, agent, encodedCursor = "") {
   const cursor = cursorValue(encodedCursor);
   db.exec("BEGIN;");
   try {
+    // A store nothing has ever been sent through has no tables yet (they are
+    // created by the first message). That is "no unread messages", not a store
+    // that cannot be read. A store with only some of the tables is still an
+    // error below.
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('events','messages','read_cursors')").all();
+    if (tables.length === 0) {
+      db.exec("COMMIT;");
+      return { state: "ok", unread: false, upTo: JSON.stringify({ eventSeq: 0, legacyId: 0 }) };
+    }
     const tip = db.prepare("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'), 0) AS n").get().n;
     const legacyTip = db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM messages WHERE team = ?").get(team).n;
     const eventUnread = db.prepare(`

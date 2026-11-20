@@ -48,6 +48,8 @@ export async function runTerminalNudge({
   scriptPath,
   team,
   agent,
+  type,
+  project,
   body,
   timeoutMs,
   signal,
@@ -73,7 +75,9 @@ export async function runTerminalNudge({
   let child;
   try {
     child = spawnProcess("bash", [scriptPath, team, agent, "--body-file", bodyPath], {
-      env,
+      // The seat's own type and project let the script find a pane for a seat with no
+      // placement record (see lib/pane-discovery.sh).
+      env: { ...env, AGMSG_NUDGE_TYPE: type ?? "", AGMSG_NUDGE_PROJECT: project ?? "" },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: process.platform !== "win32",

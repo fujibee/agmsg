@@ -115,6 +115,24 @@ test('no_pane and pane_gone are reported as unaddressable, never silently droppe
   await channel.stop();
 });
 
+test('ambiguous panes are unaddressable, with the candidates as the reason, and nothing is confirmed', async (t) => {
+  const { channel, state, db } = channelFixture(t);
+  state.nudgeState = 'ambiguous';
+  state.nudgeReason = 'herdr:/s:w1:p1 herdr:/s:w1:p2';
+  await channel.pollOnce();
+  assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'ambiguous:herdr:/s:w1:p1 herdr:/s:w1:p2' });
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_terminal_poke_queue WHERE state='confirmed'").get().n, 0);
+  await channel.stop();
+});
+
+test('a store nothing was ever sent through is "no unread", not an unreadable store', () => {
+  const store = new DatabaseSync(':memory:');
+  assert.deepEqual(readUnreadSnapshot(store, 'test', 'agy1'), { state: 'ok', unread: false, upTo: JSON.stringify({ eventSeq: 0, legacyId: 0 }) });
+  // Only some of the tables: still an error, not a guessed "no unread".
+  store.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, team TEXT, to_agent TEXT, read_at TEXT)');
+  assert.throws(() => readUnreadSnapshot(store, 'test', 'agy1'), /no such table/);
+});
+
 test('a project that opted out of agmsgd delivery gets no nudge', async (t) => {
   const root = temporaryDirectory(t);
   const { channel, state } = channelFixture(t, {
