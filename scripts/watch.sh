@@ -1386,6 +1386,43 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 # the seat with no delivery path whatsoever -- exactly the failure this whole
 # check exists to avoid, just reached from the other direction (disable
 # in-flight instead of a dead executor).
+# 0 when run/delivery-choice (the single source of truth, 2026-11-20
+# decision) EXPLICITLY records this (type, project)'s mode as agmsgd --
+# reads agmsg_delivery_choice_get (daemon-state.sh) directly, the same
+# record delivery.sh status and team.sh also read. Deliberately does NOT
+# check whether agmsgd is actually alive or reachable for this seat (no
+# AGMSGD_HEALTH, no terminal-poke check): once a project has explicitly
+# chosen agmsgd, the chosen mode alone decides whether THIS watcher should
+# run.
+#
+# A project that never recorded a choice is also treated as agmsgd here
+# while agmsgd is desired on (agmsg_type_mode_is_agmsgd's own no-choice
+# fallback, shared with delivery.sh status/team.sh) -- 2026-11-20 decision
+# (2026-11-20 decision): this applies uniformly to every type, including
+# claude-code, and this watcher does not check whether agmsgd is actually
+# alive/registered for this seat either way. That retires #1848's own
+# role for this watcher (it used to keep running with a warning for a
+# session with no confirmed destination yet); `agmsg daemon status --all`
+# is where that is diagnosed now, named in the stop message below.
+_agmsg_watch_delivery_choice_is_agmsgd() {
+  declare -F agmsg_type_mode_is_agmsgd >/dev/null 2>&1 \
+    || { [ -r "$SCRIPT_DIR/lib/daemon-state.sh" ] && . "$SCRIPT_DIR/lib/daemon-state.sh"; } \
+    || return 1
+  declare -F agmsg_type_mode_is_agmsgd >/dev/null 2>&1 || return 1
+  agmsg_type_mode_is_agmsgd "$AGENT_TYPE" "$PROJECT_PATH"
+}
+
+# True only once agmsgd has actually taken over delivery for every pair this
+# watcher serves -- the same two reads actas-claim.sh/daemon.sh status use to
+# decide and report native delivery (daemon-state.sh's AGMSGD_HEALTH, role-
+# session.sh's messaging_socket field), reused rather than re-derived so this
+# can never disagree with what `delivery=native`/`daemon.sh status` already
+# told the seat. claude-code-only, unchanged by the 2026-11-20
+# delivery-choice decision above: this checks something narrower and more
+# specific than "this project's chosen mode is agmsgd" -- that a Claude
+# Code SEAT actually has a live, matching native-delivery registration
+# right now, which can still become true mid-session (after an `actas`)
+# even while _agmsg_watch_delivery_choice_is_agmsgd was false at startup.
 _agmsg_watch_native_delivery_active() {
   [ "$AGENT_TYPE" = claude-code ] && [ -n "$ACTIVE_NAME" ] || return 1
   declare -F agmsg_role_session_uuid >/dev/null 2>&1 || return 1
@@ -1449,6 +1486,10 @@ _agmsg_watch_agmsgd_note() {
 _watch_renew_or_stop() {
   local elapsed=$((SECONDS + _WATCH_ELAPSED_BASE)) cmd desc arg
   [ "$elapsed" -ge "$WATCH_MAX_SECONDS" ] || return 0
+  if _agmsg_watch_delivery_choice_is_agmsgd; then
+    watch_report "stopping - this project's delivery choice is agmsgd, so this watch is not re-armed (if nothing is actually being delivered, agmsg daemon status --all shows why)"
+    exit 0
+  fi
   if _agmsg_watch_native_delivery_active; then
     watch_report "stopping - this seat's delivery has moved to agmsgd's native channel, so this watch is not re-armed"
     exit 0
@@ -1466,6 +1507,27 @@ _watch_renew_or_stop() {
   fi
   exit 0
 }
+
+# Checked once at startup too, not only at the renewal point above: a
+# watcher launched (or relaunched by a host-side re-arm) for a seat agmsgd
+# already delivers to must never run at all, rather than running until its
+# first renewal (observed live, 2026-11-20: a grok-build seat's watch.sh
+# stayed resident across its 10h runtime cap and every "monitors were
+# killed" resume reminder, because this check used to be claude-code-only).
+# Recovery if agmsgd is not actually delivering: a fresh watch.sh (from
+# the normal ensure-monitor/actas flow, or the host's own "monitors were
+# killed" resume reminder) re-evaluates this SAME delivery-choice check at
+# its own startup and stops again just the same, AS LONG AS the choice
+# stays agmsgd -- re-arming the watch never recovers this on its own
+# (review, 2026-11-20). What actually recovers it: `agmsg daemon status
+# --all` to see why agmsgd is not ready, then `agmsg daemon start` (or
+# `agmsg delivery agmsgd` to turn agmsgd on for this install first); or,
+# to stop waiting on agmsgd for this project, `agmsg delivery monitor`
+# (or `turn`) to choose a different delivery explicitly.
+if _agmsg_watch_delivery_choice_is_agmsgd; then
+  watch_report "stopping - this project's delivery choice is agmsgd, so no watch is started (if nothing is actually being delivered, agmsg daemon status --all shows why)"
+  exit 0
+fi
 
 while true; do
   # Renewal point: see _watch_renew_or_stop above.

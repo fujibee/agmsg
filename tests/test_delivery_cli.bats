@@ -184,12 +184,16 @@ STUB
   grep -Fq "not confirmed running" <<<"$output"
 }
 
-@test "delivery.sh status: agmsgd chosen but turned off reports the hooks' mode, as the session does, with a note (#1820)" {
+@test "delivery.sh status: agmsgd chosen but turned off still reads mode: agmsgd, with a note saying it is off (#1820, 2026-11-20 unification)" {
+  # 2026-11-20 decision: the choice alone decides the mode, same as
+  # watch.sh's own agmsg_type_mode_is_agmsgd check -- a status that fell
+  # back to the hooks' mode merely because agmsgd was off disagreed with
+  # watch.sh, which stops itself on this same explicit choice regardless
+  # of daemon health.
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
   printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
-  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "mode: monitor" ]
-  grep -Fq "note: this project chose agmsgd, but agmsgd is turned off" <<<"$output"
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "mode: agmsgd (agmsgd is turned off; turn it on with: agmsg delivery agmsgd)" ]
 }
 
 @test "delivery.sh status: monitor, turn, both and off choices keep their own mode while agmsgd is on" {
@@ -226,12 +230,12 @@ STUB
   [ "$(grep -c '\*\*`mode: agmsgd ...`\*\*' "$BATS_TEST_DIRNAME/../SKILL.md")" -eq 2 ]
 }
 
-@test "delivery status (CLI): agmsgd chosen but turned off says what the session does, not agmsgd (#1820)" {
+@test "delivery status (CLI): agmsgd chosen but turned off still reports agmsgd, with a note that it is off (#1820, 2026-11-20 unification)" {
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
   printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
   run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
-  grep -Fq "this project: monitor (legacy)" <<<"$output"
-  refute grep -Fq "this project: agmsgd" <<<"$output"
-  grep -Fq "note: this project chose agmsgd, but agmsgd is turned off" <<<"$output"
+  grep -Fq "this project: agmsgd" <<<"$output"
+  refute grep -Fq "this project: monitor (legacy)" <<<"$output"
+  grep -Fq "mode: agmsgd (agmsgd is turned off; turn it on with: agmsg delivery agmsgd)" <<<"$output"
 }
