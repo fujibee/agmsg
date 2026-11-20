@@ -1448,7 +1448,7 @@ agmsg_terminal_resolve_name() {
     unknown*)
       case "${own#unknown$'\t'}" in
         grok_*|cannot_tell_whether_under_grok_leader)
-          echo "agmsg: this grok session runs under a leader shared with another grok, whose environment names that grok's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2 ;;
+          echo "agmsg: this grok session runs under a leader shared with another grok, whose environment names that grok's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it. To recover: reopen grok and run actas again, or open it with spawn.sh (spawn records the pane directly)" >&2 ;;
         *)
           echo "agmsg: this Codex seat runs under the shared app-server daemon, whose environment names another seat's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2 ;;
       esac

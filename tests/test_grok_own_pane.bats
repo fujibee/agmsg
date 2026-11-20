@@ -100,6 +100,7 @@ _tool_shell() {   # the leader's environment: the starter's pane
   # The message names grok and the reason, not a Codex daemon.
   [[ "$output" == *"this grok session runs under a leader shared with another grok"* ]]
   [[ "$output" == *grok_session_process_is_not_the_recorded_one* ]]
+  [[ "$output" == *"reopen grok and run actas again, or open it with spawn.sh"* ]]
   [[ "$output" != *Codex* ]]
 }
 
