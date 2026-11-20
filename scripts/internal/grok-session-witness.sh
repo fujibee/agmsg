@@ -186,6 +186,33 @@ EOF_GROK_PAIRS
 # (review on #1979, finding (1)): only when that witness's own recorded
 # owner is definitely gone, never merely because this Stop event's
 # session_id does not match it.
+# The verdict for a session with no leader child of its own, read from the
+# grok config: <grok_home>/config.toml's [cli] use_leader.
+#   true  + GROK_HOME/leader.sock is a socket -> found (an earlier TUI's leader, shared)
+#   true  + no such socket                   -> unknown (leader on, none running yet)
+#   false / absent / no config               -> none (not in leader mode)
+#   anything else, or the config unreadable  -> unknown, with the reason
+_agmsg_grok_shared_leader_socket() {   # <grok_home>
+  local grok_home="$1" cfg scan rc=0
+  declare -F agmsg_grok_use_leader_scan >/dev/null 2>&1 || source "${SCRIPT_DIR:?SCRIPT_DIR is not set}/lib/grok-config.sh"
+  cfg="$grok_home/config.toml"
+  scan="$(agmsg_grok_use_leader_scan "$cfg" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'unknown\ncould not read use_leader from %s to tell whether grok is in leader mode\n' "$cfg"
+    return 0
+  fi
+  case "$scan" in
+    true)
+      if [ -S "$grok_home/leader.sock" ]; then
+        printf 'found\n%s\n' "$grok_home/leader.sock"
+      else
+        printf 'unknown\nuse_leader is on in %s but no grok leader is listening at %s yet\n' "$cfg" "$grok_home/leader.sock"
+      fi ;;
+    false|absent) printf 'none\n\n' ;;
+    *) printf 'unknown\nuse_leader in %s is not a plain true/false (%s), so whether grok is in leader mode cannot be told\n' "$cfg" "$(printf '%s' "$scan" | tr '\t' ' ')" ;;
+  esac
+}
+
 # agmsg_grok_leader_socket_for <session_pid> <grok_home>
 #
 # The leader socket a grok-build session is attached to, for the witness.
@@ -213,10 +240,15 @@ EOF_GROK_PAIRS
 # when the flag is present). With no flag, grok's default
 # GROK_HOME/leader.sock.
 #
-# A plain, non-leader TUI is "none": the witness keeps an empty socket, so
-# agmsgd still never connects to (or has a leader started for) a seat that
-# is not in leader mode. A leader started by an earlier TUI and shared by
-# this one is not this session's child and is not adopted. Not on Windows.
+# No child leader is not yet "none". With use_leader = true, the second and
+# later TUIs on one GROK_HOME attach to the leader the first one started
+# (GROK_HOME/leader.sock) and have no leader child of their own; that shared
+# socket is this session's leader too (_agmsg_grok_shared_leader_socket). A
+# TUI whose config does not turn use_leader on stays "none": the witness keeps
+# an empty socket, so agmsgd still never connects to (or has a leader started
+# for) a seat that is not in leader mode. Recording a socket nothing listens on
+# starts nothing either: the channel probes the socket before it spawns
+# anything and stops at leader_not_running. Not on Windows.
 agmsg_grok_leader_socket_for() {
   local pid="$1" grok_home="$2" table rc=0 cpid cppid comm args rest sock="" found_leader=0 arg prev="" lsof_out
   # The /proc root, overridable only so a test can stand in for it on any OS.
@@ -278,7 +310,7 @@ ARGV_END
 $table
 TABLE_END
   if [ "$found_leader" -eq 0 ]; then
-    printf 'none\n\n'
+    _agmsg_grok_shared_leader_socket "$grok_home"
     return 0
   fi
   [ -n "$sock" ] || sock="$grok_home/leader.sock"

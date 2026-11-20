@@ -501,6 +501,67 @@ _witness() { ls "$TEST_SKILL_DIR"/run/grok-seat.*.json; }
   [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
 }
 
+# The second and later TUIs on one GROK_HOME attach to the first one's leader
+# and have no leader child of their own.
+_listen_unix() {   # <path>: a real unix socket node at <path> (no listener needed for -S)
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$1"
+}
+
+@test "grok leader lookup: use_leader on and a shared leader.sock with no leader child of its own -> that socket is recorded" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  printf '[cli]\nuse_leader = true\n' > "$GROK_HOME/config.toml"
+  _listen_unix "$GROK_HOME/leader.sock"
+  _stub_ps "17032 17031 /usr/local/bin/grok" "17034     1 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$(_witness)"
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+}
+
+@test "grok leader lookup: use_leader on but no leader.sock yet -> unknown with that reason, not a guessed socket" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  printf '[cli]\nuse_leader = true\n' > "$GROK_HOME/config.toml"
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "use_leader is on in .* but no grok leader is listening" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
+@test "grok leader lookup: no use_leader (absent or false) and a leader.sock someone else made -> none, never adopted" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  _listen_unix "$GROK_HOME/leader.sock"
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+  rm -f "$(_witness)"
+  printf '[cli]\nuse_leader = false\n' > "$GROK_HOME/config.toml"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+}
+
+@test "grok leader lookup: a config use_leader cannot be read as plain true/false -> unknown with the reason" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  printf 'cli.use_leader = true\n' > "$GROK_HOME/config.toml"
+  _listen_unix "$GROK_HOME/leader.sock"
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "use_leader in .* is not a plain true/false" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
 @test "grok leader lookup: ps failing is 'could not tell', recorded as the pending reason -- never folded into 'no leader'" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   write_active_sessions sess1 17031

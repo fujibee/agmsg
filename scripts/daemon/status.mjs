@@ -492,7 +492,11 @@ function formatGrokQueueSeats(inventory, all) {
     }
     if (seat.reason === "leader_socket_unknown") {
       const grokConfig = join(process.env.GROK_HOME || join(homedir(), ".grok"), "config.toml");
-      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
+      let leaderOn = false;
+      try { leaderOn = /^[ \t]*use_leader[ \t]*=[ \t]*true[ \t]*(#.*)?\r?$/m.test(readFileSync(grokConfig, "utf8")); } catch { /* unreadable: say the off case */ }
+      lines.push(leaderOn
+        ? `Grok queue ${label}: agmsgd cannot reach this seat: use_leader is on in ${grokConfig} but no grok leader was found for this session (restart the grok session)`
+        : `Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
       continue;
     }
     const notRunning = /^leader_not_running:(.+)$/.exec(seat.reason ?? "")?.[1];
