@@ -87,8 +87,8 @@ ETIME
   secs=$(( 10#${days:-0} * 86400 + 10#${h:-0} * 3600 + 10#${m:-0} * 60 + 10#${s:-0} ))
   now="$(date +%s)"
   start=$((now - secs))
-  [ "$((start - $2 / 1000000))" -le "${AGMSG_GROK_START_SKEW:-5}" ] \
-    && [ "$(($2 / 1000000 - start))" -le "${AGMSG_GROK_START_SKEW:-5}" ]
+  [ "$((start - $2 / 1000000))" -le "${AGMSG_GROK_START_SKEW:-2}" ] \
+    && [ "$(($2 / 1000000 - start))" -le "${AGMSG_GROK_START_SKEW:-2}" ]
 }
 
 _agmsg_gop_cache() { [ -n "${SKILL_DIR:-}" ] && printf '%s/run/grok-own-pane.%s\n' "$SKILL_DIR" "$1"; }
