@@ -1388,13 +1388,25 @@ EOF
 # other process (Claude Code, a Codex outside the daemon, no terminal) takes the
 # original path unchanged.
 _agmsg_codex_own_pane() {
+  local d="${SKILL_DIR:-}" own
   if ! declare -F agmsg_codex_own_pane >/dev/null 2>&1; then
-    local d="${SKILL_DIR:-}"
     [ -r "$d/scripts/lib/codex-own-pane.sh" ] || d="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     # shellcheck disable=SC1091
     . "$d/scripts/lib/codex-own-pane.sh" 2>/dev/null || return 0
   fi
-  agmsg_codex_own_pane
+  own="$(agmsg_codex_own_pane)"
+  if [ -n "$own" ]; then printf '%s\n' "$own"; return 0; fi
+  # The same question for a grok session under its shared leader: the environment
+  # is the leader starter's (grok-own-pane.sh). Answered only when a grok session
+  # id is present, so every other process pays nothing.
+  [ -n "${GROK_SESSION_ID:-}" ] || return 0
+  if ! declare -F agmsg_grok_own_pane >/dev/null 2>&1; then
+    d="${SKILL_DIR:-}"
+    [ -r "$d/scripts/lib/grok-own-pane.sh" ] || d="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    # shellcheck disable=SC1091
+    . "$d/scripts/lib/grok-own-pane.sh" 2>/dev/null || return 0
+  fi
+  agmsg_grok_own_pane
 }
 
 # Run "$@" with the terminal variables replaced by the KEY=VALUE lines in $1.
@@ -1434,7 +1446,12 @@ agmsg_terminal_resolve_name() {
   case "$own" in
     '') _agmsg_terminal_resolve_name_raw "$@" ;;
     unknown*)
-      echo "agmsg: this Codex seat runs under the shared app-server daemon, whose environment names another seat's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2
+      case "${own#unknown$'\t'}" in
+        grok_*|cannot_tell_whether_under_grok_leader)
+          echo "agmsg: this grok session runs under a leader shared with another grok, whose environment names that grok's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it. To recover: reopen grok and run actas again, or open it with spawn.sh (spawn records the pane directly)" >&2 ;;
+        *)
+          echo "agmsg: this Codex seat runs under the shared app-server daemon, whose environment names another seat's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2 ;;
+      esac
       return 1 ;;
     *) _agmsg_with_terminal_env "$own" _agmsg_terminal_resolve_name_raw "$@" ;;
   esac
@@ -1445,7 +1462,11 @@ agmsg_terminal_self_env() {
   own="$(_agmsg_codex_own_pane)" || own=""
   case "$own" in
     '') _agmsg_terminal_self_env_raw "$@" ;;
-    unknown*) printf 'unknown:codex:shared_daemon_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+    unknown*)
+      case "${own#unknown$'\t'}" in
+        grok_*|cannot_tell_whether_under_grok_leader) printf 'unknown:grok:shared_leader_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+        *) printf 'unknown:codex:shared_daemon_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+      esac ;;
     *) _agmsg_with_terminal_env "$own" _agmsg_terminal_self_env_raw "$@" ;;
   esac
 }
