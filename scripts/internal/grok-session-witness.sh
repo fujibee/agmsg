@@ -4,12 +4,15 @@
 #
 # The channel (grok-queue.mjs) needs three things per registered grok-build
 # seat before it will attempt a nudge: a live grok tool-call process, its
-# leader socket path, and whether this session has completed its first turn
-# (session/prompt before the first turn's own response lands is observed to
-# replay the WHOLE prior transcript via session/update -- see session/resume
-# vs session/load in the design memo -- so a nudge before the first turn
-# would be unnecessarily expensive even once resume is used, and more to the
-# point there is no live turn boundary to attach a queued prompt to yet).
+# leader socket path, and whether this session is past its first turn
+# (first_turn_done). A TUI that opened on the welcome screen runs a turn it
+# did not submit itself but does not DISPLAY it until its own first turn
+# moves it onto the chat screen (measured live, grok 1.0.89, 2026-11-20), so a
+# nudge before that would be answered invisibly. A session reopened with
+# --resume / --continue / the /resume picker starts on the chat screen, which
+# SessionStart reports as source "load" and records as first_turn_done=true at
+# once. session/resume replays nothing; only session/load replays the prior
+# transcript, and the channel uses resume.
 #
 # That state is recorded here, in one small JSON file per seat, written by
 # SessionStart and updated by Stop -- not read back through agmsg's own
