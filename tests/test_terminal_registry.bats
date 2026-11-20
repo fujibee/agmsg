@@ -3410,6 +3410,9 @@ _fake_herdr_list_anchored_plus() {
 # dim signal herdr's `pane read --format ansi` does), so it is an ordinary
 # id-taking op and belongs in the sweep below like terminal_peek, not in
 # this exclusion list -- removed from here on purpose.
+# terminal_enumerate_agent_panes (#2000) lists every pane's agent and directory so a
+# hand-started agent's pane can be found; it takes no id, and tmux does not expose the
+# agent per pane, so tmux has no such op by design (a seat there stays no_pane).
 # terminal_input_draft is different in kind from the rest of this list: it DOES
 # take a pane id and DOES address a server, but tmux/herdr solve "is there a
 # real draft in the box" a different way already (peek_styled + a two-snapshot
@@ -3418,7 +3421,7 @@ _fake_herdr_list_anchored_plus() {
 # So it is excluded here not because it has no id/server, but because tmux
 # genuinely does not implement it, by design, this release; wiring it in is a
 # separate, later decision, not an oversight this sweep should flag.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_enumerate_agent_panes terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
