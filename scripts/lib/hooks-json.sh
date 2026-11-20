@@ -19,7 +19,9 @@
 # than no copy (#669).
 if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   # shellcheck disable=SC1091
-  source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/sqlpath.sh"
+  _agmsg_dd_7="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_dd_7" in */*) _agmsg_dd_7="${_agmsg_dd_7%/*}" ;; *) _agmsg_dd_7=. ;; esac
+  source "$(cd "$_agmsg_dd_7" && pwd)/sqlpath.sh"
+  unset _agmsg_dd_7
 fi
 
 # Refuse to rewrite a file whose .hooks.<event> is present but is not an array

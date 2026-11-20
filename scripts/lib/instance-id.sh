@@ -39,7 +39,9 @@ _AGMSG_INSTANCE_ID_SH=1
 # re-sourcing only resets the cheap, deterministic platform detection, not
 # any state that matters).
 # shellcheck disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/compat.sh"
+_agmsg_ii_d="${BASH_SOURCE[0]}"; case "$_agmsg_ii_d" in */*) _agmsg_ii_d="${_agmsg_ii_d%/*}" ;; *) _agmsg_ii_d=. ;; esac
+. "$(cd "$_agmsg_ii_d" && pwd)/compat.sh"
+unset _agmsg_ii_d
 
 # Cross-platform pid liveness check, and the ONLY one any shipped script should
 # use. A bare `kill -0 "$pid" 2>/dev/null` is not a liveness check: it answers

@@ -37,7 +37,9 @@ unset _agmsg_crlf_d
 : "${SKILL_DIR:?resolve-project.sh requires SKILL_DIR}"
 
 # shellcheck disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/compat.sh"
+_agmsg_rp_d="${BASH_SOURCE[0]}"; case "$_agmsg_rp_d" in */*) _agmsg_rp_d="${_agmsg_rp_d%/*}" ;; *) _agmsg_rp_d=. ;; esac
+. "$(cd "$_agmsg_rp_d" && pwd)/compat.sh"
+unset _agmsg_rp_d
 
 # agmsg_registered_projects() below reads team configs via readfile() and needs
 # agmsg_sql_readfile_path(). Not every caller that sources resolve-project.sh

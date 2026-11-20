@@ -23,7 +23,9 @@
 # lib was sourced via a relative path from a different cwd — can resolve against
 # the wrong directory; capturing it once here is robust however the registry is
 # queried later.
-_AGMSG_REGISTRY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+_agmsg_tr_d="${BASH_SOURCE[0]:-$0}"; case "$_agmsg_tr_d" in */*) _agmsg_tr_d="${_agmsg_tr_d%/*}" ;; *) _agmsg_tr_d=. ;; esac
+_AGMSG_REGISTRY_LIB_DIR="$(cd "$_agmsg_tr_d" 2>/dev/null && pwd)"
+unset _agmsg_tr_d
 
 # Axis-generic bases + trust policy.
 # shellcheck disable=SC1091
@@ -105,7 +107,16 @@ agmsg_type_get() {
   dir="$(agmsg_type_dir "$name")" || { printf '%s\n' "$def"; return 0; }
   # `|| true` so a no-match grep (exit 1) does not, under set -e + pipefail,
   # abort the assignment before the default-return branch below is reached.
-  line="$( { grep -E "^[[:space:]]*${key}[[:space:]]*=" "$dir/type.conf" 2>/dev/null || true; } | head -1)"
+  # The first line that names the key, read in this shell: the grep|head pair this
+  # replaces was two process starts per manifest key, and a roster read asks for a
+  # dozen keys per member. Same pattern (ERE), same first-match, same text.
+  line=""
+  if [ -r "$dir/type.conf" ]; then
+    local _l
+    while IFS= read -r _l || [ -n "$_l" ]; do
+      if [[ "$_l" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then line="$_l"; break; fi
+    done < "$dir/type.conf" 2>/dev/null || true
+  fi
   if [ -z "$line" ]; then
     printf '%s\n' "$def"
     return 0

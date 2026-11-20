@@ -27,6 +27,28 @@ terminal_describe() {
 # original occupants. The caller must therefore report a native swap as moved
 # unless the driver explicitly reports changed=false.
 
+# The pane listing is one answer per tmux server, not one per pane. team.sh asks
+# for it once per roster through the optional prefetch op, in its own shell (the
+# location read below runs in a command substitution and cannot keep a cache);
+# with no prefetch, terminal_where asks tmux itself, as it always did.
+_TMUX_PANE_LIST_SOCK="-"
+_TMUX_PANE_LIST=""
+terminal_team_prefetch() {
+  local id="$1" sock list
+  command -v tmux >/dev/null 2>&1 || return 0
+  case "$(_tmux_bare_of "$id")" in %*) : ;; *) return 0 ;; esac
+  sock="$(_tmux_sock_of "$id")"
+  [ "$_TMUX_PANE_LIST_SOCK" = "x$sock" ] && return 0
+  list="$(_tmux_do "$id" list-panes -a -F '#{pane_id}|#{window_id}' 2>/dev/null)" || return 0
+  _TMUX_PANE_LIST="$list"
+  _TMUX_PANE_LIST_SOCK="x$sock"
+}
+
+_tmux_cached_pane_list() {   # <id> -> the prefetched listing for this id's server, or rc 1
+  [ "$_TMUX_PANE_LIST_SOCK" = "x$(_tmux_sock_of "$1")" ] || return 1
+  printf '%s' "$_TMUX_PANE_LIST"
+}
+
 # READ op: print the window containing <id>. This answers WHERE only and never
 # treats an unresolved location as proof that the pane is gone.
 terminal_where() {
@@ -39,9 +61,18 @@ terminal_where() {
   sock="$(_tmux_sock_of "$id")"; bare="$(_tmux_bare_of "$id")"
   # A window placement (@N) is its own container.
   case "$bare" in @*) printf '%s\n' "$id"; return 0 ;; %*) : ;; *) echo unsupported; return 13 ;; esac
-  out="$(_tmux_do "$id" list-panes -a -F '#{pane_id}|#{window_id}' 2>/dev/null)" \
+  out="$(_tmux_cached_pane_list "$id")" \
+    || out="$(_tmux_do "$id" list-panes -a -F '#{pane_id}|#{window_id}' 2>/dev/null)" \
     || { echo unknown; return 10; }
-  container="$(printf '%s\n' "$out" | awk -F '|' -v id="$bare" '$1 == id { print $2; exit }')"
+  # First line whose pane id is this one, and its window: what the awk this
+  # replaces printed, read in this shell instead of in a process of its own.
+  container=""
+  local _pid _wid _rest
+  while IFS='|' read -r _pid _wid _rest; do
+    if [ "$_pid" = "$bare" ]; then container="$_wid"; break; fi
+  done <<EOF
+$out
+EOF
   if [ -z "$container" ]; then
     echo unknown
     echo "tmux: the pane listing answered but did not contain '$id'; pane existence must be checked separately" >&2

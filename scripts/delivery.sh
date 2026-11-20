@@ -39,9 +39,11 @@ set -euo pipefail
 ACTION="${1:?Usage: delivery.sh set|status|restart ...}"
 shift
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+_agmsg_dv_d="$0"; case "$_agmsg_dv_d" in */*) _agmsg_dv_d="${_agmsg_dv_d%/*}" ;; *) _agmsg_dv_d=. ;; esac
+SCRIPT_DIR="$(cd "$_agmsg_dv_d" && pwd)"
+unset _agmsg_dv_d
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SKILL_NAME="$(basename "$SKILL_DIR")"
+SKILL_NAME="${SKILL_DIR##*/}"
 RUN_DIR="$SKILL_DIR/run"
 # instance-id derivation (#93) for the in-session monitor directive below.
 # shellcheck disable=SC1091
