@@ -1388,13 +1388,25 @@ EOF
 # other process (Claude Code, a Codex outside the daemon, no terminal) takes the
 # original path unchanged.
 _agmsg_codex_own_pane() {
+  local d="${SKILL_DIR:-}" own
   if ! declare -F agmsg_codex_own_pane >/dev/null 2>&1; then
-    local d="${SKILL_DIR:-}"
     [ -r "$d/scripts/lib/codex-own-pane.sh" ] || d="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     # shellcheck disable=SC1091
     . "$d/scripts/lib/codex-own-pane.sh" 2>/dev/null || return 0
   fi
-  agmsg_codex_own_pane
+  own="$(agmsg_codex_own_pane)"
+  if [ -n "$own" ]; then printf '%s\n' "$own"; return 0; fi
+  # The same question for a grok session under its shared leader: the environment
+  # is the leader starter's (grok-own-pane.sh). Answered only when a grok session
+  # id is present, so every other process pays nothing.
+  [ -n "${GROK_SESSION_ID:-}" ] || return 0
+  if ! declare -F agmsg_grok_own_pane >/dev/null 2>&1; then
+    d="${SKILL_DIR:-}"
+    [ -r "$d/scripts/lib/grok-own-pane.sh" ] || d="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    # shellcheck disable=SC1091
+    . "$d/scripts/lib/grok-own-pane.sh" 2>/dev/null || return 0
+  fi
+  agmsg_grok_own_pane
 }
 
 # Run "$@" with the terminal variables replaced by the KEY=VALUE lines in $1.
