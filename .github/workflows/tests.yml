@@ -518,19 +518,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        # macOS runs 5 shards, Linux 10. GitHub runs at most 5 macOS jobs at
-        # once for this account: a sixth shard (or the macOS storage leg) waited
-        # 17-19 minutes for a slot, so one run took two waves. Five shards fill
-        # the slots exactly; the macOS storage contract runs inside shard 5.
+        # macOS runs 6 shards, Linux 10. Five shards gave macOS shards of 1527-1692 s
+        # on real runners (cap 1800 s, #1107), so macOS stays at 6. GitHub runs at
+        # most 5 macOS jobs at once for this account, so a sixth shard can wait for
+        # a slot; folding the macOS storage contract into shard 5 (instead of a job
+        # of its own) keeps a run at 6 macOS bats jobs, not 7.
         exclude:
-          - { os: macos-latest, shard: 6 }
           - { os: macos-latest, shard: 7 }
           - { os: macos-latest, shard: 8 }
           - { os: macos-latest, shard: 9 }
           - { os: macos-latest, shard: 10 }
         include:
           - { os: ubuntu-latest, total: 10 }
-          - { os: macos-latest, total: 5 }
+          - { os: macos-latest, total: 6 }
     env:
       SHARD_TOTAL: ${{ matrix.total }}
       # A single bats test that hangs used to hold a shard until its 30-minute
@@ -798,7 +798,7 @@ jobs:
         env:
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
           # Linux total, macOS total: the `total` values of the bats-shard matrix.
-          SHARD_TOTALS: '10 5'
+          SHARD_TOTALS: '10 6'
         run: |
           set -euo pipefail
           expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"

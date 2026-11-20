@@ -347,8 +347,8 @@ union_of_shards() {
   # Linux runs every listed shard; macOS runs the listed ones less the excluded.
   [ "$listed" -eq "$linux" ]
   [ "$((listed - excluded))" -eq "$mac" ]
-  # GitHub runs at most 5 macOS jobs at once: more shards would queue.
-  [ "$mac" -le 5 ]
+  # macOS is held at 6: five shards ran 1527-1692 s against the 1800 s job cap.
+  [ "$mac" -eq 6 ]
   totals="$(sed -n "s/^ *SHARD_TOTALS: '\(.*\)'$/\1/p" "$wf")"
   [ "$totals" = "$linux $mac" ]
   # ...and the shard job's display name must name the same totals.
