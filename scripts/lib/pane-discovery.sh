@@ -19,18 +19,23 @@
 # in a cache file under run/, so several seats checked in one poll share one
 # listing; a listing with a hole is never cached.
 
-_agmsg_pane_census() {   # -> rows "<terminal>\t<id>\t<default>\t<agent>\t<cwd>\t<fcwd>" and "!!\t<terminal>" / "!\t<terminal>\t<instance>"
+# Fills _AGMSG_CENSUS with the rows (from the cache when it is fresh enough). A terminal that cannot be loaded or listed is a hole row, never an
+# empty answer; a terminal with no such op at all is skipped (it cannot answer, and
+# says so by not defining it). `fresh` as the argument ignores the cache.
+#   rows: "<terminal>\t<id>\t<default>\t<agent>\t<cwd>\t<fcwd>", "!!\t<terminal>", "!\t<terminal>\t<instance>"
+_agmsg_pane_census() {   # [fresh]
   local cache="${SKILL_DIR:?}/run/pane-census.tsv" ttl="${AGMSG_PANE_CENSUS_TTL:-15}" now mt name out orc rows="" holes=0 was line
   declare -F compat_file_mtime >/dev/null 2>&1 || . "${SCRIPT_DIR:?SCRIPT_DIR is not set}/lib/compat.sh"
-  if [ -f "$cache" ]; then
+  _AGMSG_CENSUS=""
+  if [ "${1:-}" != fresh ] && [ -f "$cache" ]; then
     now="$(date +%s)"; mt="$(compat_file_mtime "$cache" 2>/dev/null || true)"
     case "$mt" in ''|*[!0-9]*) ;; *)
-      if [ $((now - mt)) -ge 0 ] && [ $((now - mt)) -lt "$ttl" ]; then cat "$cache"; return 0; fi ;;
+      if [ $((now - mt)) -ge 0 ] && [ $((now - mt)) -lt "$ttl" ]; then _AGMSG_CENSUS="$(cat "$cache")"; return 0; fi ;;
     esac
   fi
   was="${_AGMSG_TERMINAL_LOADED:-}"
   for name in $(agmsg_terminal_candidates); do
-    agmsg_terminal_load "$name" >/dev/null 2>&1 || continue
+    if ! agmsg_terminal_load "$name" >/dev/null 2>&1; then rows="${rows}"$'!!\t'"$name"$'\n'; holes=1; continue; fi
     declare -F terminal_enumerate_agent_panes >/dev/null 2>&1 || continue
     if out="$(terminal_enumerate_agent_panes 2>/dev/null)"; then orc=0; else orc=$?; fi
     if [ "$orc" -ne 0 ]; then rows="${rows}"$'!!\t'"$name"$'\n'; holes=1; continue; fi
@@ -45,11 +50,11 @@ $out
 CENSUS_END
   done
   if [ -n "$was" ]; then agmsg_terminal_load "$was" >/dev/null 2>&1 || true; fi
-  [ "$holes" -eq 0 ] && { mkdir -p "$SKILL_DIR/run" 2>/dev/null; agmsg_write_atomic "$cache" "${rows%$'\n'}" 2>/dev/null || true; }
-  printf '%s' "$rows"
+  if [ "$holes" -eq 0 ]; then mkdir -p "$SKILL_DIR/run" 2>/dev/null; agmsg_write_atomic "$cache" "${rows%$'\n'}" 2>/dev/null || true; fi
+  _AGMSG_CENSUS="$rows"
 }
 
-agmsg_discover_agent_pane() {   # <type> <project> <own-record-path>
+_agmsg_pane_pick() {   # <type> <project> <own-record-path> [fresh]
   local type="$1" project="$2" own="$3" cli phys census taken="" f ref _p _t
   local term id isdef agent cwd fcwd cref bare matches="" n=0 holes=0 tab
   tab=$'\t'
@@ -63,7 +68,8 @@ agmsg_discover_agent_pane() {   # <type> <project> <own-record-path>
     [ -n "$ref" ] && taken="${taken}"$'\n'"${ref}"
   done
   taken="${taken}"$'\n'
-  census="$(_agmsg_pane_census)" || census=""
+  _agmsg_pane_census "${4:-}"
+  census="$_AGMSG_CENSUS"
   while IFS="$tab" read -r term id isdef agent cwd fcwd; do
     [ -n "$term" ] || continue
     case "$term" in '!'*) holes=1; continue ;; esac
@@ -86,4 +92,18 @@ CENSUS_END
   if [ "$holes" -eq 1 ]; then printf 'unknown\tpane_listing_incomplete\n'; return 0; fi
   if [ "$n" -eq 1 ]; then printf 'found\t%s\n' "$matches"; return 0; fi
   printf 'none\n'
+}
+
+# A candidate built from a cached listing is never adopted on the cache's word: the
+# pane may have changed its directory or agent since (or another instance gained a
+# match). What is recorded and typed into is re-checked against a listing taken now,
+# and that listing's answer is the one returned (so a found costs one listing taken
+# now; none, ambiguous and unknown may use the cache).
+agmsg_discover_agent_pane() {   # <type> <project> <own-record-path>
+  local verdict
+  verdict="$(_agmsg_pane_pick "$1" "$2" "$3")"
+  case "$verdict" in
+    found*) verdict="$(_agmsg_pane_pick "$1" "$2" "$3" fresh)" ;;
+  esac
+  printf '%s\n' "$verdict"
 }

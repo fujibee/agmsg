@@ -18,6 +18,7 @@ import {
   messageStorePath,
   openMessageStore,
   readStorageDriver,
+  storeHasMessageTables,
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
 import { listTerminalPokeRegistrations } from "./terminal-poke-store.mjs";
@@ -63,6 +64,7 @@ function latestNotifiedCursor(db, seat) {
 // unread set had changed -- a nudge for an unchanged unread set was then
 // retried immediately instead of waiting out the backoff.
 function readOwnUnreadMarker(store, team, agent) {
+  if (!storeHasMessageTables(store)) return "0:0";   // a store nothing was ever sent through
   const eventRow = store.prepare(`
     SELECT COALESCE(MAX(seq), 0) AS n FROM events WHERE type = 'message_sent' AND team = ? AND to_agent = ?
   `).get(team, agent);
@@ -150,6 +152,8 @@ export function createTerminalPokeChannel({
   let stopped = false;
   const book = createSeatBook(now);
   let rosterReasons = new Map();
+  // seat key -> the other registered seats of the same type and project (this poll).
+  let peerIndex = new Map();
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
@@ -258,6 +262,7 @@ export function createTerminalPokeChannel({
         agent,
         type,
         project,
+        peers: peerIndex.get(key) ?? [],
         body: nudgeText(type, cmdName),
         timeoutMs,
         env,
@@ -324,6 +329,19 @@ export function createTerminalPokeChannel({
       const paths = storagePaths(installRoot, env);
       recordSkippedTeams(roster.skipped ?? []);
       const seats = [...roster.seats];
+      // Seats of one type in one project cannot be told apart by that alone; a
+      // pane found for one of them is only its own when no other is waiting.
+      const groups = new Map();
+      for (const seat of seats) {
+        const group = `${seat.type}\u0000${seat.project}`;
+        groups.set(group, [...(groups.get(group) ?? []), seat]);
+      }
+      peerIndex = new Map(seats.map((seat) => [
+        seatKey(seat.team, seat.agent),
+        (groups.get(`${seat.type}\u0000${seat.project}`) ?? [])
+          .filter((other) => !(other.team === seat.team && other.agent === seat.agent))
+          .map((other) => `${other.team}/${other.agent}`),
+      ]));
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
       for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       for (const key of book.keys()) {

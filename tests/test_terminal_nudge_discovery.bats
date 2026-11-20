@@ -99,12 +99,12 @@ _count() { grep -c "$1" "$ARGV_LOG" || true; }
   printf '%s\n' "$output" | grep -qF "state=notified"
 }
 
-@test "discovery: one listing serves several seats in a window, and is asked for once" {
-  _panes w1:p4F agy "$AGMSG_NUDGE_PROJECT"
+@test "discovery: one listing serves several seats with nothing to find in a window" {
+  _panes w1:p1 claude "$AGMSG_NUDGE_PROJECT"
   _nudge agy1
-  printf '%s\n' "$output" | grep -qF "state=notified"
-  rm -f "$(_rec agy1)"
+  printf '%s\n' "$output" | grep -qF "state=no_pane"
   _nudge agy2
+  printf '%s\n' "$output" | grep -qF "state=no_pane"
   [ "$(_count '^herdr \[session\] \[list\]')" -eq 1 ]
   [ "$(_count '^herdr \[pane\] \[list\]')" -eq 1 ]
 }
@@ -145,4 +145,43 @@ _count() { grep -c "$1" "$ARGV_LOG" || true; }
   _nudge
   printf '%s\n' "$output" | grep -qF "state=pane_gone"
   [ "$(cut -f1 "$(_rec agy1)")" = "herdr:$FAKEBIN/herdr.sock:w1:p3" ]
+}
+
+@test "discovery: a cached candidate whose directory changed is not adopted; the pane that matches now is" {
+  _panes w1:p4F agy "$AGMSG_NUDGE_PROJECT"
+  _nudge agy1
+  printf '%s\n' "$output" | grep -qF "state=notified"
+  rm -f "$(_rec agy1)"
+  # Within the census window: p4F moved to another project, p9 is the one in this project now.
+  _panes w1:p4F agy /elsewhere w1:p9 agy "$AGMSG_NUDGE_PROJECT"
+  _nudge agy1
+  printf '%s\n' "$output" | grep -qF "state=notified"
+  [ "$(cut -f1 "$(_rec agy1)")" = "herdr:$FAKEBIN/herdr.sock:w1:p9" ]
+}
+
+@test "discovery: a terminal that cannot be loaded is a hole -> unknown, never another terminal's single match" {
+  _panes w1:p4F agy "$AGMSG_NUDGE_PROJECT"
+  run bash -c '
+    export SKILL_DIR="'"$SKILL_DIR"'" SCRIPT_DIR="'"$SCRIPTS"'"
+    . "$SCRIPT_DIR/lib/actas-lock.sh"; . "$SCRIPT_DIR/lib/terminal-registry.sh"; . "$SCRIPT_DIR/lib/type-registry.sh"
+    . "$SCRIPT_DIR/lib/pane-discovery.sh"
+    agmsg_terminal_candidates() { echo "herdr broken"; }
+    _real_load="$(declare -f agmsg_terminal_load)"; eval "_real_${_real_load#agmsg_terminal_load}"
+    agmsg_terminal_load() { [ "$1" = broken ] && return 1; _real_ "$@"; }
+    agmsg_discover_agent_pane antigravity "'"$AGMSG_NUDGE_PROJECT"'" "'"$SKILL_DIR"'/run/spawn.x__y"
+  '
+  [ "$output" = "$(printf 'unknown\tpane_listing_incomplete')" ]
+}
+
+@test "discovery: another seat of the same type and project with no pane recorded -> ambiguous, nothing assigned" {
+  _panes w1:p4F agy "$AGMSG_NUDGE_PROJECT"
+  export AGMSG_NUDGE_PEERS="testteam/agy2"
+  _nudge agy1
+  printf '%s\n' "$output" | grep -qF "state=ambiguous reason=seats_without_pane:testteam/agy2 pane:herdr:$FAKEBIN/herdr.sock:w1:p4F"
+  [ ! -f "$(_rec agy1)" ]
+  [ "$(_count '\[agent\] \[prompt\]')" -eq 0 ]
+  # Once that seat has a pane of its own recorded, this one is the only candidate.
+  printf 'herdr:%s:w1:p7\t%s\tantigravity' "$FAKEBIN/herdr.sock" "$AGMSG_NUDGE_PROJECT" > "$(_rec agy2)"
+  _nudge agy1
+  printf '%s\n' "$output" | grep -qF "state=notified"
 }

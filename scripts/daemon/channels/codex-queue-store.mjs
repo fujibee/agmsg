@@ -164,6 +164,12 @@ export function messageStorePath({ storageDir, team, teamConfig }) {
   throw new Error("storage_partition_unsupported");
 }
 
+// False for a store with none of the message tables (never used); true when any exists,
+// so a store with only some of them still fails its schema check.
+export function storeHasMessageTables(db) {
+  return db.prepare("SELECT 1 AS yes FROM sqlite_master WHERE type='table' AND name IN ('events','messages','read_cursors') LIMIT 1").get() !== undefined;
+}
+
 export function openMessageStore(path) {
   if (!isAbsolute(path)) throw new TypeError("message_store_path_not_absolute");
   const stat = lstatSync(path);
@@ -171,7 +177,10 @@ export function openMessageStore(path) {
   const db = new DatabaseSync(path, { readOnly: true, allowExtension: false });
   try {
     db.exec("PRAGMA busy_timeout = 1000; PRAGMA query_only = ON;");
-    // Validate the expected read schema now. An absent table is not an empty inbox.
+    // Validate the expected read schema now. An absent table is not an empty inbox --
+    // except a store with none of them at all, which nothing was ever sent through
+    // (they are created by the first message); that is read as empty.
+    if (!storeHasMessageTables(db)) return db;
     db.prepare("SELECT seq FROM events LIMIT 0").all();
     db.prepare("SELECT id FROM messages LIMIT 0").all();
     db.prepare("SELECT local_position FROM read_cursors LIMIT 0").all();
@@ -199,10 +208,8 @@ export function readUnreadSnapshot(db, team, agent, encodedCursor = "") {
   const cursor = cursorValue(encodedCursor);
   db.exec("BEGIN;");
   try {
-    // A store nothing has ever been sent through has no tables yet (they are
-    // created by the first message). That is "no unread messages", not a store
-    // that cannot be read. A store with only some of the tables is still an
-    // error below.
+    // A store nothing has ever been sent through has no tables yet (see openMessageStore):
+    // that is "no unread messages". A store with only some of the tables errors below.
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('events','messages','read_cursors')").all();
     if (tables.length === 0) {
       db.exec("COMMIT;");

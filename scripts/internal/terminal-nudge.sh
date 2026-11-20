@@ -106,6 +106,22 @@ discover_pane() {   # -> 0: recorded (REC now holds the pane), 1: reported (call
   detail="${verdict#*$'\t'}"
   case "$verdict" in
     found*)
+      # One pane, but which seat is it? Another seat of the same type and project
+      # with no placement record could equally be the one in it: nothing is
+      # assigned, and they are named.
+      local peer peer_team peer_agent peer_rec unrecorded=""
+      while IFS= read -r peer; do
+        [ -n "$peer" ] || continue
+        peer_team="${peer%%/*}"; peer_agent="${peer#*/}"
+        peer_rec="$(agmsg_spawn_path "$peer_team" "$peer_agent" 2>/dev/null)" || peer_rec=""
+        [ -n "$peer_rec" ] && [ -f "$peer_rec" ] || unrecorded="${unrecorded:+$unrecorded }$peer"
+      done <<PEERS_END
+${AGMSG_NUDGE_PEERS:-}
+PEERS_END
+      if [ -n "$unrecorded" ]; then
+        report ambiguous "seats_without_pane:$unrecorded pane:$detail"
+        return 1
+      fi
       mkdir -p "$(dirname "$REC")" 2>/dev/null || true
       if agmsg_write_atomic "$REC" "$(printf '%s\t%s\t%s' "$detail" "$AGMSG_NUDGE_PROJECT" "$dtype")" 2>/dev/null; then
         return 0
