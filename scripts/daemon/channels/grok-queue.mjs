@@ -137,6 +137,9 @@ function classifyWitness(result) {
   if (result.state === "unreadable") return { ok: false, reason: `witness_${result.reason}` };
   const { witness } = result;
   if (!pidAlive(witness.pid)) return { ok: false, reason: "process_gone" };
+  // A welcome-screen TUI does not display a turn it did not submit itself, so a
+  // nudge waits for its own first turn to end (grok-stop.sh); a reopened
+  // (--resume/--continue) session is already marked done by SessionStart.
   if (witness.first_turn_done !== true) return { ok: false, reason: "first_turn_pending" };
   if (typeof witness.leader_socket !== "string" || witness.leader_socket.length === 0) {
     return { ok: false, reason: "leader_socket_unknown" };

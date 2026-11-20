@@ -252,15 +252,20 @@ EOF
 }
 
 # Status: the rule file's marker is the state. Absent => off; a monitor marker
-# => monitor; anything else (a present rule) => turn.
+# => monitor; anything else (a present rule) => turn. "agmsgd" is NOT
+# detected here (2026-11-20 decision): run/delivery-choice is the single
+# source of truth for that mode, read upstream by delivery.sh's own
+# _status_project_on_agmsgd before this plug is even consulted -- deciding
+# it again here, from the hooks.json marker this mode leaves behind, could
+# disagree with it once the project's own choice has moved elsewhere while
+# that marker is still on disk (grok-session-start.sh/grok-stop.sh are only
+# ever removed by a later `agmsg delivery set`, not by agmsgd itself
+# stopping).
 agmsg_delivery_status() {
   local type="$1" project="$2"
-  local rule_file hooks_json
+  local rule_file
   rule_file="$(resolve_hooks_file "$type" "$project")"
-  hooks_json="$(_agmsg_grok_hooks_json "$project")"
-  if [ -f "$hooks_json" ] && grep -q "grok-session-start.sh" "$hooks_json" 2>/dev/null; then
-    echo "mode: agmsgd"
-  elif [ ! -f "$rule_file" ]; then
+  if [ ! -f "$rule_file" ]; then
     echo "mode: off"
   elif grep -q "agmsg-delivery-mode: monitor" "$rule_file" 2>/dev/null; then
     echo "mode: monitor"

@@ -32,6 +32,39 @@ if [ -z "$SESSION_ID" ] && [ -n "$INPUT" ]; then
 fi
 [ -n "$SESSION_ID" ] || exit 0   # nothing to attach a witness to
 
+# SessionStart's stdin JSON carries "source": "new" for a fresh session (a plain
+# `grok` start shows the welcome screen; /new and /clear also say "new"), or
+# "load" for a saved session reopened with --resume, --continue or the /resume
+# picker (measured live, grok 1.0.89, 2026-11-20). A "load" TUI opens straight on
+# its chat screen, so a turn another client sends is displayed at once; only a
+# welcome-screen TUI runs a turn it did not submit itself without showing it.
+# Anything else (absent, unreadable) is treated as "new": withhold, as before.
+START_SOURCE=""
+if [ -n "$INPUT" ]; then
+  # Only the TOP-LEVEL "source" of one well-formed JSON object counts: a "source" key
+  # nested in another value, or text that is not valid JSON, must never read as "load"
+  # (that would mark a welcome-screen seat deliverable). JSON.parse validates the whole
+  # grammar, and only the exact string "load" is handed back (never the raw value, so a
+  # trailing newline or other padding in it cannot be trimmed into a match); no usable
+  # node, or any parse failure, leaves it empty (= withhold, as before).
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/node.sh"
+  if agmsg_node_usable 2>/dev/null; then
+    START_SOURCE="$(printf '%s' "$INPUT" | "$(agmsg_resolve_node)" -e '
+      let d = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (c) => { d += c; });
+      process.stdin.on("end", () => {
+        try {
+          const o = JSON.parse(d);
+          if (o !== null && typeof o === "object" && !Array.isArray(o) && o.source === "load") {
+            process.stdout.write("load");
+          }
+        } catch { /* not valid JSON: no source */ }
+      });' 2>/dev/null || true)"
+  fi
+fi
+
 GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
 # Measured live, 2026-11-15: a hook invocation DOES inherit GROK_LEADER_SOCKET
 # when the TUI was actually started with --leader. NO FALLBACK to grok's
@@ -139,6 +172,7 @@ WITNESS_PATH="$(agmsg_grok_witness_path "$TEAM" "$AGENT")"
 # per start) must not clobber an already-advanced first_turn_done -- only a
 # NEW session_id resets it.
 FIRST_TURN_DONE=false
+[ "$START_SOURCE" != load ] || FIRST_TURN_DONE=true
 if [ -f "$WITNESS_PATH" ]; then
   _prev_sid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WITNESS_PATH" 2>/dev/null | head -1)"
   # \| is a GNU sed extension, not POSIX BRE -- BSD/macOS sed (where this
