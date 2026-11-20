@@ -706,7 +706,8 @@ LS
   local f in
   for in in '{"hookEventName":"session_start","source":"new"}' '{"hookEventName":"session_start"}' 'not json' '{"source":"LOAD"}' '{"source":"loaded"}' \
     'not json "source":"load"' '{"source":"new","metadata":{"source":"load"}}' '{"nested":[{"source":"load"}]}' '[{"source":"load"}]' '{"source":"load"' '{"source":"load"} trailing' '{"source":1}' \
-    '{"source":"load",}' '{"source":"load"]' '{"source":"load","x":wat}' '{"source":"load" "x":1}' '{garbage "source":"load"}' '{"source":"load","x":01}' "{'source':'load'}"; do
+    '{"source":"load",}' '{"source":"load"]' '{"source":"load","x":wat}' '{"source":"load" "x":1}' '{garbage "source":"load"}' '{"source":"load","x":01}' "{'source':'load'}" \
+    '{"source":"load\n"}' '{"source":" load"}' '{"source":"load "}' '{"source":"loa\u0064\n"}'; do
     rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
     write_active_sessions sess1 17031
     run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<"$in"

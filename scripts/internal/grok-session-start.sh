@@ -44,7 +44,9 @@ if [ -n "$INPUT" ]; then
   # Only the TOP-LEVEL "source" of one well-formed JSON object counts: a "source" key
   # nested in another value, or text that is not valid JSON, must never read as "load"
   # (that would mark a welcome-screen seat deliverable). JSON.parse validates the whole
-  # grammar; no usable node, or any parse failure, leaves it empty (= withhold, as before).
+  # grammar, and only the exact string "load" is handed back (never the raw value, so a
+  # trailing newline or other padding in it cannot be trimmed into a match); no usable
+  # node, or any parse failure, leaves it empty (= withhold, as before).
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/lib/node.sh"
   if agmsg_node_usable 2>/dev/null; then
@@ -55,8 +57,8 @@ if [ -n "$INPUT" ]; then
       process.stdin.on("end", () => {
         try {
           const o = JSON.parse(d);
-          if (o !== null && typeof o === "object" && !Array.isArray(o) && typeof o.source === "string") {
-            process.stdout.write(o.source);
+          if (o !== null && typeof o === "object" && !Array.isArray(o) && o.source === "load") {
+            process.stdout.write("load");
           }
         } catch { /* not valid JSON: no source */ }
       });' 2>/dev/null || true)"
