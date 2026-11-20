@@ -705,7 +705,8 @@ LS
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   local f in
   for in in '{"hookEventName":"session_start","source":"new"}' '{"hookEventName":"session_start"}' 'not json' '{"source":"LOAD"}' '{"source":"loaded"}' \
-    'not json "source":"load"' '{"source":"new","metadata":{"source":"load"}}' '{"nested":[{"source":"load"}]}' '[{"source":"load"}]' '{"source":"load"' '{"source":"load"} trailing' '{"source":1}'; do
+    'not json "source":"load"' '{"source":"new","metadata":{"source":"load"}}' '{"nested":[{"source":"load"}]}' '[{"source":"load"}]' '{"source":"load"' '{"source":"load"} trailing' '{"source":1}' \
+    '{"source":"load",}' '{"source":"load"]' '{"source":"load","x":wat}' '{"source":"load" "x":1}' '{garbage "source":"load"}' '{"source":"load","x":01}' "{'source':'load'}"; do
     rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
     write_active_sessions sess1 17031
     run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<"$in"
@@ -732,7 +733,7 @@ LS
 @test "grok-session-start.sh: a top-level source \"load\" is found among other keys, nested objects, escapes and whitespace" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   local f in
-  for in in '{"a":{"source":"new"},"source":"load"}' '{ "hookEventName" : "session_start", "x": "q\\"r\\"", "list": [1, {"source":"new"}], "source" : "load" }' "$(printf '{"sessionId":"s",\n"source":"load"}\n')"; do
+  for in in '{"a":{"source":"new"},"source":"load"}' '{ "hookEventName" : "session_start", "x": "q\"r\\\\", "list": [1, {"source":"new"}], "source" : "load" }' "$(printf '{"sessionId":"s",\n"source":"load"}\n')"; do
     rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
     write_active_sessions sess1 17031
     run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<"$in"
@@ -740,4 +741,13 @@ LS
     f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
     grep -q '"first_turn_done": true' "$f" || { echo "input [$in] gave: $(cat "$f")"; return 1; }
   done
+}
+
+@test "grok-session-start.sh: without a usable node the source is not read (first_turn_done stays false)" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 AGMSG_NODE=/nonexistent/node bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{"source":"load"}'
+  [ "$status" -eq 0 ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"first_turn_done": false' "$f"
 }
