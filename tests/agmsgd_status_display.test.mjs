@@ -244,6 +244,31 @@ test('grok queue seats are shown with the channel\'s own status vocabulary', asy
   assert.match(text, /Grok queue test\/ga6: agmsgd cannot reach this seat: could not list processes to find grok's leader \(ps exit 1: denied\)/);
 });
 
+test('grok queue: an empty leader socket says use_leader on, off, in another table, or unreadable apart', async t => {
+  const f = fixture(t);
+  const home = join(f.root, 'grokhome');
+  mkdirSync(home);
+  const prior = process.env.GROK_HOME;
+  process.env.GROK_HOME = home;
+  t.after(() => { if (prior === undefined) delete process.env.GROK_HOME; else process.env.GROK_HOME = prior; });
+  await fakeDaemon(t, f, {
+    grokQueue: [{ seat: JSON.stringify(['test', 'gl1']), state: 'unaddressable', reason: 'leader_socket_unknown' }],
+  });
+  const say = async cfg => {
+    if (cfg === null) rmSync(join(home, 'config.toml'), { force: true });
+    else writeFileSync(join(home, 'config.toml'), cfg);
+    return runAsync(f.root);
+  };
+  assert.match(await say('[cli]\nuse_leader = true\n'), /gl1: agmsgd cannot reach this seat: use_leader is on in .* but no grok leader was found/);
+  assert.match(await say('[cli]\nuse_leader = false\n'), /gl1: agmsgd cannot reach this seat: grok is not running in leader mode/);
+  // use_leader in some other table is not the [cli] one.
+  assert.match(await say('[cli]\nuse_leader = false\n[other]\nuse_leader = true\n'), /gl1: .*not running in leader mode/);
+  // No file: nothing was read, so neither on nor off is claimed.
+  const unread = await say(null);
+  assert.match(unread, /gl1: .*could not be read to tell whether use_leader is on/);
+  assert.doesNotMatch(unread, /not running in leader mode/);
+});
+
 test('grok queue seats not yet on agmsgd delivery are hidden without --all, shown with it', async t => {
   const f = fixture(t);
   await fakeDaemon(t, f, {

@@ -418,6 +418,7 @@ PS
 #!/bin/sh
 d="$(dirname "$0")"
 for a in "$@"; do case "$prev" in -p) pid="$a" ;; esac; prev="$a"; done
+[ -n "$pid" ] || pid=all
 cat "$d/lsof.$pid" 2>/dev/null
 LS
   chmod +x "$d/ps" "$d/lsof"
@@ -514,10 +515,42 @@ _listen_unix() {   # <path>: a real unix socket node at <path> (no listener need
   _listen_unix "$GROK_HOME/leader.sock"
   _stub_ps "17032 17031 /usr/local/bin/grok" "17034     1 /usr/local/bin/grok"
   _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  # lsof: this session's socket points at 0xAAA, the leader's accepted socket named leader.sock is 0xAAA.
+  printf '%s\n' "f17" "n->0xAAA" > "$TEST_SKILL_DIR/psbin/lsof.17031"
+  printf '%s\n' "f9" "d0xAAA" "n$GROK_HOME/leader.sock" "f10" "d0xBBB" "n->0xAAA" > "$TEST_SKILL_DIR/psbin/lsof.all"
   _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
   [ "$status" -eq 0 ]
   grep -qF "\"leader_socket\": \"$GROK_HOME/leader.sock\"" "$(_witness)"
   [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+}
+
+@test "grok leader lookup: a TUI started without a leader, config turned on after, another TUI's leader.sock exists -> none, never adopted" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  printf '[cli]\nuse_leader = true\n' > "$GROK_HOME/config.toml"
+  _listen_unix "$GROK_HOME/leader.sock"
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  # This session's only unix socket points somewhere that is not the leader's.
+  printf '%s\n' "f17" "n->0xCCC" > "$TEST_SKILL_DIR/psbin/lsof.17031"
+  printf '%s\n' "f9" "d0xAAA" "n$GROK_HOME/leader.sock" "f10" "d0xBBB" "n->0xAAA" > "$TEST_SKILL_DIR/psbin/lsof.all"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/ | grep grok-seat-pending || true)" ]
+}
+
+@test "grok leader lookup: use_leader on, a leader.sock, but lsof lists nothing -> unknown, never none" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  printf '[cli]\nuse_leader = true\n' > "$GROK_HOME/config.toml"
+  _listen_unix "$GROK_HOME/leader.sock"
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "could not list unix sockets (lsof)" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
 }
 
 @test "grok leader lookup: use_leader on but no leader.sock yet -> unknown with that reason, not a guessed socket" {
