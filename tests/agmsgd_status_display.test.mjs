@@ -37,20 +37,20 @@ function fixture(t) {
 // block this one while they run): answers hello, then status, or seats with
 // the rows given, or never answers seats when `mode` is "silent". The install
 // record is set to point at it, as a running daemon's would.
-async function fakeDaemon(t, { root, db }, { codex = [], terminalPoke = [], mode = 'answer' } = {}) {
+async function fakeDaemon(t, { root, db }, { codex = [], terminalPoke = [], grokQueue = [], mode = 'answer' } = {}) {
   const socket = join(root, 'run/d.sock');
   const child = spawn(process.execPath, ['-e', `
     const net = require('node:net');
-    const [socket, mode, rows, tpRows] = process.argv.slice(1);
+    const [socket, mode, rows, tpRows, gqRows] = process.argv.slice(1);
     net.createServer((c) => { let b = '', n = 0;
       c.on('data', (d) => { b += d; let i;
         while ((i = b.indexOf('\\n')) >= 0) { const msg = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); n += 1;
           if (msg.type === 'hello') c.write(JSON.stringify({ type: 'hello_ok' }) + '\\n');
           else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true }) + '\\n'); c.end(); }
           else if (msg.type === 'seats' && mode !== 'silent') {
-            c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: JSON.parse(rows) }, claude_code: { polled: true, seats: [] }, terminal_poke: { polled: true, seats: JSON.parse(tpRows) } }) + '\\n'); c.end(); } } });
+            c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: JSON.parse(rows) }, claude_code: { polled: true, seats: [] }, terminal_poke: { polled: true, seats: JSON.parse(tpRows) }, grok_queue: { polled: true, seats: JSON.parse(gqRows) } }) + '\\n'); c.end(); } } });
     }).listen(socket, () => console.log('up'));
-  `, socket, mode, JSON.stringify(codex), JSON.stringify(terminalPoke)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  `, socket, mode, JSON.stringify(codex), JSON.stringify(terminalPoke), JSON.stringify(grokQueue)], { stdio: ['ignore', 'pipe', 'inherit'] });
   t.after(() => child.kill());
   await new Promise((resolve) => child.stdout.once('data', resolve));
   db.prepare("UPDATE daemon_owner SET state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
@@ -206,6 +206,7 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
       { seat: JSON.stringify(['test', 'g2']), state: 'unaddressable', reason: 'no_pane' },
       { seat: JSON.stringify(['test', 'g3']), state: 'unaddressable', reason: 'pane_gone' },
       { seat: JSON.stringify(['test', 'g4']), state: 'unaddressable', reason: 'no_verified_input_box:gemini' },
+      { seat: JSON.stringify(['test', 'g5']), state: 'pending', reason: 'unknown:herdr_not_on_path' },
     ],
   });
   const text = await runAsync(f.root);
@@ -216,6 +217,66 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   // scope decision (2026-11-14): a type with no real-pane-verified
   // input-box marker is shown, never silently hidden, even without --all.
   assert.match(text, /Terminal poke test\/g4: agmsgd cannot reach this seat yet: no verified input-box check for type gemini/);
+  // A resident agmsgd whose PATH lacks the pane's terminal CLI says which
+  // CLI and what to do, not a generic "could not be checked".
+  assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(from a shell where herdr works, run agmsg daemon stop, then agmsg daemon start\)/);
+});
+
+test('grok queue seats are shown with the channel\'s own status vocabulary', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    grokQueue: [
+      { seat: JSON.stringify(['test', 'ga1']), state: 'notified', reason: '' },
+      { seat: JSON.stringify(['test', 'ga2']), state: 'notified', reason: 'socket_dir_perms_lax' },
+      { seat: JSON.stringify(['test', 'ga3']), state: 'unaddressable', reason: 'process_gone' },
+      { seat: JSON.stringify(['test', 'ga4']), state: 'unaddressable', reason: 'first_turn_pending' },
+      { seat: JSON.stringify(['test', 'ga5']), state: 'pending', reason: 'nudge_timeout' },
+      { seat: JSON.stringify(['test', 'ga6']), state: 'unaddressable', reason: "leader_socket_unknown:could not list processes to find grok's leader (ps exit 1: denied)" },
+    ],
+  });
+  const text = await runAsync(f.root);
+  assert.match(text, /Grok queue test\/ga1: notified via grok queue$/m);
+  assert.match(text, /Grok queue test\/ga2: notified via grok queue \(warning: the leader socket's directory is readable\/writable by group or other/);
+  assert.match(text, /Grok queue test\/ga3: session process gone/);
+  assert.match(text, /Grok queue test\/ga4: pending: first turn not complete yet/);
+  assert.match(text, /Grok queue test\/ga5: pending: nudge_timeout/);
+  // An empty socket the hooks could not vouch for shows why, not "not in leader mode".
+  assert.match(text, /Grok queue test\/ga6: agmsgd cannot reach this seat: could not list processes to find grok's leader \(ps exit 1: denied\)/);
+});
+
+test('grok queue seats not yet on agmsgd delivery are hidden without --all, shown with it', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    grokQueue: [
+      { seat: JSON.stringify(['test', 'ga1']), state: 'unaddressable', reason: 'not_registered_for_agmsgd' },
+    ],
+  });
+  const plain = await runAsync(f.root);
+  assert.doesNotMatch(plain, /Grok queue test\/ga1/);
+  const withAll = await runAsync(f.root, ['--all']);
+  assert.match(withAll, /Grok queue test\/ga1: agmsgd cannot reach this seat yet \(not on agmsgd delivery, or no SessionStart has run\)/);
+});
+
+test('grok queue: a recorded pending reason (SessionStart/Stop both could not find the session) is shown unconditionally, never behind --all (Linux real-machine round)', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    grokQueue: [
+      { seat: JSON.stringify(['test', 'ga1']), state: 'unaddressable', reason: 'not_registered_for_agmsgd:SessionStart could not find session sess-1 in /home/x/.grok/active_sessions.json' },
+    ],
+  });
+  const plain = await runAsync(f.root);
+  assert.match(plain, /Grok queue test\/ga1: agmsgd cannot reach this seat: SessionStart could not find session sess-1 in \/home\/x\/\.grok\/active_sessions\.json/);
+});
+
+test('grok queue: a recorded pending reason alongside process_gone is shown too, not only the missing-witness case (review on #1979, finding 1)', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    grokQueue: [
+      { seat: JSON.stringify(['test', 'ga1']), state: 'unaddressable', reason: 'process_gone:Stop could not find session sess-2 in /home/x/.grok/active_sessions.json either' },
+    ],
+  });
+  const plain = await runAsync(f.root);
+  assert.match(plain, /Grok queue test\/ga1: agmsgd cannot reach this seat: Stop could not find session sess-2 in \/home\/x\/\.grok\/active_sessions\.json either/);
 });
 
 test('a recorded Node that is gone does not turn a running agmsgd into "not running": the seat state is still fetched', async t => {

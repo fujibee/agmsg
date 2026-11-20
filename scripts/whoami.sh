@@ -21,6 +21,10 @@ source "$SCRIPT_DIR/lib/detect-cli-type.sh"
 
 PROJECT_PATH="${1:?Usage: whoami.sh <project_path> [type]}"
 AGENT_TYPE="${2:-$(agmsg_detect_cli_type)}"
+# #846: a grok-build session reading the shared Codex-flavored skill identifies
+# itself as "codex" literally; read that back as grok-build when the process
+# itself carries grok's own session marker. A no-op for every other caller.
+AGENT_TYPE="$(agmsg_resolve_grok_type "$AGENT_TYPE")"
 
 # Reject an unknown type the caller ASKED for, the same check join.sh makes
 # (#783). Without it a wrong or misspelled $2 reads all the way through to

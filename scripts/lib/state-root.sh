@@ -249,7 +249,10 @@ agmsg_state_detach_foreign() {   # <skill dir>
     fi
     if [ -n "$owner" ] && [ "${owner%/}" != "$skill" ] && [ -d "$owner" ] \
        && [ "$(cd -P "$owner" 2>/dev/null && pwd -P)" != "$(cd -P "$skill" 2>/dev/null && pwd -P)" ]; then
-      command rm -f "$skill/$part" && mkdir -p "$skill/$part" || return 1
+      command rm -f "$skill/$part" && mkdir -p "$skill/$part" || {
+        echo "  ! could not give $skill/$part its own state in place of the link into $owner (rm/mkdir failed)" >&2
+        return 1
+      }
       echo "  ~ $skill/$part was linked into the state of $owner; this install now has its own (that state is left as it is)"
     fi
   done

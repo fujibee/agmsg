@@ -1222,3 +1222,76 @@ EOF
   [ "$status" -eq 0 ]
   grep -q 'no usable Codex' <<<"$output"
 }
+
+# A resident manager starts agmsgd with a minimal PATH (launchd:
+# /usr/bin:/bin:/usr/sbin:/sbin), where herdr/tmux from ~/.local/bin or
+# Homebrew is not found and the terminal-poke channel can reach no pane.
+# start records where the terminal CLIs named by the bundled drivers'
+# `bin=` are found, for agmsgd to append to its own PATH.
+@test "daemon.sh start: records the directory of each terminal CLI it finds (terminal.conf bin=)" {
+  _seed_install_db
+  _write_completion_record
+  mkdir -p "$TEST_SKILL_DIR/clibin"
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_SKILL_DIR/clibin/herdr"
+  chmod +x "$TEST_SKILL_DIR/clibin/herdr"
+  PATH="$TEST_SKILL_DIR/clibin:$PATH" _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  tr ':' '\n' < "$TEST_SKILL_DIR/run/agmsgd-tool-path" | grep -qxF "$TEST_SKILL_DIR/clibin"
+}
+
+@test "daemon.sh start: a directory recorded earlier is kept while it exists, and dropped once it is gone" {
+  _seed_install_db
+  _write_completion_record
+  mkdir -p "$TEST_SKILL_DIR/kept"
+  printf '%s\n' "$TEST_SKILL_DIR/kept:$TEST_SKILL_DIR/gone:relative/dir" > "$TEST_SKILL_DIR/run/agmsgd-tool-path"
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  tr ':' '\n' < "$TEST_SKILL_DIR/run/agmsgd-tool-path" > "$TEST_SKILL_DIR/rec.lines"
+  grep -qxF "$TEST_SKILL_DIR/kept" "$TEST_SKILL_DIR/rec.lines"
+  refute grep -qxF "$TEST_SKILL_DIR/gone" "$TEST_SKILL_DIR/rec.lines"
+  refute grep -qxF "relative/dir" "$TEST_SKILL_DIR/rec.lines"
+}
+
+@test "daemon.sh start: a record that cannot be written is warned about on stderr, and start still succeeds" {
+  _seed_install_db
+  _write_completion_record
+  mkdir -p "$TEST_SKILL_DIR/run/agmsgd-tool-path"
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  [[ "$output" == *"terminal CLI directories (herdr, tmux) were not recorded"* ]]
+}
+
+@test "daemon.sh start: already running with a newer record says to stop and start again, since agmsgd applies it only at startup" {
+  _seed_install_db
+  _write_completion_record
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  mkdir -p "$TEST_SKILL_DIR/clibin2"
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_SKILL_DIR/clibin2/herdr"
+  chmod +x "$TEST_SKILL_DIR/clibin2/herdr"
+  PATH="$TEST_SKILL_DIR/clibin2:$PATH" _run_with_deadline 15 bash "$DAEMON" start
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  _assert_start_result 'already running'
+  [[ "$output" == *"take effect after: agmsg daemon stop, then agmsg daemon start"* ]]
+}
+
+# The record writer runs inside cmd_start under errexit: a failed write AND a
+# failed cleanup of its own temp file must still reach the warning and let
+# start continue (review on #1988). Exercised on the function alone, with mv
+# and rm both failing, under the shell options daemon.sh runs with.
+@test "daemon.sh _record_tool_path: a failed replace whose temp cleanup also fails is reported, and the caller continues" {
+  mkdir -p "$TEST_SKILL_DIR/failbin" "$TEST_SKILL_DIR/rtp/run"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/failbin/mv"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/failbin/rm"
+  chmod +x "$TEST_SKILL_DIR/failbin/mv" "$TEST_SKILL_DIR/failbin/rm"
+  sed -n '/^_tool_path_file()/p;/^_record_tool_path()/,/^}/p' "$DAEMON" > "$TEST_SKILL_DIR/rtp/fn.sh"
+  run bash -c 'set -euo pipefail; . "$1"; SKILL_DIR="$2"; SCRIPT_DIR="$3"; PATH="$4:$PATH"; _record_tool_path; echo CONTINUED' _ \
+    "$TEST_SKILL_DIR/rtp/fn.sh" "$TEST_SKILL_DIR/rtp" "$SCRIPTS" "$TEST_SKILL_DIR/failbin"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "could not replace"
+  printf '%s\n' "$output" | grep -q "could not be removed"
+  printf '%s\n' "$output" | grep -q "CONTINUED"
+}

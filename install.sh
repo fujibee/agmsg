@@ -495,6 +495,21 @@ _agmsg_install_engine_stop_locked() {   # <skill_dir> <team>
 # A state that stays where Codex watches is shown where a person already looks
 # (agmsg status, doctor, the start of a session), not only in this run's output.
 # The record is cleared once the state has moved.
+# AGMSG_UPDATE_STEP names the step an update is in, from "Updating ..." to its
+# first progress line. When the script ends with a non-zero status while a step is
+# named, one line says which step and the status. This is an exit trap, so it
+# changes nothing about how or where the update ends: errexit, `exit 1` and every
+# return keep their own status, and nothing here is part of a condition.
+AGMSG_UPDATE_STEP=""
+agmsg_install_update_exit_note() {   # <exit status>
+  [ "$1" -ne 0 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ] || return 0
+  [ -n "$AGMSG_UPDATE_STEP" ] || return 0
+  # Best effort: this runs in the EXIT trap under errexit, and a failed write (stderr
+  # closed, a full disk) must not end the trap before the cleanup that follows it or
+  # change the status the script is exiting with.
+  echo "  ! update stopped at: $AGMSG_UPDATE_STEP (exit status $1)" >&2 || true
+}
+
 agmsg_install_state_notice() {   # <skill_dir> <reason>
   AGMSG_DOWN_NOTICE_ROOT="$1" down_notice_set state degraded \
     "the state of '${1##*/}' is still in $1, a directory Codex watches (not moved: $2)" \
@@ -748,7 +763,7 @@ agmsg_reset_trash() {
   if [ -L "$dir" ]; then dir="$(readlink "$dir")"; fi
   rm -rf "$dir"
   agmsg_install_op_require || return 1
-  mkdir -p "$dir"
+  mkdir -p "$dir" || { echo "  ! could not recreate the trash directory $dir (mkdir rc=$?)" >&2; return 1; }
   agmsg_install_op_require
 }
 
@@ -760,6 +775,8 @@ agmsg_reset_trash() {
 # Requires (globals the caller must already have set): SCRIPT_DIR, SKILL_DIR,
 # INSTALLED_VERSION.
 agmsg_install_operation_exit() {
+  local rc=$?
+  agmsg_install_update_exit_note "$rc" || true
   if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
     agmsg_install_op_unlock
     AGMSG_INSTALL_OP_ACTIVE=false
@@ -769,18 +786,24 @@ agmsg_install_operation_exit() {
 agmsg_install_write_recovery_helper() {
   local helper="$SKILL_DIR/run/install-op-recovery.sh" temp
   agmsg_install_op_require || return 1
-  temp="$(mktemp "$SKILL_DIR/run/.install-op-recovery.XXXXXX")" || return 1
+  temp="$(mktemp "$SKILL_DIR/run/.install-op-recovery.XXXXXX")" || {
+    echo "  ! recovery helper: mktemp failed in $SKILL_DIR/run (rc=$?)" >&2
+    return 1
+  }
   if ! cat "$SCRIPT_DIR/scripts/lib/codex-config.sh" "$SCRIPT_DIR/scripts/lib/sqlite-crlf.sh" "$SCRIPT_DIR/scripts/lib/sqlpath.sh" \
       "$SCRIPT_DIR/scripts/lib/sqlite-output.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" "$SCRIPT_DIR/scripts/lib/state-root.sh" > "$temp"; then
+    echo "  ! recovery helper: could not assemble $temp from $SCRIPT_DIR/scripts/lib" >&2
     rm -f "$temp"
     return 1
   fi
   if ! chmod 600 "$temp"; then
+    echo "  ! recovery helper: chmod 600 failed on $temp" >&2
     rm -f "$temp"
     return 1
   fi
   agmsg_install_op_require || { rm -f "$temp"; return 1; }
   if ! mv -f "$temp" "$helper"; then
+    echo "  ! recovery helper: could not move $temp to $helper" >&2
     rm -f "$temp"
     return 1
   fi
@@ -825,7 +848,10 @@ agmsg_install_operation_begin() {
   fi
 
   AGMSG_INSTALL_OP_MARKER="$pending"
-  agmsg_install_op_pending_begin "$pending" install "$SKILL_DIR" "" "$operation_mode" || return 1
+  agmsg_install_op_pending_begin "$pending" install "$SKILL_DIR" "" "$operation_mode" || {
+    echo "  ! could not record the incomplete-operation marker: $pending" >&2
+    return 1
+  }
 
   if [ "${UPDATE_ONLY:-false}" = true ] && [ ! -f "$SKILL_DIR/.agmsg" ]; then
     echo "  ! the selected installation was removed before the update could acquire its lock" >&2
@@ -835,10 +861,14 @@ agmsg_install_operation_begin() {
   # Validate the prior generation before making any installation change. A
   # first install is generation 1 only when neither completion file exists.
   if ! AGMSG_INSTALL_GEN="$(agmsg_install_manifest_next_gen "$manifest")"; then
+    echo "  ! could not read the generation of the install manifest: $manifest" >&2
     return 1
   fi
   agmsg_install_op_require || return 1
-  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || return 1
+  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || {
+    echo "  ! could not read or create install.db's meta row: $install_db" >&2
+    return 1
+  }
   agmsg_install_op_require || return 1
   if [ -z "$AGMSG_INSTALL_ID" ]; then
     echo "  ! could not read or create install.db's meta row" >&2
@@ -1380,6 +1410,8 @@ if [ "$UPDATE_ONLY" = true ]; then
     exit 1
   fi
   echo "  Updating $SKILL_NAME..."
+  AGMSG_UPDATE_STEP="reading the install before the update ($SKILL_DIR)"
+  trap 'agmsg_install_operation_exit' EXIT
   INSTALLED_VERSION="$(agmsg_source_version)"
   # #963: a sync engine that is running when the write below starts either
   # survives on the code it already loaded (silent -- `remote.sh status` still
@@ -1394,6 +1426,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   # since its pidfile already reads as stale by then.
   # A copy made with cp -R still links to the ORIGINAL's state: give it its own
   # (empty) parts before anything is read, locked or written through those links.
+  AGMSG_UPDATE_STEP="giving this install its own state ($SKILL_DIR)"
   agmsg_state_detach_foreign "$SKILL_DIR" || exit 1
   AGMSG_RUNNING_TEAMS=""
   if [ -x "$SKILL_DIR/scripts/remote.sh" ]; then
@@ -1417,10 +1450,15 @@ $_agmsg_running_team"
   # with run/ by rename, so it is the same file at both paths and a second
   # install, update or uninstall waits (or refuses on the unfinished record)
   # instead of working on the old tree.
+  AGMSG_UPDATE_STEP="starting the install operation (lock, incomplete-operation record, install.db) in $SKILL_DIR"
   agmsg_install_operation_begin || exit 1
+  AGMSG_UPDATE_STEP="moving the state of $SKILL_DIR"
   agmsg_install_move_state "$SKILL_DIR" "$AGMSG_RUNNING_TEAMS"
+  AGMSG_UPDATE_STEP="stopping agmsgd before the update"
   agmsg_install_stop_daemon "$SKILL_DIR"
+  AGMSG_UPDATE_STEP="writing the recovery helper ($SKILL_DIR/run/install-op-recovery.sh)"
   agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
+  AGMSG_UPDATE_STEP="detecting the agent type of $SKILL_DIR/SKILL.md"
   # Captured before the auto-detect below can fill AGENT_TYPE in for other
   # reasons: an EXPLICIT --agent-type is what #1449's rule below cares about,
   # not whatever AGENT_TYPE ends up holding once auto-detected too.
@@ -1463,18 +1501,24 @@ $_agmsg_running_team"
       ;;
   esac
   unset _agmsg_explicit_agent_type _agmsg_detected_type
+  AGMSG_UPDATE_STEP="rendering $SKILL_DIR/SKILL.md for $TPL_TYPE"
   agmsg_install_op_run_phase agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md" || exit 1
   TRASH_DIR="$SKILL_DIR/.trash"
   AGMSG_TRASH_COUNT=0
+  AGMSG_UPDATE_STEP="resetting $TRASH_DIR"
   agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   # Runs under the install operation lock. The completion manifest is written
   # only after the remaining install updates below are complete.
+  AGMSG_UPDATE_STEP="listing the built-in drivers of $SKILL_DIR"
   AGMSG_BUILTINS_BEFORE="$(agmsg_builtin_driver_names "$SKILL_DIR")"
+  AGMSG_UPDATE_STEP="copying scripts into $SKILL_DIR/scripts"
   agmsg_install_copy_scripts || exit 1
+  AGMSG_UPDATE_STEP="copying CHANGELOG.md to $SKILL_DIR/CHANGELOG.md"
   agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
+  AGMSG_UPDATE_STEP=""
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   agmsg_plugin_shadow_warn "$SKILL_DIR" "$AGMSG_BUILTINS_BEFORE"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each

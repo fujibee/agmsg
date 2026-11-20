@@ -22,6 +22,9 @@ import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
 import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
 import { createTerminalPokeChannel } from "./channels/terminal-poke.mjs";
 import { ensureTerminalPokeChannelSchema } from "./channels/terminal-poke-store.mjs";
+import { createGrokQueueChannel } from "./channels/grok-queue.mjs";
+import { extendPathFromRecord } from "./tool-path.mjs";
+import { ensureGrokQueueChannelSchema } from "./channels/grok-queue-store.mjs";
 
 import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
 
@@ -32,6 +35,7 @@ export async function prepareClaimWithCodexSchema(prepareClaim) {
   ensureCodexChannelSchema(prepared.db);
   ensureClaudeCodeChannelSchema(prepared.db);
   ensureTerminalPokeChannelSchema(prepared.db);
+  ensureGrokQueueChannelSchema(prepared.db);
   return prepared;
 }
 
@@ -80,6 +84,11 @@ export async function startup(db, { installRoot, expectedDesired, expectedOpGen,
       logLine(installRoot, `startup: bind failed for gen ${owned.gen}: ${error.message}`);
       return { ok: false, reason: `bind failed: ${error.message}`, db };
     }
+    // Before the first poll: every channel's child process (terminal-nudge.sh
+    // and the terminal drivers under it) inherits this PATH.
+    const toolPath = extendPathFromRecord(installRoot);
+    if (toolPath.added.length) logLine(installRoot, `startup: PATH += ${toolPath.added.join(":")} (recorded terminal CLI directories)`);
+    if (toolPath.error) logLine(installRoot, `startup: terminal CLI directories: ${toolPath.error}; PATH left as started`);
     markReady(db, owned.gen);
     logLine(installRoot, `startup: gen ${owned.gen} ready at ${owned.socket}`);
     return { ok: true, gen: owned.gen, controlHandle, db };
@@ -231,7 +240,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
       // What the channels last observed about their seats. Held in memory, so
       // this is the only place it can be read.
       onSeats: async () => {
-        const out = { codex: { polled: false, seats: [] }, claude_code: { polled: false, seats: [] }, terminal_poke: { polled: false, seats: [] } };
+        const out = { codex: { polled: false, seats: [] }, claude_code: { polled: false, seats: [] }, terminal_poke: { polled: false, seats: [] }, grok_queue: { polled: false, seats: [] } };
         for (const hook of channelHooks) {
           if (typeof hook.seats !== 'function' || !out[hook.seatKind]) continue;
           out[hook.seatKind] = hook.seats();
@@ -258,6 +267,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
     createCodexQueueChannel({ db, installRoot, expectedOpGen }),
     createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
     createTerminalPokeChannel({ db, installRoot, expectedOpGen }),
+    createGrokQueueChannel({ db, installRoot, expectedOpGen }),
   ]));
 
   process.on("SIGTERM", () => doStop("normal"));

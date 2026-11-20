@@ -5,6 +5,23 @@ export AGMSG_DAEMON_NOTICE_SKIP=1
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 
+# Grok Build also executes Claude Code's own hooks
+# (~/.claude/settings.json and <project>/.claude/settings*.json), so this
+# script can fire for a grok session even though its own delivery is the
+# separate grok-build hook path. Running the Claude Code SessionStart logic
+# anyway would consume Claude Code's own one-time state for this project
+# (the agmsgd-intro notice, the down-notice "shown once" marker, the
+# cc-instance dedup record) on behalf of a session that was never the real
+# Claude Code session those are for -- so a LATER real Claude Code
+# SessionStart would then see them as already shown/consumed and stay
+# silent. Exit before anything reads or writes that state. GROK_HOOK_EVENT
+# is Grok's own hook-dispatch marker; GROK_SESSION_ID is set for every grok
+# hook invocation regardless of event. Either one means this is a grok
+# session, not a Claude Code one, no matter what $1 claims.
+if [ -n "${GROK_SESSION_ID:-}" ] || [ -n "${GROK_HOOK_EVENT:-}" ]; then
+  exit 0
+fi
+
 # SessionStart hook for delivery modes `monitor` and `both`.
 #
 # Usage: session-start.sh <type> <project_path>

@@ -7,7 +7,7 @@ import { deliveryEvent, recordPollTimeout } from './log.mjs';
 // entry here, or it silently shares another channel's table -- a real bug,
 // not just a naming mismatch, since this prefix names the SQL table a
 // channel's own rows are read back from).
-const QUEUE_TABLE_PREFIX = { codex: 'beta_codex', 'claude-code': 'beta_claude', terminal_poke: 'beta_terminal_poke' };
+const QUEUE_TABLE_PREFIX = { codex: 'beta_codex', 'claude-code': 'beta_claude', terminal_poke: 'beta_terminal_poke', grok_queue: 'beta_grok_queue' };
 
 export function createSeatPoller({ db, book, installRoot, channel, saveTimeout, log, timeoutMs = SEAT_DEADLINE_MS }) {
   const prefix = QUEUE_TABLE_PREFIX[channel] ?? 'beta_claude';

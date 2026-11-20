@@ -41,21 +41,29 @@ fi
 # existing one. Prints the (possibly just-created) install_id on success;
 # prints nothing and returns 1 on any sqlite failure.
 agmsg_install_db_ensure_meta() {   # <install_db_path>
-  local db="$1" id
+  local db="$1" id err rc
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
-  if ! sqlite3 "$db" \
+  err="$(sqlite3 "$db" \
     "CREATE TABLE IF NOT EXISTS meta (schema_version INTEGER NOT NULL, install_id TEXT NOT NULL);" \
-    2>/dev/null; then
+    2>&1)" || {
+    rc=$?
+    echo "  ! install.db: creating the meta table failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
     return 1
-  fi
-  id="$(agmsg_sqlite_capture "$db" "SELECT install_id FROM meta LIMIT 1;")" || return 1
+  }
+  id="$(agmsg_sqlite_capture "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
+    rc=$?
+    echo "  ! install.db: reading the install id failed (sqlite3 rc=$rc): $db" >&2
+    return 1
+  }
   if [ -z "$id" ]; then
     id="$(compat_uuid7)"
-    if ! sqlite3 "$db" \
+    err="$(sqlite3 "$db" \
       "INSERT INTO meta (schema_version, install_id) VALUES (1, '$id');" \
-      2>/dev/null; then
+      2>&1)" || {
+      rc=$?
+      echo "  ! install.db: writing the install id failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
       return 1
-    fi
+    }
   fi
   printf '%s\n' "$id"
 }
@@ -66,7 +74,7 @@ agmsg_install_db_ensure_meta() {   # <install_db_path>
 # `agmsg daemon enable` go through. Never touches an existing install_id.
 # Returns 1 on any sqlite failure.
 agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
-  local db="$1" schema="$2" col present
+  local db="$1" schema="$2" col present err rc
   # A writer elsewhere (agmsgd's own shutdown, a concurrent `agmsg` command)
   # can hold install.db for a moment -- `cmd_stop` confirms the DB row says
   # `none` before returning, not that the OS process has fully released its
@@ -84,9 +92,21 @@ agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
   for col in node_path node_version codex_path; do
     # One scalar per column: a multi-line result carries a CR on every line
     # from native Windows sqlite3.exe, which a name comparison would miss.
-    present="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT count(*) FROM pragma_table_info('meta') WHERE name = '$col';")" || return 1
+    present="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT count(*) FROM pragma_table_info('meta') WHERE name = '$col';")" || {
+      rc=$?
+      echo "  ! install.db: checking for meta column $col failed (sqlite3 rc=$rc): $db" >&2
+      return 1
+    }
     [ "$present" = 1 ] && continue
-    sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>/dev/null || return 1
+    err="$(sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE meta ADD COLUMN $col TEXT;" 2>&1)" || {
+      rc=$?
+      echo "  ! install.db: adding meta column $col failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
+      return 1
+    }
   done
-  sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>/dev/null
+  err="$(sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>&1)" || {
+    rc=$?
+    echo "  ! install.db: applying $schema failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
+    return 1
+  }
 }

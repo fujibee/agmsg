@@ -111,6 +111,13 @@ elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
   # questions and only the first one had a control.
   exit "\${HERDR_AGENT_RENAME_RC:-0}"
 elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
+  # Nested-terminal tests (#1981) steer this answer: fail / garbage / spaced JSON, or
+  # a chosen shell pid (default 7, which is never an ancestor of the test).
+  [ "\${FAKE_HERDR_PI_MODE:-}" = fail ] && exit 1
+  [ "\${FAKE_HERDR_PI_MODE:-}" = partialfail ] && { printf '{"result":{"process_info":{"shell_pid":%s}}}\n' "\${FAKE_HERDR_SHELL_PID:-7}"; exit 1; }
+  [ "\${FAKE_HERDR_PI_MODE:-}" = garbage ] && { echo '{"result":{"process_info":{"shell_pid":"x"}}}'; exit 0; }
+  [ "\${FAKE_HERDR_PI_MODE:-}" = spaced ] && { printf '{ "result" : { "process_info" : { "shell_pid" : %s } } }\n' "\${FAKE_HERDR_SHELL_PID:-7}"; exit 0; }
+  [ -n "\${FAKE_HERDR_SHELL_PID:-}" ] && { printf '{"result":{"process_info":{"shell_pid":%s,"foreground_process_group_id":%s}}}\n' "\$FAKE_HERDR_SHELL_PID" "\$FAKE_HERDR_SHELL_PID"; exit 0; }
   # requirement 1 gate: a READY pane (foreground pgid == shell pid) so terminal_spawn
   # proceeds to type. Overridable per test via HERDR_PROCESS_INFO_RESPONSE.
   if [ -n "\${HERDR_PROCESS_INFO_RESPONSE:-}" ]; then printf '%s\n' "\$HERDR_PROCESS_INFO_RESPONSE"
@@ -525,8 +532,12 @@ EOF
   [ -z "$(agmsg_terminal_self_env)" ] || return 1
 
   # Self-env order is independent of the resolver's global priorities (orca,
-  # herdr, tmux). A nested tmux environment remains the legacy first answer.
+  # herdr, tmux). A process inside the tmux pane (its pane shell is an ancestor,
+  # #1981) is located by tmux even though it carries the herdr environment too.
   touch "$TEST_SKILL_DIR/herdr.sock"
+  _install_fake_tmux
+  _install_fake_herdr "x"
+  export PATH="$FAKEBIN:$PATH" FAKE_TMUX_PANE_PID="$$"
   export TMUX="/tmp/tmux-self,321,0" TMUX_PANE='%4'
   export HERDR_ENV=1 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock" HERDR_PANE_ID='w1:p2'
   export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
@@ -4080,6 +4091,8 @@ _fake_herdr_labels() {   # <pane_id=label> ...
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 if [ "\$1" = pane ] && [ "\$2" = list ]; then
   printf '%s\n' '{"id":"cli:pane:list","result":{"panes":[$entries]}}'
+elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
+  printf '{"result":{"process_info":{"pane_id":"%s","shell_pid":%s}}}\n' "\$4" "\${FAKE_HERDR_SHELL_PID:-7}"
 elif [ "\$1" = pane ] && [ "\$2" = get ]; then
   # terminal_team_observe reads label from here; answer from the same fixture so
   # the confirmation step cannot disagree with the listing by construction.
@@ -5086,4 +5099,159 @@ TABLE
   refute grep -q '^placement=replaced' <<<"$output"
   test -e "$peer"
   refute test -e "$(agmsg_spawn_path seatteam inner)"
+}
+
+# --- #1981: the innermost of tmux / herdr names the pane ------------------------
+# A tmux session started in a herdr pane inherits that pane's HERDR_* variables.
+# Which terminal a process is inside is read from its ancestry: it is inside the
+# tmux pane iff the pane's shell pid is one of its ancestors.
+
+_nested_env() {   # <tmux pane pid the fake reports>
+  _install_fake_herdr "x"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  export FAKE_TMUX_PANE_PID="$1"
+}
+
+@test "nested (#1981): a process inside the tmux pane is located by tmux, not the enclosing herdr pane" {
+  _nested_env "$$"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'tmux\t/tmp/fake:%%1')" ]
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  case "$output" in "tmux"$'\t'"/tmp/fake:%1"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "nested (#1981): a herdr pane that merely inherited TMUX is located by herdr" {
+  _nested_env 999999
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'*":wC:p4") ;; *) echo "$output"; return 1 ;; esac
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'*":wC:p4"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "nested (#1981): when the innermost cannot be told, nothing is named and the reason is said" {
+  _nested_env ""
+  run --separate-stderr agmsg_terminal_resolve_name ""
+  [ "$status" -eq 1 ]
+  grep -q 'both a tmux and a herdr environment' <<<"$stderr"
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:tmux:nested_terminals_innermost_unknown" ]
+}
+
+@test "nested (#1981): with only one terminal's environment no tmux process is started to decide" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  unset HERDR_ENV HERDR_PANE_ID
+  : > "$ARGV_LOG"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  refute grep -q 'pane_pid' "$ARGV_LOG"
+}
+
+@test "nested (#1981): a pane label on the enclosing herdr pane does not pull a tmux seat out to it" {
+  _fake_herdr_labels "wC:p4=seatteam:alice"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 HERDR_PANE_ID="wC:p4"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  export FAKE_TMUX_PANE_PID="$$"
+  run agmsg_terminal_name_self "" seatteam alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
+  grep -Fq 'tmux:/tmp/fake:%1' "$(agmsg_spawn_path seatteam alice)"
+  refute grep -q 'herdr' "$(agmsg_spawn_path seatteam alice)"
+  rm -f "$(agmsg_spawn_path seatteam alice)"
+  # undecidable: nothing is named or recorded, and the label does not decide it
+  export FAKE_TMUX_PANE_PID=""
+  run agmsg_terminal_name_self "" seatteam alice /proj/A claude-code record
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "nested (#1981): an empty-sid naming that cannot tell the innermost terminal says why and stops nothing" {
+  _nested_env ""
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  run --separate-stderr agmsg_terminal_name_self "" seatteam alice /proj/A codex record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record this pane.*nested terminals' <<<"$stderr"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+# Integration of the two nested rules (#1980 refusal, #1981 decision): which of the
+# two terminals the process is inside decides whether it may replace a record.
+@test "nested (#1981): a herdr pane that inherited TMUX is located by herdr and may replace its own pane's stale record" {
+  _nested_env 999999        # the tmux pane's shell is NOT an ancestor: this is a herdr pane
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam stale)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+  run --separate-stderr agmsg_placement_report "" seatteam taker /proj/MINE codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=replaced team=seatteam previous=seatteam__stale ')" -eq 1 ]
+  refute test -e "$peer"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$(agmsg_spawn_path seatteam taker)"
+}
+
+@test "nested (#1981): a seat the ancestry shows inside the tmux pane records the tmux pane and leaves the herdr record alone" {
+  _nested_env "$$"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/placement-report.sh"
+  local peer; peer="$(agmsg_spawn_path seatteam outer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:%s:wC:p4\t/proj/OUTER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
+  run --separate-stderr agmsg_placement_report "" seatteam inner /proj/IN codex record "" "" replace_claim
+  [ "$status" -eq 0 ]
+  test -e "$peer"
+  grep -Fq 'tmux:/tmp/fake:%1' "$(agmsg_spawn_path seatteam inner)"
+}
+
+@test "nested (#1981): a herdr server started in the foreground of a tmux pane still locates its own panes by herdr (nearest pane shell wins)" {
+  _nested_env "$PPID"              # the tmux pane's shell is an ancestor, but ABOVE the herdr pane's
+  export FAKE_HERDR_SHELL_PID="$$"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'*":wC:p4") ;; *) echo "$output"; return 1 ;; esac
+  # and with the herdr shell not among the ancestors, the tmux pane decides again
+  export FAKE_HERDR_SHELL_PID=999998
+  run agmsg_terminal_resolve_name ""
+  [ "$output" = "$(printf 'tmux\t/tmp/fake:%%1')" ]
+}
+
+@test "nested (#1981): herdr's shell pid is read from valid JSON whatever its spacing" {
+  _nested_env "$PPID"
+  export FAKE_HERDR_SHELL_PID="$$" FAKE_HERDR_PI_MODE=spaced
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'*":wC:p4") ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "nested (#1981): when herdr cannot say where its pane's shell is, nothing is chosen on tmux's word alone" {
+  local mode
+  for mode in fail garbage partialfail; do
+    _nested_env "$PPID"
+    export FAKE_HERDR_PI_MODE="$mode"
+    run --separate-stderr agmsg_terminal_resolve_name ""
+    [ "$status" -eq 1 ] || { echo "mode=$mode status=$status output=$output"; return 1; }
+    grep -q 'both a tmux and a herdr environment' <<<"$stderr"
+  done
+  # herdr not on PATH at all
+  _nested_env "$PPID"
+  rm -f "$FAKEBIN/herdr"
+  PATH="$FAKEBIN:/usr/bin:/bin" run --separate-stderr agmsg_terminal_resolve_name ""
+  [ "$status" -eq 1 ]
+}
+
+@test "nested (#1981): a failed process-info that printed a pid first is not trusted, with or without pipefail" {
+  _nested_env "$PPID"
+  export FAKE_HERDR_SHELL_PID="$$" FAKE_HERDR_PI_MODE=partialfail
+  set +o pipefail
+  run agmsg_terminal_resolve_name ""
+  set -o pipefail
+  [ "$status" -eq 1 ]
 }

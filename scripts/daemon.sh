@@ -744,6 +744,84 @@ _wait_for_ready() {
 # `start --only-if-op-gen N` is what an update uses to bring a daemon back: it
 # starts only if the intent is still the "on" at op_gen N the update saw, so a
 # stop/disable/start made by a person in the meantime is never undone.
+# The directories holding the terminal CLIs agmsgd's channels drive, as the
+# shell running this command finds them: each bundled terminal driver names
+# its CLI in terminal.conf's `bin=`. A resident manager starts agmsgd with a
+# minimal PATH (launchd: /usr/bin:/bin:/usr/sbin:/sbin) where herdr or tmux
+# from ~/.local/bin or Homebrew is not found, and every seat in such a pane
+# then goes undelivered. agmsgd appends these to its own PATH at startup
+# (scripts/daemon/tool-path.mjs). Recorded on every start, so an update (which
+# runs start) refreshes it; a CLI not found now keeps a directory recorded
+# earlier as long as that directory still exists. One grep for the manifests,
+# then one `command -v` builtin per CLI -- no per-driver process.
+_tool_path_file() { printf '%s/run/agmsgd-tool-path' "$SKILL_DIR"; }
+_record_tool_path() {
+  local file bins bin found dir out="" old=""
+  file="$(_tool_path_file)"
+  bins="$(grep -h -E '^[[:space:]]*bin[[:space:]]*=' "$SCRIPT_DIR"/drivers/terminals/*/terminal.conf 2>/dev/null | LC_ALL=C sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/' || true)"
+  for bin in $bins; do
+    case "$bin" in */*|'') continue ;; esac
+    found="$(command -v "$bin" 2>/dev/null || true)"
+    case "$found" in /*) ;; *) continue ;; esac
+    dir="${found%/*}"
+    [ -n "$dir" ] || dir=/
+    case "$dir" in *:*|*[[:cntrl:]]*) continue ;; esac
+    case ":$out:" in *":$dir:"*) continue ;; esac
+    out="${out:+$out:}$dir"
+  done
+  if [ -f "$file" ] && [ -r "$file" ]; then
+    IFS= read -r old < "$file" || true
+    local IFS=:
+    for dir in $old; do
+      case "$dir" in /*) ;; *) continue ;; esac
+      [ -d "$dir" ] || continue
+      case ":$out:" in *":$dir:"*) continue ;; esac
+      out="${out:+$out:}$dir"
+    done
+    unset IFS
+  fi
+  TOOL_PATH_RECORDED="$out"
+  # A failed write never fails start (agmsgd runs either way), but it is
+  # said, not swallowed: a seat in a herdr/tmux pane can stay unreachable.
+  # The temp file is one mktemp just created (so it is ours and a regular
+  # file); it is the only path ever removed here, and a removal that fails is
+  # reported with the rest instead of ending start under errexit.
+  local why="" tmp=""
+  if ! mkdir -p "$SKILL_DIR/run" 2>/dev/null; then
+    why="could not create $SKILL_DIR/run"
+  elif [ -e "$file" ] && [ ! -f "$file" ]; then
+    why="$file is not a regular file"
+  elif ! tmp="$(mktemp "$SKILL_DIR/run/.agmsgd-tool-path.XXXXXX" 2>/dev/null)" || [ -z "$tmp" ]; then
+    tmp=""
+    why="could not create a temporary file in $SKILL_DIR/run"
+  elif ! printf '%s\n' "$out" > "$tmp" 2>/dev/null; then
+    why="could not write $tmp"
+  elif ! mv -f "$tmp" "$file" 2>/dev/null; then
+    why="could not replace $file"
+  else
+    tmp=""
+  fi
+  if [ -n "$tmp" ] && [ -f "$tmp" ]; then
+    rm -f -- "$tmp" 2>/dev/null || why="$why (and $tmp could not be removed)"
+  fi
+  if [ -n "$why" ]; then
+    echo "agmsg daemon start: the terminal CLI directories (herdr, tmux) were not recorded: $why. agmsgd started by launchd/systemd may then not find them, and seats in those panes are not reached." >&2
+  fi
+  return 0
+}
+
+# Run after start found agmsgd already running: agmsgd applies the record only
+# when it starts, and writes what it applied to run/agmsgd-tool-path.applied.
+# A record that now differs from that is not in effect until a restart; say
+# so with the commands that actually apply it.
+_tool_path_restart_hint() {
+  local applied=""
+  [ -n "${TOOL_PATH_RECORDED+x}" ] || return 0
+  [ -r "$SKILL_DIR/run/agmsgd-tool-path.applied" ] && { IFS= read -r applied < "$SKILL_DIR/run/agmsgd-tool-path.applied" || true; }
+  [ "$applied" = "$TOOL_PATH_RECORDED" ] && return 0
+  echo "agmsg daemon start: the running agmsgd uses the terminal CLI directories it read when it started ('${applied:-none}'); the ones found now ('${TOOL_PATH_RECORDED:-none}') take effect after: agmsg daemon stop, then agmsg daemon start"
+}
+
 cmd_start() {
   local only_gen=""
   case "${1:-}" in
@@ -754,12 +832,16 @@ cmd_start() {
     *) _usage; return 2 ;;
   esac
   _ensure_install_db_schema
+  # Before the "already running" answer below: a running agmsgd picks the
+  # record up at its next start (the update path restarts it).
+  [ "$(_os)" = windows ] || _record_tool_path
   local state
   state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
   local running_node
   running_node="$(_resolve_node 2>/dev/null || true)"
   if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
+    _tool_path_restart_hint
     _agmsg_down_notice_clear_if_present agmsgd
     agmsg_daemon_seat_report start
     _path_hint status
@@ -1157,9 +1239,88 @@ cmd_disable() {
 # It changes nothing, and never enables anything.
 cmd_offer() {
   local type="${1:-}" desired node_path found
+  # agmsgd delivers to a type one of two ways: a native channel written
+  # specifically for it (claude-code, codex, grok-build -- the grok-queue
+  # channel, #1973/#1979), or terminal-poke, which reaches any OTHER type
+  # whose own type.conf has not turned poke delivery off and names a
+  # verified input_prompt_marker (the same two checks the terminal-poke
+  # channel itself applies when building its own roster -- see
+  # terminal-poke-store.mjs's NATIVE_CHANNEL_TYPES and
+  # terminal-poke-types.mjs's pokeDeliveryEnabled/hasVerifiedInputBox).
+  # Offering unavailable to every non-claude-code/codex type regardless
+  # (the previous behavior here) meant grok-build and antigravity -- both
+  # of which agmsgd already has a working delivery path for -- showed
+  # "agmsgd does not deliver to <type> sessions" even though
+  # delivery-cli.sh's own agmsgd branch is reachable and correct for them;
+  # this offer gate was the one place still out of step with it.
   case "$type" in
-    claude-code|codex) ;;
-    *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+    claude-code|codex|grok-build) ;;
+    *)
+      node_path="$(_resolve_node)" || {
+        echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
+        return 0
+      }
+      # review on #1989: a hand-built 'file://'+native-path URL breaks for
+      # any install path containing a character '#' (or other URL-special
+      # bytes) must-encode-in-a-URL, and never converts a Windows native
+      # path at all (the codex/Windows branch below handles that with its
+      # own pwd -W -- this one did not). Both failures used to surface as
+      # the GENERIC "agmsgd does not deliver to <type> sessions", silently
+      # regressing an already-supported type's offer to unavailable with a
+      # misleading reason. Node receives the plain native path as an
+      # argument and converts it itself via pathToFileURL, which handles
+      # the encoding; any import/check failure is reported by its own
+      # message, not folded into the "unsupported type" case.
+      #
+      # pathToFileURL on win32 only does the right thing with an actual
+      # Windows path (C:\... or the C:/... mixed form) -- SCRIPT_DIR and
+      # SKILL_DIR under Git Bash are MSYS paths (/c/Users/...), which
+      # win32 Node's own path rules read as drive-relative, landing on
+      # something like file:///C:/c/Users/... instead (review, round 2).
+      # installRoot needs the SAME conversion: typeConfGet's own
+      # readFileSync(join(installRoot, ...)) runs under the same native
+      # node, so an unconverted installRoot fails to read type.conf and
+      # misreports every type as having no verified input box, not merely
+      # the module import. Converted here, same way the codex/Windows
+      # branch below already does it (prefer cygpath -w; cd+pwd -W when
+      # it is absent) -- never attempted off Windows, where these paths
+      # are already native.
+      local mod_path="$SCRIPT_DIR/daemon/channels/terminal-poke-types.mjs" install_root="$SKILL_DIR" _native
+      if [ "$(_os)" = windows ]; then
+        if command -v cygpath >/dev/null 2>&1; then
+          _native="$(cygpath -w "$SCRIPT_DIR/daemon/channels" 2>/dev/null)" && [ -n "$_native" ] && mod_path="$_native\\terminal-poke-types.mjs"
+          _native="$(cygpath -w "$SKILL_DIR" 2>/dev/null)" && [ -n "$_native" ] && install_root="$_native"
+        else
+          _native="$(cd "$SCRIPT_DIR/daemon/channels" 2>/dev/null && pwd -W 2>/dev/null)" && [ -n "$_native" ] && mod_path="$_native/terminal-poke-types.mjs"
+          _native="$(cd "$SKILL_DIR" 2>/dev/null && pwd -W 2>/dev/null)" && [ -n "$_native" ] && install_root="$_native"
+        fi
+      fi
+      found="$("$node_path" --input-type=module -e '
+        const { pathToFileURL } = await import("node:url");
+        const [modPath, installRoot, type] = process.argv.slice(1);
+        let mod;
+        try {
+          mod = await import(pathToFileURL(modPath).href);
+        } catch (error) {
+          console.log("import_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
+          process.exit(0);
+        }
+        try {
+          if (!mod.pokeDeliveryEnabled(installRoot, type)) { console.log("no_poke_delivery"); process.exit(0); }
+          if (!mod.hasVerifiedInputBox(installRoot, type)) { console.log("no_input_box"); process.exit(0); }
+          console.log("ok");
+        } catch (error) {
+          console.log("check_failed:" + String(error?.message ?? error).replace(/[\r\n]+/g, " "));
+        }
+      ' "$mod_path" "$install_root" "$type" 2>/dev/null | LC_ALL=C tr -d '\r')" || found=""
+      case "$found" in
+        ok) ;;
+        no_poke_delivery) echo "agmsgd=unavailable reason=$type has turned off poke delivery (poke_delivery=no in its type.conf)"; return 0 ;;
+        no_input_box) echo "agmsgd=unavailable reason=$type has no verified input box yet, so agmsgd has no way to deliver to it"; return 0 ;;
+        import_failed:*|check_failed:*) echo "agmsgd=unavailable reason=${found#*:}"; return 0 ;;
+        *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+      esac
+      ;;
   esac
   desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | LC_ALL=C tr -d '\r' || true)"
   if [ "$desired" = on ]; then
