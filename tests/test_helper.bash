@@ -39,6 +39,57 @@ unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 export AGMSG_SELF_NAME=off
 
+# The state root of an install is $AGMSG_HOME/<name>, or $HOME/.agmsg/<name> when
+# AGMSG_HOME is unset (scripts/lib/state-root.sh agmsg_state_base). A runner shell that
+# exports AGMSG_HOME makes `HOME=$FAKE_HOME install.sh` link the fixture's state to the
+# real one, and a later uninstall removes the real data; AGMSG_INSTALL_HOME moves only
+# the install location while the state stays under $HOME. A test that needs either sets it
+# itself, for the one command, after this load.
+# The real base is read BEFORE the unset: an ambient AGMSG_HOME is exactly the case to guard.
+if [ -z "${_AGMSG_GUARD_REAL_BASE:-}" ]; then
+  _AGMSG_GUARD_REAL_BASE="${AGMSG_HOME:-$HOME/.agmsg}"
+  export _AGMSG_GUARD_REAL_BASE
+fi
+unset AGMSG_HOME AGMSG_INSTALL_HOME
+
+# Guard: a test must not change the REAL state directory of the machine that started
+# bats. "Real" is the HOME and AGMSG_HOME seen when this helper is first loaded, before any
+# setup() swaps HOME, so a test that takes no fake HOME is covered too. It compares, for
+# every entry of <real base>/, the entry's name, its .owner line and whether
+# run/install-op-incomplete.json exists -- what the incident of 2026-11-20 changed -- and
+# not file churn that a live agmsgd on a developer machine causes all the time. Builtins
+# only: no process is spawned, and where the directory does not exist (CI runners) it is a
+# single test.
+_agmsg_real_state_fingerprint() {
+  local base="$_AGMSG_GUARD_REAL_BASE" d line owner op
+  [ -d "$base" ] || { printf 'absent\n'; return 0; }
+  for d in "$base"/*/ "$base"/.[!.]*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    owner=""
+    if [ -f "$d/.owner" ]; then IFS= read -r owner < "$d/.owner" || true; fi
+    op=no
+    if [ -e "$d/run/install-op-incomplete.json" ] || [ -L "$d/run/install-op-incomplete.json" ]; then op=yes; fi
+    printf '%s|owner=%s|op=%s\n' "${d##*/}" "$owner" "$op"
+  done
+}
+
+agmsg_guard_real_state_begin() {
+  _AGMSG_GUARD_BEFORE="$(_agmsg_real_state_fingerprint)"
+}
+
+agmsg_guard_real_state_end() {
+  [ -n "${_AGMSG_GUARD_BEFORE+x}" ] || return 0
+  local after
+  after="$(_agmsg_real_state_fingerprint)"
+  if [ "$after" != "$_AGMSG_GUARD_BEFORE" ]; then
+    printf 'This test changed the real state directory %s:\n--- before\n%s\n--- after\n%s\n' \
+      "$_AGMSG_GUARD_REAL_BASE" "$_AGMSG_GUARD_BEFORE" "$after" >&2
+    return 1
+  fi
+  return 0
+}
+
 setup_test_env() {
   # A test never inherits the developer's terminal. The terminal drivers
   # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:
@@ -52,6 +103,8 @@ setup_test_env() {
   unset CLAUDE_CONFIG_DIR
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
+  unset AGMSG_HOME AGMSG_INSTALL_HOME
+  agmsg_guard_real_state_begin
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in
   # test_remote.bats do, to re-enter with a different fixture) would
@@ -259,7 +312,9 @@ teardown_test_env() {
   local reap_status=0 rm_status=0
   _reap_test_skill_dir_procs || reap_status=$?
   rm -rf "$TEST_SKILL_DIR" || rm_status=$?
-  [ "$reap_status" -eq 0 ] && [ "$rm_status" -eq 0 ]
+  local guard_status=0
+  agmsg_guard_real_state_end || guard_status=$?
+  [ "$reap_status" -eq 0 ] && [ "$rm_status" -eq 0 ] && [ "$guard_status" -eq 0 ]
 }
 
 # Print the renderable type set from the registry rather than duplicating the

@@ -12,7 +12,9 @@ setup() {
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
   export ST="$FAKE_HOME/.agmsg/agmsg"
+  unset AGMSG_INSTALL_HOME
   unset CODEX_HOME AGMSG_HOME AGMSG_STORAGE_PATH AGMSG_CONFIG AGMSG_STORAGE_DRIVER AGMSG_APP_BASE AGMSG_SPAWN_OPTIONS_FILE
+  agmsg_guard_real_state_begin
   export AGMSG_AGENT_PID=""
   # No systemd unit for any team, on any machine the suite runs on: a real
   # systemctl may be missing, answer or fail (no user bus) depending on the host.
@@ -34,6 +36,7 @@ teardown() {
   if [ -n "${LEGACY_GATE:-}" ]; then touch "$LEGACY_GATE.release" 2>/dev/null || true; fi
   bg_reap_all || reaped=1
   [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] && command rm -rf "$FAKE_HOME"
+  agmsg_guard_real_state_end || reaped=1
   [ "$reaped" -eq 0 ]
 }
 
