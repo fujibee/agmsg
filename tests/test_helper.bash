@@ -236,6 +236,11 @@ _actas_session_path() {   # <team> <agent>
 }
 
 teardown_test_env() {
+  # A test that stubs `kill`, `sleep` or `wait` as a function leaves it defined in the
+  # shell bats runs the test in, and bats then uses that same `kill` to stop its
+  # BATS_TEST_TIMEOUT watcher: a stub that does nothing leaves the watcher running and
+  # holds the file for the whole timeout. Drop the stubs before teardown does anything.
+  unset -f kill sleep wait 2>/dev/null || true
   # Belt and braces alongside setup_test_env's own fix above: put TMPDIR back
   # to the real root before removing AGMSG_TEST_TMPDIR (where this test's
   # TMPDIR pointed) and TEST_SKILL_DIR, so nothing run between this teardown

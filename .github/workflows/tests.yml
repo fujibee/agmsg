@@ -175,7 +175,9 @@ env:
   # enough that tests/test_ci_sharding.bats's balance-ratio assertion goes
   # red, the same way #1107 itself was tracked: a constant sized against an
   # older system stays right only as long as the system does.
-  SHARD_TOTAL: 6
+  # Per-OS shard totals live in the bats-shard matrix (`total`) and, for the
+  # coverage check, in SHARD_TOTALS on the `bats` job: Linux splits finer than
+  # macOS because GitHub runs at most 5 macOS jobs at a time (see there).
   # The Windows legs' sqlite3, pinned three ways (#824).
   #
   # This comment used to end "one trip to chocolatey, which is the only time
@@ -476,7 +478,7 @@ jobs:
     # the required contexts are `bats` (the aggregate) and the Windows install
     # leg, and neither is renamed, so branch protection sees exactly what it
     # saw. `needs` is one of the contexts a job name may read.
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/6)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}${{ needs.changes.outputs.reuse_run != '' && format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run) || '' }}
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.total }})${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}${{ needs.changes.outputs.reuse_run != '' && format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run) || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -515,7 +517,26 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        # macOS runs 6 shards, Linux 10. Five shards gave macOS shards of 1527-1692 s
+        # on real runners (cap 1800 s, #1107), so macOS stays at 6. GitHub runs at
+        # most 5 macOS jobs at once for this account, so a sixth shard can wait for
+        # a slot; folding the macOS storage contract into shard 5 (instead of a job
+        # of its own) keeps a run at 6 macOS bats jobs, not 7.
+        exclude:
+          - { os: macos-latest, shard: 7 }
+          - { os: macos-latest, shard: 8 }
+          - { os: macos-latest, shard: 9 }
+          - { os: macos-latest, shard: 10 }
+        include:
+          - { os: ubuntu-latest, total: 10 }
+          - { os: macos-latest, total: 6 }
+    env:
+      SHARD_TOTAL: ${{ matrix.total }}
+      # A single bats test that hangs used to hold a shard until its 30-minute
+      # cap (test_remote #54, then a rerun on top of it). No test legitimately
+      # runs this long; the offender is named in the log and fails alone.
+      BATS_TEST_TIMEOUT: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -566,7 +587,7 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
@@ -638,6 +659,22 @@ jobs:
           status=$?
           : > "$RUNNER_TEMP/bats-done"
           exit $status
+
+      # The jsonl storage contract on macOS (BSD userlands), formerly its own
+      # job. Runs after the shard's files so a failure there is reported on its
+      # own step, and only on shard 5 so it runs once. Gated exactly as the job
+      # it replaced was: on contracts_needed alone, NOT on a reused tree, because
+      # a tree recorded green by a pull_request run that skipped this contract
+      # (contracts_needed=false) is pushed with contracts_needed=true, and the
+      # bats result it reuses never covered this contract. bats itself is
+      # installed for this step even when the suite is skipped (below).
+      - name: Storage contract against the jsonl driver (macOS)
+        if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()
+        env:
+          AGMSG_STORAGE_DRIVER: jsonl
+        run: |
+          jq --version
+          bats --print-output-on-failure tests/test_storage_contract.bats
 
       # always() so this also runs when the job is cancelled at its cap, which
       # is the only case that matters here.
@@ -760,6 +797,8 @@ jobs:
         # any) were actually re-executed.
         env:
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
+          # Linux total, macOS total: the `total` values of the bats-shard matrix.
+          SHARD_TOTALS: '10 6'
         run: |
           set -euo pipefail
           expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
@@ -767,15 +806,17 @@ jobs:
             # The files the run chose not to run are not expected to be covered.
             expected="$(printf '%s\n' "$expected" | grep -vxF -f <(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n') || true)"
           fi
-          actual="$(
-            for shard in $(seq 1 "$SHARD_TOTAL"); do
-              .github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"
-            done | LC_ALL=C sort
-          )"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::shards 1..$SHARD_TOTAL do not exactly cover tests/*.bats (less the skipped files)"
-            exit 1
-          fi
+          for SHARD_TOTAL in $SHARD_TOTALS; do
+            actual="$(
+              for shard in $(seq 1 "$SHARD_TOTAL"); do
+                .github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"
+              done | LC_ALL=C sort
+            )"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::shards 1..$SHARD_TOTAL do not exactly cover tests/*.bats (less the skipped files)"
+              exit 1
+            fi
+          done
           # The other green, named the same way (#798): how many files the
           # shards ran, so a full pass and a skip never read alike.
           # grep -c exits 1 on a count of 0, which a diff that skips every file
@@ -783,9 +824,9 @@ jobs:
           count="$(printf '%s\n' "$expected" | grep -c . || true)"
           if [ -n "$AGMSG_BATS_SKIP" ]; then
             skipped="$(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n' | grep -c . || true)"
-            printf '%s\n' "## bats: suite ran, $skipped file(s) skipped" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed. $skipped more file(s) were not run because nothing they read was changed by this diff (inputs traced per file, see .github/scripts/select-bats.mjs); a push of this exact tree runs those." >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "## bats: suite ran, $skipped file(s) skipped" "" "The shard partition covers $count test files across $SHARD_TOTALS shards (per OS), and every shard passed. $skipped more file(s) were not run because nothing they read was changed by this diff (inputs traced per file, see .github/scripts/select-bats.mjs); a push of this exact tree runs those." >> "$GITHUB_STEP_SUMMARY"
           else
-            printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTALS shards (per OS), and every shard passed." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       # Record a tree whose suite ran and passed, for the push that may follow
@@ -908,7 +949,10 @@ jobs:
       # whose behaviour differs between GNU (Linux) and BSD (macOS).
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # The macOS leg runs as the last step of macOS bats shard 5 (see the
+        # bats-shard job): a macOS job of its own would be a sixth, and only 5
+        # run at once.
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 

@@ -50,7 +50,7 @@
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
   # 1. The shard job's name carries the marker, keyed on the docs_only output.
   #    Shard checks are not required contexts, so the name may vary.
-  grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/6)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$workflow"
+  grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/\${{ matrix.total }})\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$workflow"
   # 2. The aggregate -- the required context -- keeps its exact name, once,
   #    unconditionally.
   [ "$(grep -c '^    name: bats$' "$workflow")" -eq 1 ]
@@ -86,7 +86,7 @@
   # The mutation took: the marker is gone from the copy.
   if grep -Fq "docs-only, suite skipped' || ''" "$mutant"; then false; fi
   # ...and the name pin no longer matches it.
-  if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/6)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
+  if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/\${{ matrix.total }})\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
 }
 
 # The suite has to run on the shape that actually gets dogfooded. A PR is only
@@ -259,4 +259,14 @@ GIT
   grep -Fq '"$(sed -n '"'"'s/^tree //p'"'"' "$m")" = "$tree"' "$workflow"
   grep -Fq "'^sha [0-9a-f]\\{40\\}\$'" "$workflow"
   grep -Fq 'tests/*.bats) [ -f "$f" ] || todo="" ;;' "$workflow"
+}
+
+@test "CI: the macOS storage contract runs on a reused tree, as its own job did" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+  # A tree recorded green by a PR run that skipped the contract is pushed with
+  # contracts_needed=true; the reuse must not skip it. The step is gated on
+  # contracts_needed alone, and bats is installed for it even when the suite is
+  # skipped.
+  grep -Fq "if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()" "$workflow"
+  grep -Fq "|| (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')" "$workflow"
 }

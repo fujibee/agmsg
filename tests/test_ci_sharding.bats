@@ -331,21 +331,29 @@ union_of_shards() {
   [[ "$output" == *"no such directory"* ]]
 }
 
-@test "the CI workflow shard matrix matches the SHARD_TOTAL it passes" {
+@test "the CI workflow shard matrix matches the per-OS totals it passes" {
   # The matrix is a literal list (so a broken `changes` job cannot take the
-  # whole suite down with an unevaluatable dynamic matrix), which means these
-  # two numbers have to be kept in step by hand. CI verifies coverage
-  # end-to-end from the shard manifests as well; this catches the drift here,
-  # where the fix is obvious.
+  # whole suite down with an unevaluatable dynamic matrix), which means the
+  # shard numbers, the per-OS `total` values and SHARD_TOTALS (what the
+  # aggregate re-checks coverage against) have to be kept in step by hand. CI
+  # verifies coverage end-to-end as well; this catches the drift here.
   local wf="$REPO_ROOT/.github/workflows/tests.yml"
-  local total matrix_entries
-  total="$(sed -n 's/^  SHARD_TOTAL: \([0-9]*\)$/\1/p' "$wf")"
-  [ -n "$total" ]
-  matrix_entries="$(sed -n 's/^ *shard: \[\(.*\)\]$/\1/p' "$wf" | tr ',' '\n' | grep -c '[0-9]')"
-  [ "$matrix_entries" -eq "$total" ]
-  # ...and the shard job's display name must name the same total, or the run
-  # log claims a split the workflow is not performing.
-  grep -q "bats (\${{ matrix.os }} \${{ matrix.shard }}/$total)" "$wf"
+  local linux mac listed excluded totals
+  linux="$(sed -n 's/^ *- { os: ubuntu-latest, total: \([0-9]*\) }$/\1/p' "$wf")"
+  mac="$(sed -n 's/^ *- { os: macos-latest, total: \([0-9]*\) }$/\1/p' "$wf")"
+  [ -n "$linux" ] && [ -n "$mac" ]
+  listed="$(sed -n 's/^ *shard: \[\(.*\)\]$/\1/p' "$wf" | head -1 | tr ',' '\n' | grep -c '[0-9]')"
+  excluded="$(grep -c '^ *- { os: macos-latest, shard: [0-9]* }$' "$wf")"
+  # Linux runs every listed shard; macOS runs the listed ones less the excluded.
+  [ "$listed" -eq "$linux" ]
+  [ "$((listed - excluded))" -eq "$mac" ]
+  # macOS is held at 6: five shards ran 1527-1692 s against the 1800 s job cap.
+  [ "$mac" -eq 6 ]
+  totals="$(sed -n "s/^ *SHARD_TOTALS: '\(.*\)'$/\1/p" "$wf")"
+  [ "$totals" = "$linux $mac" ]
+  # ...and the shard job's display name must name the same totals.
+  grep -q 'bats (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.total }})' "$wf"
+  grep -q 'SHARD_TOTAL: ${{ matrix.total }}' "$wf"
 }
 
 # #1243: count was never the right proxy for a shard's real cost (a
