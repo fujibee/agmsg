@@ -195,10 +195,12 @@ EOF_GROK_PAIRS
 #   use_leader true, connections readable, none is to it  -> none (e.g. a TUI
 #     started without a leader, config turned on afterwards)
 #   anything unreadable (config, lsof)       -> unknown, with the reason
+# The witness is filled once the socket is resolved; while it stays empty (an
+# unknown), every Stop re-runs this, so "once per session" holds only when it resolves.
 # A leader socket existing is not the evidence: another TUI's leader can
 # listen there while this session never attached to it.
 _agmsg_grok_shared_leader_socket() {   # <session_pid> <grok_home>
-  local pid="$1" grok_home="$2" cfg scan rc=0 sock peers all dev line leader_devs="" p
+  local pid="$1" grok_home="$2" cfg scan rc=0 sock own own_rc=0 peers all dev line leader_devs="" p
   declare -F agmsg_grok_use_leader_scan >/dev/null 2>&1 || source "${SCRIPT_DIR:?SCRIPT_DIR is not set}/lib/grok-config.sh"
   cfg="$grok_home/config.toml"
   sock="$grok_home/leader.sock"
@@ -218,7 +220,18 @@ _agmsg_grok_shared_leader_socket() {   # <session_pid> <grok_home>
   fi
   command -v lsof >/dev/null 2>&1 || { printf 'unknown\nlsof is not available to tell whether this grok session is connected to the leader at %s\n' "$sock"; return 0; }
   # This session's unix sockets: the peer of each is "->0x<address>".
-  peers="$(lsof -a -p "$pid" -U -Fn 2>/dev/null | sed -n 's/^n->\(.*\)$/\1/p')" || peers=""
+  # Where "nothing to list" is told from "could not read": lsof exits 1 both when
+  # a process holds no unix socket at all and when a read was denied or failed.
+  # stdout and stderr are read together: exit 0 is a listing; exit 1 with
+  # NOTHING printed (no stderr either) is the clean "no sockets" case, so no
+  # peer; any other exit, or exit 1 with text (a warning or a denial), is
+  # "could not tell" -- never folded into "not connected".
+  own="$(lsof -a -p "$pid" -U -Fn 2>&1)" || own_rc=$?
+  if [ "$own_rc" -gt 1 ] || { [ "$own_rc" -eq 1 ] && [ -n "$own" ]; }; then
+    printf 'unknown\ncould not read this grok session'"'"'s own sockets (lsof exit %s) to tell whether it is connected to the leader at %s\n' "$own_rc" "$sock"
+    return 0
+  fi
+  peers="$(printf '%s\n' "$own" | sed -n 's/^n->\(.*\)$/\1/p')"
   # Every unix socket: the ones NAMED the leader's socket path, by their own
   # address (the leader's accepted connections; one is each client's peer).
   all="$(lsof -U -Fdn 2>/dev/null)" || all=""

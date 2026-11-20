@@ -553,6 +553,27 @@ _listen_unix() {   # <path>: a real unix socket node at <path> (no listener need
   grep -q "could not list unix sockets (lsof)" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
 }
 
+@test "grok leader lookup: lsof fails for this session's own sockets but lists the leader's -> unknown with the reason, never none" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  printf '[cli]\nuse_leader = true\n' > "$GROK_HOME/config.toml"
+  _listen_unix "$GROK_HOME/leader.sock"
+  _stub_ps "17032 17031 /usr/local/bin/grok"
+  _stub_args 17032 "/usr/local/bin/grok agent stdio"
+  printf '%s\n' "f9" "d0xAAA" "n$GROK_HOME/leader.sock" > "$TEST_SKILL_DIR/psbin/lsof.all"
+  # The -p call is denied (exit 1 with output on stderr only); the global one works.
+  cat > "$TEST_SKILL_DIR/psbin/lsof" <<'LS'
+#!/bin/sh
+d="$(dirname "$0")"
+for a in "$@"; do [ "$a" = -p ] && { echo "lsof: permission denied" >&2; exit 1; }; done
+cat "$d/lsof.all"
+LS
+  _run_hook grok-session-start.sh "$TEST_SKILL_DIR/noproc"
+  [ "$status" -eq 0 ]
+  grep -qF '"leader_socket": ""' "$(_witness)"
+  grep -q "could not read this grok session's own sockets (lsof exit 1)" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
+}
+
 @test "grok leader lookup: use_leader on but no leader.sock yet -> unknown with that reason, not a guessed socket" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   write_active_sessions sess1 17031
