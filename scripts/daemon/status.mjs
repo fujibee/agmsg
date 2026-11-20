@@ -487,7 +487,7 @@ function formatGrokQueueSeats(inventory, all) {
       continue;
     }
     if (seat.reason === "first_turn_pending") {
-      lines.push(`Grok queue ${label}: pending: first turn not complete yet`);
+      lines.push(`Grok queue ${label}: pending: on the welcome screen, delivered after its first turn ends (a --resume/--continue session is not held)`);
       continue;
     }
     if (seat.reason === "leader_socket_unknown") {

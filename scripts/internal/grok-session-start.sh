@@ -32,6 +32,18 @@ if [ -z "$SESSION_ID" ] && [ -n "$INPUT" ]; then
 fi
 [ -n "$SESSION_ID" ] || exit 0   # nothing to attach a witness to
 
+# SessionStart's stdin JSON carries "source": "new" for a fresh session (a plain
+# `grok` start shows the welcome screen; /new and /clear also say "new"), or
+# "load" for a saved session reopened with --resume, --continue or the /resume
+# picker (measured live, grok 1.0.89, 2026-11-20). A "load" TUI opens straight on
+# its chat screen, so a turn another client sends is displayed at once; only a
+# welcome-screen TUI runs a turn it did not submit itself without showing it.
+# Anything else (absent, unreadable) is treated as "new": withhold, as before.
+START_SOURCE=""
+if [ -n "$INPUT" ]; then
+  START_SOURCE="$(printf '%s' "$INPUT" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -1)"
+fi
+
 GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"
 # Measured live, 2026-11-15: a hook invocation DOES inherit GROK_LEADER_SOCKET
 # when the TUI was actually started with --leader. NO FALLBACK to grok's
@@ -139,6 +151,7 @@ WITNESS_PATH="$(agmsg_grok_witness_path "$TEAM" "$AGENT")"
 # per start) must not clobber an already-advanced first_turn_done -- only a
 # NEW session_id resets it.
 FIRST_TURN_DONE=false
+[ "$START_SOURCE" != load ] || FIRST_TURN_DONE=true
 if [ -f "$WITNESS_PATH" ]; then
   _prev_sid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WITNESS_PATH" 2>/dev/null | head -1)"
   # \| is a GNU sed extension, not POSIX BRE -- BSD/macOS sed (where this

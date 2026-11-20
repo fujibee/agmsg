@@ -685,3 +685,45 @@ LS
   grep -qF '"leader_socket": ""' "$f"
   grep -q "could not update the witness" "$TEST_SKILL_DIR"/run/grok-seat-pending.*
 }
+
+# A saved session reopened with --resume / --continue / the /resume picker starts on
+# grok's chat screen (SessionStart source "load"), where a turn another client sends is
+# displayed; a plain start (source "new") sits on the welcome screen, which runs such a
+# turn without showing it. Measured live, grok 1.0.89, 2026-11-20.
+@test "grok-session-start.sh: source \"load\" writes first_turn_done true at once" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{"hookEventName":"session_start","sessionId":"sess1","source":"load","hook_event_name":"SessionStart"}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"first_turn_done": true' "$f"
+  grep -q '"session_id": "sess1"' "$f"
+}
+
+@test "grok-session-start.sh: source \"new\", no source, and an unreadable input keep first_turn_done false" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  local f in
+  for in in '{"hookEventName":"session_start","source":"new"}' '{"hookEventName":"session_start"}' 'not json' '{"source":"LOAD"}' '{"source":"loaded"}'; do
+    rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
+    write_active_sessions sess1 17031
+    run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<"$in"
+    [ "$status" -eq 0 ]
+    f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+    grep -q '"first_turn_done": false' "$f" || { echo "input [$in] gave: $(cat "$f")"; return 1; }
+  done
+}
+
+@test "grok-session-start.sh: a new-source re-fire for a load session does not reset first_turn_done, and a new session id after a load session starts false" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  write_active_sessions sess1 17031
+  env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{"source":"load"}' >/dev/null
+  local f; f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+  grep -q '"first_turn_done": true' "$f"
+  env GROK_SESSION_ID=sess1 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{"source":"new"}' >/dev/null
+  grep -q '"first_turn_done": true' "$f"
+  write_active_sessions sess2 17032
+  env GROK_SESSION_ID=sess2 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{"source":"new"}' >/dev/null
+  grep -q '"first_turn_done": false' "$f"
+  grep -q '"session_id": "sess2"' "$f"
+}

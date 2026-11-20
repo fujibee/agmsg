@@ -238,7 +238,7 @@ test('grok queue seats are shown with the channel\'s own status vocabulary', asy
   assert.match(text, /Grok queue test\/ga1: notified via grok queue$/m);
   assert.match(text, /Grok queue test\/ga2: notified via grok queue \(warning: the leader socket's directory is readable\/writable by group or other/);
   assert.match(text, /Grok queue test\/ga3: session process gone/);
-  assert.match(text, /Grok queue test\/ga4: pending: first turn not complete yet/);
+  assert.match(text, /Grok queue test\/ga4: pending: on the welcome screen, delivered after its first turn ends/);
   assert.match(text, /Grok queue test\/ga5: pending: nudge_timeout/);
   // An empty socket the hooks could not vouch for shows why, not "not in leader mode".
   assert.match(text, /Grok queue test\/ga6: agmsgd cannot reach this seat: could not list processes to find grok's leader \(ps exit 1: denied\)/);
