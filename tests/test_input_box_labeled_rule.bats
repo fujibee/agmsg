@@ -30,7 +30,7 @@ _labeled_screen() {
 
 @test "labeled top rule shorter than the full-width bottom rule is located" {
   local screen
-  screen="$(_labeled_screen herdrtest-probe 132)"
+  screen="$(_labeled_screen myteam-reviewer 132)"
   run agmsg_input_box_locate '❯' yes "$screen"
   [ "$status" -eq 0 ]
   [ "$output" = '❯ ' ]
@@ -38,7 +38,7 @@ _labeled_screen() {
 
 @test "labeled box read from herdr (CR-terminated lines) is located" {
   local screen
-  screen="$(_labeled_screen herdrtest-probe 132 $'\r')"
+  screen="$(_labeled_screen myteam-reviewer 132 $'\r')"
   run agmsg_input_box_locate '❯' yes "$screen"
   [ "$status" -eq 0 ]
 }
@@ -67,7 +67,7 @@ _labeled_screen() {
 @test "rule-shape check: only '<run> <label> <run>' counts as labeled" {
   local r
   r="$(_rule 30)"
-  _agmsg_input_box_rule_is_labeled "$r herdrtest-probe ─"
+  _agmsg_input_box_rule_is_labeled "$r myteam-reviewer ─"
   _agmsg_input_box_rule_is_labeled "$r チーム-名前 ── "
   _agmsg_input_box_rule_is_labeled "$r foo bar ─"
   ! _agmsg_input_box_rule_is_labeled "$r"
