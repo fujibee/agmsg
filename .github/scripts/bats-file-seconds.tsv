@@ -11,8 +11,11 @@
 # artifact id so the numbers can be regenerated exactly:
 #   14503704608 14504573809 14505167968 14505252564 14505586130
 # Each row is that run's elapsed time for the file (file_end rows, status 0,
-# macOS). This run is the first with BATS_TEST_TIMEOUT stalls removed, so the
-# rows no longer contain the 180 s a stubbed kill() used to add to a file.
+# macOS). This run (head 1c44e063) removed the BATS_TEST_TIMEOUT stalls from
+# suites that call teardown_test_env, so those rows no longer contain the 180 s
+# a stubbed kill() added to a file. test_state_root.bats and test_install.bats
+# have their own teardown and still held such stalls at that head: their rows
+# may be longer than their real cost and are re-measured at the next refresh.
 # Regenerate: download each artifact (gh api
 # repos/fujibee/agmsg/actions/artifacts/<id>/zip), then
 #   awk -F'\t' '$1==1 && $2=="file_end" && $6=="macOS" && $13==0 {
@@ -21,9 +24,9 @@
 #
 # WHY THIS REFRESH (2026-11-20): with five macOS shards the previous table
 # planned 1413-1457 s per shard, but a run measured 1075-1612 s: the table
-# carried time that no longer exists (test_state_root, test_install and others
-# ran faster once nothing waited for bats' timeout watcher) and missed files
-# added since. Re-planned from this run's own numbers.
+# carried time that no longer exists (files that ran faster once nothing waited
+# for bats' timeout watcher) and missed files added since. Re-planned from this
+# run's own numbers.
 #
 test_actas_integration.bats	66
 test_actas_lock.bats	23
