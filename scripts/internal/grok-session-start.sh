@@ -41,7 +41,42 @@ fi
 # Anything else (absent, unreadable) is treated as "new": withhold, as before.
 START_SOURCE=""
 if [ -n "$INPUT" ]; then
-  START_SOURCE="$(printf '%s' "$INPUT" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -1)"
+  # Only the TOP-LEVEL "source" of one well-formed JSON object counts: a "source" key
+  # nested in another value, or text that is not a JSON object, must never read as
+  # "load" (that would mark a welcome-screen seat deliverable). One awk pass tracks
+  # string/escape state and nesting depth; anything unbalanced prints nothing.
+  START_SOURCE="$(printf '%s' "$INPUT" | LC_ALL=C awk '
+    { s = s $0 "\n" }
+    END {
+      n = length(s); depth = 0; instr = 0; esc = 0; seen = 0; cur = ""; key = ""; want = 0; val = ""; got = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (instr) {
+          if (esc) { esc = 0; cur = cur c }
+          else if (c == "\\") { esc = 1; cur = cur c }
+          else if (c == "\"") {
+            instr = 0
+            if (depth == 1) {
+              if (want == 2) { if (key == "source" && !got) { val = cur; got = 1 } want = 0 }
+              else if (want == 0) { key = cur; want = 1 }
+            }
+          } else cur = cur c
+          continue
+        }
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") continue
+        if (!seen) { if (c != "{") exit; seen = 1; depth = 1; continue }
+        if (c == "\"") { instr = 1; cur = ""; continue }
+        if (c == ":" && depth == 1 && want == 1) { want = 2; continue }
+        if (c == "," && depth == 1) { want = 0; continue }
+        if (c == "{" || c == "[") { depth++; if (depth == 2 && want == 2) want = 0; continue }
+        if (c == "}" || c == "]") { depth--; if (depth == 1) want = 0; if (depth == 0) { ended = i; break } continue }
+        if (want == 2 && depth == 1) want = 0   # a non-string top-level value
+      }
+      if (ended && !instr) {
+        for (j = ended + 1; j <= n; j++) { t = substr(s, j, 1); if (t != " " && t != "\t" && t != "\n" && t != "\r") exit }
+        if (got) print val
+      }
+    }')"
 fi
 
 GROK_HOME_RESOLVED="${GROK_HOME:-$HOME/.grok}"

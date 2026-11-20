@@ -701,10 +701,11 @@ LS
   grep -q '"session_id": "sess1"' "$f"
 }
 
-@test "grok-session-start.sh: source \"new\", no source, and an unreadable input keep first_turn_done false" {
+@test "grok-session-start.sh: source \"new\", no source, non-JSON text, a nested or malformed \"source\":\"load\" keep first_turn_done false" {
   bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
   local f in
-  for in in '{"hookEventName":"session_start","source":"new"}' '{"hookEventName":"session_start"}' 'not json' '{"source":"LOAD"}' '{"source":"loaded"}'; do
+  for in in '{"hookEventName":"session_start","source":"new"}' '{"hookEventName":"session_start"}' 'not json' '{"source":"LOAD"}' '{"source":"loaded"}' \
+    'not json "source":"load"' '{"source":"new","metadata":{"source":"load"}}' '{"nested":[{"source":"load"}]}' '[{"source":"load"}]' '{"source":"load"' '{"source":"load"} trailing' '{"source":1}'; do
     rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
     write_active_sessions sess1 17031
     run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<"$in"
@@ -726,4 +727,17 @@ LS
   env GROK_SESSION_ID=sess2 bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<'{"source":"new"}' >/dev/null
   grep -q '"first_turn_done": false' "$f"
   grep -q '"session_id": "sess2"' "$f"
+}
+
+@test "grok-session-start.sh: a top-level source \"load\" is found among other keys, nested objects, escapes and whitespace" {
+  bash "$SCRIPTS/join.sh" t1 gagent grok-build "$TEST_PROJECT" >/dev/null
+  local f in
+  for in in '{"a":{"source":"new"},"source":"load"}' '{ "hookEventName" : "session_start", "x": "q\\"r\\"", "list": [1, {"source":"new"}], "source" : "load" }' "$(printf '{"sessionId":"s",\n"source":"load"}\n')"; do
+    rm -f "$TEST_SKILL_DIR"/run/grok-seat.*.json
+    write_active_sessions sess1 17031
+    run env GROK_SESSION_ID=sess1 GROK_LEADER_SOCKET=/tmp/l.sock bash "$SCRIPTS/internal/grok-session-start.sh" "$TEST_PROJECT" <<<"$in"
+    [ "$status" -eq 0 ]
+    f="$(ls "$TEST_SKILL_DIR"/run/grok-seat.*.json)"
+    grep -q '"first_turn_done": true' "$f" || { echo "input [$in] gave: $(cat "$f")"; return 1; }
+  done
 }
