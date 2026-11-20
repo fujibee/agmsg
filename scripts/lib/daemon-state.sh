@@ -360,3 +360,29 @@ agmsg_daemon_apply_project_choice() {   # <type> <project>
   AGMSGD_HEALTH=stopped
   AGMSGD_REASON="this project chose $choice, not agmsgd"
 }
+
+# 0 when this (type, project)'s delivery mode IS agmsgd, by run/delivery-choice
+# alone (2026-11-20 decision) -- the single source of truth every caller
+# (delivery.sh status, team.sh, watch.sh) reads to decide this, in place of
+# each type's own rule-file/hooks-file marker (antigravity's monitor marker,
+# grok-build's own hooks_json grep used to independently claim "mode:
+# agmsgd" even once the project's own choice had moved elsewhere) or of
+# checking whether agmsgd is actually alive/reachable for the seat.
+#   - chosen == "agmsgd": always agmsgd.
+#   - chosen == "" (never chosen): agmsgd only while AGMSGD_DESIRED=on, same
+#     as today's claude-code status fallback -- kept in exactly this one
+#     function because the policy for a never-chosen project is still being
+#     decided; a change there is a one-line edit here, not a sweep across
+#     every caller.
+#   - any other recorded choice (monitor/turn/both/off): never agmsgd.
+agmsg_type_mode_is_agmsgd() {   # <type> <project>
+  local chosen AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  chosen="$(agmsg_delivery_choice_get "$1" "${2:-}")"
+  case "$chosen" in
+    agmsgd) return 0 ;;
+    '') ;;
+    *) return 1 ;;
+  esac
+  agmsg_daemon_read_state
+  [ "${AGMSGD_DESIRED:-}" = on ]
+}

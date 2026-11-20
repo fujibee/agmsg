@@ -918,10 +918,24 @@ print_terminal_status() {
 # That is the case the session hooks treat as agmsgd (they go back to the
 # Monitor when agmsgd is off, so status reports the hooks' mode then, plus a
 # note when the project chose agmsgd). Reads install.db and
-# run/delivery-choice directly, so the mode needs no Node. Sets
-# STATUS_AGMSGD_NOTE to what to say.
+# run/delivery-choice directly -- the single source of truth for every type
+# (2026-11-20 decision). A type's own rule-file/hooks-file marker
+# (antigravity's monitor marker, grok-build's own hooks_json grep) is NOT
+# consulted here, and that type's own agmsg_delivery_status plug no longer
+# independently claims "mode: agmsgd" from one either -- this is the only
+# place that decides it, so a project whose choice has moved to something
+# else never reads "agmsgd" merely because a stale marker from an earlier
+# choice is still on disk. Sets STATUS_AGMSGD_NOTE to what to say.
+#
+# codex is the one exception (returns 1 outright): its own
+# agmsg_delivery_status plug already reports "mode: agmsgd" more precisely
+# than the blunt "no recorded choice + agmsgd on" fallback below can --
+# only once this project's own Codex seats actually have a destination
+# recorded, not merely because agmsgd is on -- so it keeps deciding this
+# for itself rather than being overridden by the generic fallback.
 _status_project_on_agmsgd() {   # <type> <project>
   local chosen AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  [ "$1" != codex ] || return 1
   STATUS_AGMSGD_NOTE=""
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/lib/daemon-state.sh"
@@ -955,7 +969,7 @@ do_status() {
   # (agmsg_delivery_status); default is JSON event-hooks, rule-file types override.
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     agmsg_delivery_load_plug "$TYPE"
-    if [ "$TYPE" = claude-code ] && _status_project_on_agmsgd "$TYPE" "$PROJECT"; then
+    if _status_project_on_agmsgd "$TYPE" "$PROJECT"; then
       # The hooks file can still hold Monitor hooks from before the project
       # went to agmsgd; reporting them as the mode made a session start a Monitor.
       local hooks_out

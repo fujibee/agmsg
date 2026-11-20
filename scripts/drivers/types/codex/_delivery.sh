@@ -209,11 +209,18 @@ agmsg_codex_report_missing_bridge() {
 # With agmsgd on and every registered seat's destination recorded, Codex needs
 # no hooks file, so "no settings file found" would read as broken when nothing
 # is. Hooks that exist keep their own mode; agmsgd off keeps the default text.
+#
+# This USED to only even attempt the agmsgd/seats check when there was no
+# hooks file at all ("no settings file found") -- but `agmsg delivery
+# agmsgd` for Codex installs the monitor hooks file (delivery-cli.sh's own
+# `else` branch, kept so a session that has not yet moved to agmsgd still
+# has something), so right after choosing agmsgd this always had a hooks
+# file present and read "mode: monitor" forever, never "mode: agmsgd"
+# (2026-11-20 review). The agmsgd/seats check now always runs; only the
+# RESULT (seats found, or not) decides which text wins.
 agmsg_delivery_status() {
-  local type="$1" project="$2" full first pairs team name seats=0
+  local type="$1" project="$2" full pairs team name seats=0
   full="$(agmsg_delivery_status_default "$type" "$project")"
-  first="${full%%$'\n'*}"
-  case "$first" in "mode: off (unrecognized: no settings file found"*) ;; *) printf '%s\n' "$full"; return 0 ;; esac
   local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
   # shellcheck disable=SC1091
   source "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
