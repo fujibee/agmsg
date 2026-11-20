@@ -447,8 +447,11 @@ SQL
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
   wait "$pid"
-  grep -qF 'native-delivered probe' "$out"
-  grep -qF 'agmsg watch: stopping' "$out"
+  # Decision (2026-11-20): when this project's delivery choice is agmsgd,
+  # watch.sh stops at startup without starting a watch, so it delivers
+  # nothing itself (agmsgd does).
+  refute grep -qF 'native-delivered probe' "$out"
+  grep -qF "agmsg watch: stopping - this project's delivery choice is agmsgd, so no watch is started" "$out"
   refute grep -qF 'agmsg watch: re-arm' "$out"
 
   # #1633 review: `daemon disable` flips daemon_intent.desired to off
@@ -487,8 +490,12 @@ SQL
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
   wait "$pid"
-  grep -qF 'project-mismatch probe' "$out" || { cat "$out"; false; }
-  grep -qF 'agmsg watch: re-arm' "$out"
+  # Decision (2026-11-20): the delivery choice alone decides; watch.sh does
+  # not second-guess an agmsgd choice from the seat's record, so it still
+  # stops at startup (daemon status --all names the record problem).
+  refute grep -qF 'project-mismatch probe' "$out"
+  grep -qF "agmsg watch: stopping - this project's delivery choice is agmsgd, so no watch is started" "$out"
+  refute grep -qF 'agmsg watch: re-arm' "$out"
 
   # Review round 2: being looked up BY (team, agent) only proves the
   # FILENAME encodes this pair, not that the record's own team=/agent=
@@ -505,8 +512,12 @@ SQL
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
   wait "$pid"
-  grep -qF 'identity-mismatch probe' "$out"
-  grep -qF 'agmsg watch: re-arm' "$out"
+  # Decision (2026-11-20): the delivery choice alone decides; watch.sh does
+  # not second-guess an agmsgd choice from the seat's record, so it still
+  # stops at startup (daemon status --all names the record problem).
+  refute grep -qF 'identity-mismatch probe' "$out"
+  grep -qF "agmsg watch: stopping - this project's delivery choice is agmsgd, so no watch is started" "$out"
+  refute grep -qF 'agmsg watch: re-arm' "$out"
 }
 
 @test "watch: restart delivers messages that arrived while the watcher was down" {

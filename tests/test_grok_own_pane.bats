@@ -98,9 +98,9 @@ _tool_shell() {   # the leader's environment: the starter's pane
   run agmsg_terminal_resolve_name ""
   [ "$status" -ne 0 ]
   # The message names grok and the reason, not a Codex daemon.
-  [[ "$output" == *"this grok session runs under a leader shared with another grok"* ]]
-  [[ "$output" == *grok_session_process_is_not_the_recorded_one* ]]
-  [[ "$output" == *"reopen grok and run actas again, or open it with spawn.sh"* ]]
+  printf '%s\n' "$output" | grep -qF 'this grok session runs under a leader shared with another grok'
+  printf '%s\n' "$output" | grep -qF 'grok_session_process_is_not_the_recorded_one'
+  printf '%s\n' "$output" | grep -qF 'reopen grok and run actas again, or open it with spawn.sh'
   [[ "$output" != *Codex* ]]
 }
 
