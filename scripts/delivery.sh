@@ -913,47 +913,38 @@ print_terminal_status() {
   [ "$errf" = /dev/null ] || rm -f "$errf"
 }
 
-# 0 when this project's delivery is agmsgd: agmsgd is on for the install and
-# this project either recorded the agmsgd choice or has no recorded choice.
-# That is the case the session hooks treat as agmsgd (they go back to the
-# Monitor when agmsgd is off, so status reports the hooks' mode then, plus a
-# note when the project chose agmsgd). Reads install.db and
-# run/delivery-choice directly -- the single source of truth for every type
-# (2026-11-20 decision). A type's own rule-file/hooks-file marker
-# (antigravity's monitor marker, grok-build's own hooks_json grep) is NOT
-# consulted here, and that type's own agmsg_delivery_status plug no longer
-# independently claims "mode: agmsgd" from one either -- this is the only
-# place that decides it, so a project whose choice has moved to something
-# else never reads "agmsgd" merely because a stale marker from an earlier
-# choice is still on disk. Sets STATUS_AGMSGD_NOTE to what to say.
+# 0 when this (type, project)'s delivery mode is agmsgd, by
+# agmsg_type_mode_is_agmsgd (daemon-state.sh) alone -- the single source
+# of truth for every type (2026-11-20 decision), shared verbatim with
+# watch.sh so the two can never disagree about whether agmsgd is the
+# mode. A type's own rule-file/hooks-file marker (antigravity's monitor
+# marker, grok-build's and codex's own hooks-presence checks) is NOT
+# consulted here, and no type's own agmsg_delivery_status plug
+# independently claims "mode: agmsgd" either -- this is the only place
+# that decides it.
 #
-# codex is the one exception (returns 1 outright): its own
-# agmsg_delivery_status plug already reports "mode: agmsgd" more precisely
-# than the blunt "no recorded choice + agmsgd on" fallback below can --
-# only once this project's own Codex seats actually have a destination
-# recorded, not merely because agmsgd is on -- so it keeps deciding this
-# for itself rather than being overridden by the generic fallback.
+# Whether agmsgd is actually running, and whether this project's seats
+# have a confirmed destination, are surfaced as a SEPARATE diagnostic
+# note (STATUS_AGMSGD_NOTE) -- they never flip the mode itself (review,
+# 2026-11-20: a status that reported "mode: monitor" for a project that
+# had explicitly chosen agmsgd, merely because agmsgd was off, disagreed
+# with watch.sh, which stops on the SAME explicit choice regardless of
+# daemon health).
 _status_project_on_agmsgd() {   # <type> <project>
-  local chosen AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
-  [ "$1" != codex ] || return 1
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
   STATUS_AGMSGD_NOTE=""
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/lib/daemon-state.sh"
-  chosen="$(agmsg_delivery_choice_get "$1" "$2")"
+  agmsg_type_mode_is_agmsgd "$1" "$2" || return 1
   agmsg_daemon_read_state
   if [ "${AGMSGD_DESIRED:-}" != on ]; then
-    [ "$chosen" != agmsgd ] || STATUS_AGMSGD_NOTE="this project chose agmsgd, but agmsgd is turned off, so sessions use the delivery above; turn it on with: agmsg delivery agmsgd"
-    return 1
+    STATUS_AGMSGD_NOTE="agmsgd is turned off; turn it on with: agmsg delivery agmsgd"
+  elif [ "${AGMSGD_HEALTH:-}" != ready ]; then
+    STATUS_AGMSGD_NOTE="agmsgd is not confirmed running (${AGMSGD_REASON:-unknown}); start it with: agmsg daemon start"
+  else
+    STATUS_AGMSGD_NOTE="agmsgd delivers to this project directly; no Monitor is started"
   fi
-  if [ "$chosen" = agmsgd ] || [ -z "$chosen" ]; then
-    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
-      STATUS_AGMSGD_NOTE="agmsgd delivers to this project directly; no Monitor is started"
-    else
-      STATUS_AGMSGD_NOTE="this project receives through agmsgd, which is not confirmed running (${AGMSGD_REASON:-unknown}); no Monitor is started"
-    fi
-    return 0
-  fi
-  return 1
+  return 0
 }
 
 do_status() {

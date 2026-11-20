@@ -1514,10 +1514,16 @@ _watch_renew_or_stop() {
 # first renewal (observed live, 2026-11-20: a grok-build seat's watch.sh
 # stayed resident across its 10h runtime cap and every "monitors were
 # killed" resume reminder, because this check used to be claude-code-only).
-# Recovery if agmsgd ever stops being ready for this seat: the normal
-# ensure-monitor/actas flow (or the host's own "monitors were killed"
-# resume reminder) starts a fresh watch.sh, which re-evaluates this at its
-# own startup and runs normally once agmsgd no longer covers the seat.
+# Recovery if agmsgd is not actually delivering: a fresh watch.sh (from
+# the normal ensure-monitor/actas flow, or the host's own "monitors were
+# killed" resume reminder) re-evaluates this SAME delivery-choice check at
+# its own startup and stops again just the same, AS LONG AS the choice
+# stays agmsgd -- re-arming the watch never recovers this on its own
+# (review, 2026-11-20). What actually recovers it: `agmsg daemon status
+# --all` to see why agmsgd is not ready, then `agmsg daemon start` (or
+# `agmsg delivery agmsgd` to turn agmsgd on for this install first); or,
+# to stop waiting on agmsgd for this project, `agmsg delivery monitor`
+# (or `turn`) to choose a different delivery explicitly.
 if _agmsg_watch_delivery_choice_is_agmsgd; then
   watch_report "stopping - this project's delivery choice is agmsgd, so no watch is started (if nothing is actually being delivered, agmsg daemon status --all shows why)"
   exit 0

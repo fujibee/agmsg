@@ -206,47 +206,20 @@ agmsg_codex_report_missing_bridge() {
   esac
 }
 
-# With agmsgd on and every registered seat's destination recorded, Codex needs
-# no hooks file, so "no settings file found" would read as broken when nothing
-# is. Hooks that exist keep their own mode; agmsgd off keeps the default text.
-#
-# This USED to only even attempt the agmsgd/seats check when there was no
-# hooks file at all ("no settings file found") -- but `agmsg delivery
-# agmsgd` for Codex installs the monitor hooks file (delivery-cli.sh's own
-# `else` branch, kept so a session that has not yet moved to agmsgd still
-# has something), so right after choosing agmsgd this always had a hooks
-# file present and read "mode: monitor" forever, never "mode: agmsgd"
-# (2026-11-20 review). The agmsgd/seats check now always runs; only the
-# RESULT (seats found, or not) decides which text wins.
+# Hooks that exist keep their own mode. "agmsgd" is NOT detected here
+# (2026-11-20 decision, no type-specific exception): run/delivery-choice
+# is the single source of truth for that mode, read upstream by
+# delivery.sh's own _status_project_on_agmsgd (via the shared
+# agmsg_type_mode_is_agmsgd) before this plug is even consulted -- this
+# used to independently decide "mode: agmsgd" from whether this project's
+# Codex seats had a confirmed destination, but only while NO hooks file
+# existed at all; `agmsg delivery agmsgd` itself installs a monitor hooks
+# file (kept so a session that has not moved over yet still has
+# something), so right after choosing agmsgd this always had one present
+# and read "mode: monitor" forever, never agreeing with watch.sh's own
+# (correct) read of the same choice.
 agmsg_delivery_status() {
-  local type="$1" project="$2" full pairs team name seats=0
-  full="$(agmsg_delivery_status_default "$type" "$project")"
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
-  # shellcheck disable=SC1091
-  source "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
-  # shellcheck disable=SC1091
-  source "${SKILL_DIR:-}/scripts/lib/role-session.sh"
-  agmsg_daemon_read_state
-  agmsg_daemon_apply_project_choice codex "$project"
-  if [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ]; then
-    pairs="$("${SCRIPT_DIR:-}/identities.sh" "$project" "$type" 2>/dev/null || true)"
-    while IFS=$'\t' read -r team name _rest; do
-      [ -n "$team" ] && [ -n "$name" ] || continue
-      agmsg_role_session_load "$team" "$name" 2>/dev/null || { seats=0; break; }
-      if [ "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" type)" = codex ] \
-        && [ -n "${AGMSG_ROLE_SESSION_UUID:-}" ] \
-        && [ -n "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)" ]; then
-        seats=$((seats + 1))
-      else
-        seats=0; break
-      fi
-    done <<< "$pairs"
-  fi
-  if [ "$seats" -gt 0 ]; then
-    echo "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)"
-  else
-    printf '%s\n' "$full"
-  fi
+  agmsg_delivery_status_default "$@"
 }
 
 agmsg_delivery_runtime_status() {

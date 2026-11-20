@@ -432,7 +432,13 @@ eperm_pid() {
     [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
-@test "delivery status: a Codex project with no hooks file reads as agmsgd-delivered only while agmsgd is on and its seats have destinations" {
+# 2026-11-20 decision (unification, no codex exception): run/delivery-choice
+# is the single source of truth for "mode: agmsgd" for every type, the
+# same helper watch.sh checks -- whether this project's Codex seats
+# actually have a destination recorded is no longer part of the MODE
+# decision (it used to gate it; that disagreed with watch.sh, which stops
+# on agmsgd desired-on alone regardless of any seat's registration state).
+@test "delivery status: a Codex project with no hooks file reads agmsgd once agmsgd is desired on, regardless of seat destinations" {
   export SKILL_DIR="$TEST_SKILL_DIR"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
@@ -448,14 +454,10 @@ eperm_pid() {
   esac
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
-  # agmsgd on, but alice has no recorded destination yet: unchanged.
+  # agmsgd on, no choice recorded, no destination for alice either: the
+  # no-choice fallback alone is enough.
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
-  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
-
-  source "$SCRIPTS/lib/role-session.sh"
-  agmsg_role_session_record team alice thread-1 "$TEST_PROJECT" codex "" "$TEST_PROJECT/codex-home"
-  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
-  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)" ]
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project directly; no Monitor is started)" ]
 
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
@@ -465,11 +467,12 @@ eperm_pid() {
 # review, 2026-11-20: `agmsg delivery agmsgd` for Codex installs the
 # monitor hooks file (delivery-cli.sh keeps it so a session that has not
 # yet moved to agmsgd still has something) -- status used to only even
-# attempt the agmsgd/seats check while NO hooks file existed at all, so
-# once that hooks file was present (true right after choosing agmsgd) it
-# read "mode: monitor" forever and never "mode: agmsgd", even with a
-# registered destination.
-@test "delivery status: a Codex project reads agmsgd once seats have destinations, even with its monitor hooks file still installed" {
+# attempt its own agmsgd/seats check while NO hooks file existed at all,
+# so once that hooks file was present (true right after choosing agmsgd)
+# it read "mode: monitor" forever and never "mode: agmsgd". The generic
+# delivery-choice check now runs upstream of Codex's own plug and
+# overrides it regardless of any hooks file.
+@test "delivery status: a Codex project reads agmsgd once it explicitly chose agmsgd, even with its monitor hooks file still installed" {
   export SKILL_DIR="$TEST_SKILL_DIR"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
@@ -477,6 +480,7 @@ eperm_pid() {
   [ "${output%%$'\n'*}" = "mode: monitor" ]
 
   mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'codex\t%s\tagmsgd\n' "$(cd "$TEST_PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
   local boot
   case "$(uname -s)" in
@@ -486,10 +490,8 @@ eperm_pid() {
   esac
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
-  source "$SCRIPTS/lib/role-session.sh"
-  agmsg_role_session_record team alice thread-1 "$TEST_PROJECT" codex "" "$TEST_PROJECT/codex-home"
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
-  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)" ]
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project directly; no Monitor is started)" ]
 }
 
 # review, 2026-11-20 -- a terminal-poke-only type (e.g. antigravity) is
