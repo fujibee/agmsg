@@ -421,6 +421,16 @@ function formatTerminalPokeSeats(inventory, all) {
       lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat (no native channel, no pane)`);
       continue;
     }
+    const shared = /^ambiguous:seats_without_pane:(.+?) pane:(.+)$/.exec(seat.reason ?? "");
+    if (shared) {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat: ${shared[2]} runs this seat's agent, but ${shared[1]} (same type and project, no pane recorded) could be the one in it; run an agmsg command from the right pane so it is recorded`);
+      continue;
+    }
+    const ambiguous = /^ambiguous:(.+)$/.exec(seat.reason ?? "")?.[1];
+    if (ambiguous) {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat: more than one pane runs this seat's agent in its project (${ambiguous}); run an agmsg command from the right one so it is recorded`);
+      continue;
+    }
     if (seat.reason === "pane_gone") {
       lines.push(`Terminal poke ${label}: pane gone`);
       continue;

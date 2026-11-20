@@ -222,6 +222,17 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(from a shell where herdr works, run agmsg daemon stop, then agmsg daemon start\)/);
 });
 
+test('terminal poke: an ambiguous seat names its candidate panes', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    terminalPoke: [{ seat: JSON.stringify(['test', 'agy1']), state: 'unaddressable', reason: 'ambiguous:herdr:/s:w1:p1 herdr:/s:w1:p2' },
+      { seat: JSON.stringify(['test', 'agy3']), state: 'unaddressable', reason: 'ambiguous:seats_without_pane:test/agy4 pane:herdr:/s:w1:p9' }],
+  });
+  const text = await runAsync(f.root);
+  assert.match(text, /Terminal poke test\/agy1: agmsgd cannot reach this seat: more than one pane runs this seat's agent in its project \(herdr:\/s:w1:p1 herdr:\/s:w1:p2\)/);
+  assert.match(text, /test\/agy3: .*herdr:\/s:w1:p9 runs this seat's agent, but test\/agy4 \(same type and project, no pane recorded\) could be the one in it/);
+});
+
 test('grok queue seats are shown with the channel\'s own status vocabulary', async t => {
   const f = fixture(t);
   await fakeDaemon(t, f, {

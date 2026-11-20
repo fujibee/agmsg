@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createTerminalPokeChannel } from '../scripts/daemon/channels/terminal-poke.mjs';
 import { ensureTerminalPokeChannelSchema } from '../scripts/daemon/channels/terminal-poke-store.mjs';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
-import { readUnreadSnapshot } from '../scripts/daemon/channels/codex-queue-store.mjs';
+import { openMessageStore, readUnreadSnapshot } from '../scripts/daemon/channels/codex-queue-store.mjs';
 
 function temporaryDirectory(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-terminal-poke-'));
@@ -113,6 +113,63 @@ test('no_pane and pane_gone are reported as unaddressable, never silently droppe
   await channel.pollOnce();
   assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'no_pane' });
   await channel.stop();
+});
+
+test('two seats of one type in the same place under different spellings are each other\'s peers', async (t) => {
+  const root = temporaryDirectory(t);
+  const place = path.join(root, 'proj');
+  mkdirSync(place);
+  const seen = [];
+  const { channel } = channelFixture(t, {
+    listSeats: () => ({ state: 'ok', seats: [
+      { team: 'test', agent: 'agy1', type: 'antigravity', project: place, teamConfig: {} },
+      { team: 'test', agent: 'agy2', type: 'antigravity', project: `${place}/.`, teamConfig: {} },
+    ] }),
+    nudge: async (args) => { seen.push([args.agent, args.peers]); return { kind: 'ok', state: 'notified', reason: '' }; },
+  });
+  await channel.pollOnce();
+  assert.deepEqual(seen.find(([agent]) => agent === 'agy1')?.[1], ['test/agy2']);
+  assert.deepEqual(seen.find(([agent]) => agent === 'agy2')?.[1], ['test/agy1']);
+  await channel.stop();
+});
+
+test('ambiguous panes are unaddressable, with the candidates as the reason, and nothing is confirmed', async (t) => {
+  const { channel, state, db } = channelFixture(t);
+  state.nudgeState = 'ambiguous';
+  state.nudgeReason = 'herdr:/s:w1:p1 herdr:/s:w1:p2';
+  await channel.pollOnce();
+  assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'ambiguous:herdr:/s:w1:p1 herdr:/s:w1:p2' });
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_terminal_poke_queue WHERE state='confirmed'").get().n, 0);
+  await channel.stop();
+});
+
+test('an empty message store goes through the channel poll as "no unread": no failure on the seat, no nudge', async (t) => {
+  const fixture = channelFixture(t, { openStore: openMessageStore, readSnapshot: readUnreadSnapshot, readOwnMarker: undefined });
+  // channelFixture put the store in AGMSG_STORAGE_PATH=root: a database with no tables yet.
+  new DatabaseSync(path.join(fixture.state.options.installRoot, 'messages.db')).close();
+  await fixture.channel.pollOnce();
+  assert.equal(fixture.state.nudgeCalls, 0);
+  assert.deepEqual(seatBrief(fixture.channel), { state: 'addressable', reason: '' });
+  await fixture.channel.stop();
+});
+
+test('a store with only some of the message tables is still unreadable through the channel', async (t) => {
+  const fixture = channelFixture(t, { openStore: openMessageStore, readSnapshot: readUnreadSnapshot, readOwnMarker: undefined });
+  const store = new DatabaseSync(path.join(fixture.state.options.installRoot, 'messages.db'));
+  store.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY)');
+  store.close();
+  await fixture.channel.pollOnce();
+  assert.equal(fixture.state.nudgeCalls, 0);
+  assert.match(seatBrief(fixture.channel).reason, /^message_store_unreadable:.*no such table/);
+  await fixture.channel.stop();
+});
+
+test('a store nothing was ever sent through is "no unread", not an unreadable store', () => {
+  const store = new DatabaseSync(':memory:');
+  assert.deepEqual(readUnreadSnapshot(store, 'test', 'agy1'), { state: 'ok', unread: false, upTo: JSON.stringify({ eventSeq: 0, legacyId: 0 }) });
+  // Only some of the tables: still an error, not a guessed "no unread".
+  store.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, team TEXT, to_agent TEXT, read_at TEXT)');
+  assert.throws(() => readUnreadSnapshot(store, 'test', 'agy1'), /no such table/);
 });
 
 test('a project that opted out of agmsgd delivery gets no nudge', async (t) => {

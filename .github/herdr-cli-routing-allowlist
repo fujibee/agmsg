@@ -17,3 +17,4 @@ terminal_detect 1
 terminal_find_by_label 1
 terminal_spawn 2
 terminal_enumerate_panes 2
+terminal_enumerate_agent_panes 2   # the instance list and one pane list per running instance, like terminal_enumerate_panes
