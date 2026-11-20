@@ -8,7 +8,8 @@ load test_helper
 
 setup() {
   GBASE="$BATS_TEST_TMPDIR/real-base"
-  mkdir -p "$GBASE/agmsg/run"
+  mkdir -p "$GBASE/agmsg/run" "$GBASE/agmsg/db" "$GBASE/agmsg/teams/demo"
+  : > "$GBASE/agmsg/db/messages.db"
   printf '%s\n' "/some/skill" > "$GBASE/agmsg/.owner"
   _AGMSG_GUARD_REAL_BASE="$GBASE"
 }
@@ -55,4 +56,19 @@ setup() {
     bash -c '. "$1"; printf "%s|%s|%s\n" "${AGMSG_HOME-unset}" "${AGMSG_INSTALL_HOME-unset}" "$_AGMSG_GUARD_REAL_BASE"' _ "$BATS_TEST_DIRNAME/test_helper.bash"
   [ "$status" -eq 0 ]
   [ "$output" = "unset|unset|$BATS_TEST_TMPDIR/ambient" ]
+}
+
+@test "db/ and teams/ emptied while the entry and its owner stay fails" {
+  agmsg_guard_real_state_begin
+  command rm -r "$GBASE/agmsg/teams/demo"
+  : > "$GBASE/agmsg/db/messages.db.gone"
+  command rm "$GBASE/agmsg/db/messages.db" "$GBASE/agmsg/db/messages.db.gone"
+  if agmsg_guard_real_state_end 2>/dev/null; then return 1; fi
+}
+
+@test "db/ and teams/ removed and recreated empty fails" {
+  agmsg_guard_real_state_begin
+  command rm -r "$GBASE/agmsg/db" "$GBASE/agmsg/teams"
+  mkdir -p "$GBASE/agmsg/db" "$GBASE/agmsg/teams"
+  if agmsg_guard_real_state_end 2>/dev/null; then return 1; fi
 }
