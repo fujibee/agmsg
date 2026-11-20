@@ -70,8 +70,8 @@ _labeled_screen() {
   _agmsg_input_box_rule_is_labeled "$r myteam-reviewer ─"
   _agmsg_input_box_rule_is_labeled "$r チーム-名前 ── "
   _agmsg_input_box_rule_is_labeled "$r foo bar ─"
-  ! _agmsg_input_box_rule_is_labeled "$r"
-  ! _agmsg_input_box_rule_is_labeled "$r  ─"
-  ! _agmsg_input_box_rule_is_labeled "$r x"
-  ! _agmsg_input_box_rule_is_labeled "$r ─── ─"
+  refute _agmsg_input_box_rule_is_labeled "$r"
+  refute _agmsg_input_box_rule_is_labeled "$r  ─"
+  refute _agmsg_input_box_rule_is_labeled "$r x"
+  refute _agmsg_input_box_rule_is_labeled "$r ─── ─"
 }
