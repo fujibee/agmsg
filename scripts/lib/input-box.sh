@@ -180,6 +180,45 @@ _agmsg_input_box_rule_run_len() {
   printf '%s\n' "$count"
 }
 
+# True when <plain> (a style-stripped rule line) has the shape
+# "<run of ─> <label> <run of ─>": a leading rule run, ONE space, a
+# non-blank label that does not itself start with "─", ONE space, and at
+# least one trailing "─" ending the line (trailing CR or spaces ignored).
+# An unbroken rule, or a rule with
+# anything else after its run, is not labeled.
+_agmsg_input_box_rule_is_labeled() {
+  local s="$1" unit="─" count=0
+  while [ "$count" -lt 300 ]; do
+    case "$s" in
+      "$unit"*) s="${s#"$unit"}"; count=$((count + 1)) ;;
+      *) break ;;
+    esac
+  done
+  # A herdr pane read ends every line in CR; trailing CR/blank padding is
+  # not part of the rule's shape.
+  local cr=$'\r'
+  while :; do
+    case "$s" in
+      *"$cr") s="${s%"$cr"}" ;;
+      *" ") s="${s% }" ;;
+      *) break ;;
+    esac
+  done
+  case "$s" in " "*) s="${s# }" ;; *) return 1 ;; esac
+  case "$s" in *"$unit") : ;; *) return 1 ;; esac
+  count=0
+  while [ "$count" -lt 300 ]; do
+    case "$s" in
+      *"$unit") s="${s%"$unit"}"; count=$((count + 1)) ;;
+      *) break ;;
+    esac
+  done
+  case "$s" in *" ") s="${s% }" ;; *) return 1 ;; esac
+  case "$s" in ''|"$unit"*) return 1 ;; esac
+  case "$s" in *[![:space:]]*) return 0 ;; esac
+  return 1
+}
+
 # Boxed style (Claude Code): the input sits between the LAST two lines whose
 # STYLE-STRIPPED content starts with a run of 20+ "─" AND whose leading runs
 # are the SAME length — the top rule may carry the pane's own label after
@@ -226,7 +265,23 @@ _agmsg_input_box_raw_boxed() {
     case "${plain[$i]}" in
       "$rule"*)
         run="$(_agmsg_input_box_rule_run_len "${plain[$i]}")"
-        [ "$run" -eq "$bottom_run" ] && top="$i"
+        if [ "$run" -eq "$bottom_run" ]; then
+          top="$i"
+        elif [ "$run" -lt "$bottom_run" ] \
+          && _agmsg_input_box_rule_is_labeled "${plain[$i]}"; then
+          # Claude Code draws the pane's own label INTO the top rule
+          # ("──── <label> ─"), and the whole line spans the pane, so its
+          # leading run is SHORTER than the unbroken bottom rule by the
+          # label's own width (measured live on herdr: 114 vs 132 for a
+          # 15-character label in a 132-column pane). Requiring the two runs to be equal
+          # therefore refused every labeled Claude Code box. The label's
+          # display width is not computed to close the gap exactly -- a
+          # CJK label is two columns per character, which a character
+          # count cannot know -- so a labeled top only has to be shorter
+          # than bottom. The short turn-separator the same-width rule
+          # guards against is an UNLABELED run, which still has to match.
+          top="$i"
+        fi
         break
         ;;
     esac
