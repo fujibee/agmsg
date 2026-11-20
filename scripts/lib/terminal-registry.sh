@@ -1446,7 +1446,12 @@ agmsg_terminal_resolve_name() {
   case "$own" in
     '') _agmsg_terminal_resolve_name_raw "$@" ;;
     unknown*)
-      echo "agmsg: this Codex seat runs under the shared app-server daemon, whose environment names another seat's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2
+      case "${own#unknown$'\t'}" in
+        grok_*|cannot_tell_whether_under_grok_leader)
+          echo "agmsg: this grok session runs under a leader shared with another grok, whose environment names that grok's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2 ;;
+        *)
+          echo "agmsg: this Codex seat runs under the shared app-server daemon, whose environment names another seat's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2 ;;
+      esac
       return 1 ;;
     *) _agmsg_with_terminal_env "$own" _agmsg_terminal_resolve_name_raw "$@" ;;
   esac
@@ -1457,7 +1462,11 @@ agmsg_terminal_self_env() {
   own="$(_agmsg_codex_own_pane)" || own=""
   case "$own" in
     '') _agmsg_terminal_self_env_raw "$@" ;;
-    unknown*) printf 'unknown:codex:shared_daemon_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+    unknown*)
+      case "${own#unknown$'\t'}" in
+        grok_*|cannot_tell_whether_under_grok_leader) printf 'unknown:grok:shared_leader_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+        *) printf 'unknown:codex:shared_daemon_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+      esac ;;
     *) _agmsg_with_terminal_env "$own" _agmsg_terminal_self_env_raw "$@" ;;
   esac
 }

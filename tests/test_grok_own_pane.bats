@@ -83,7 +83,7 @@ _tool_shell() {   # the leader's environment: the starter's pane
   _session other 14977 w1:p4G
   _tool_shell sess-b
   run agmsg_terminal_self_env
-  case "$output" in unknown:*grok_session_not_in_active_sessions*) ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in unknown:grok:shared_leader_pane_unproven:grok_session_not_in_active_sessions) ;; *) echo "$output"; return 1 ;; esac
   run agmsg_terminal_resolve_name ""
   [ "$status" -ne 0 ]
 }
@@ -97,6 +97,10 @@ _tool_shell() {   # the leader's environment: the starter's pane
   case "$output" in unknown:*grok_session_process_is_not_the_recorded_one*) ;; *) echo "$output"; return 1 ;; esac
   run agmsg_terminal_resolve_name ""
   [ "$status" -ne 0 ]
+  # The message names grok and the reason, not a Codex daemon.
+  [[ "$output" == *"this grok session runs under a leader shared with another grok"* ]]
+  [[ "$output" == *grok_session_process_is_not_the_recorded_one* ]]
+  [[ "$output" != *Codex* ]]
 }
 
 @test "an age with days (dd-hh:mm:ss) is read, and a start time that cannot be read is unverifiable" {
