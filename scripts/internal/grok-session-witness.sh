@@ -186,6 +186,76 @@ EOF_GROK_PAIRS
 # (review on #1979, finding (1)): only when that witness's own recorded
 # owner is definitely gone, never merely because this Stop event's
 # session_id does not match it.
+# The verdict for a session with no leader child of its own, read from the
+# grok config ([cli] use_leader) and, when that is on, from whether THIS
+# session's process is actually connected to the leader that listens at
+# <grok_home>/leader.sock.
+#   use_leader false / absent / no config     -> none (not in leader mode)
+#   use_leader true, this pid is connected to that leader -> found (shared)
+#   use_leader true, connections readable, none is to it  -> none (e.g. a TUI
+#     started without a leader, config turned on afterwards)
+#   anything unreadable (config, lsof)       -> unknown, with the reason
+# The witness is filled once the socket is resolved; while it stays empty (an
+# unknown), every Stop re-runs this, so "once per session" holds only when it resolves.
+# A leader socket existing is not the evidence: another TUI's leader can
+# listen there while this session never attached to it.
+_agmsg_grok_shared_leader_socket() {   # <session_pid> <grok_home>
+  local pid="$1" grok_home="$2" cfg scan rc=0 sock own own_rc=0 peers all dev line leader_devs="" p
+  declare -F agmsg_grok_use_leader_scan >/dev/null 2>&1 || source "${SCRIPT_DIR:?SCRIPT_DIR is not set}/lib/grok-config.sh"
+  cfg="$grok_home/config.toml"
+  sock="$grok_home/leader.sock"
+  scan="$(agmsg_grok_use_leader_scan "$cfg" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'unknown\ncould not read use_leader from %s to tell whether grok is in leader mode\n' "$cfg"
+    return 0
+  fi
+  case "$scan" in
+    false|absent) printf 'none\n\n'; return 0 ;;
+    true) ;;
+    *) printf 'unknown\nuse_leader in %s is not a plain true/false (%s), so whether grok is in leader mode cannot be told\n' "$cfg" "$(printf '%s' "$scan" | tr '\t' ' ')"; return 0 ;;
+  esac
+  if [ ! -S "$sock" ]; then
+    printf 'unknown\nuse_leader is on in %s but no grok leader is listening at %s yet\n' "$cfg" "$sock"
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || { printf 'unknown\nlsof is not available to tell whether this grok session is connected to the leader at %s\n' "$sock"; return 0; }
+  # This session's unix sockets: the peer of each is "->0x<address>".
+  # Where "nothing to list" is told from "could not read": lsof exits 1 both when
+  # a process holds no unix socket at all and when a read was denied or failed.
+  # stdout and stderr are read together: exit 0 is a listing; exit 1 with
+  # NOTHING printed (no stderr either) is the clean "no sockets" case, so no
+  # peer; any other exit, or exit 1 with text (a warning or a denial), is
+  # "could not tell" -- never folded into "not connected".
+  own="$(lsof -a -p "$pid" -U -Fn 2>&1)" || own_rc=$?
+  if [ "$own_rc" -gt 1 ] || { [ "$own_rc" -eq 1 ] && [ -n "$own" ]; }; then
+    printf 'unknown\ncould not read this grok session'"'"'s own sockets (lsof exit %s) to tell whether it is connected to the leader at %s\n' "$own_rc" "$sock"
+    return 0
+  fi
+  peers="$(printf '%s\n' "$own" | sed -n 's/^n->\(.*\)$/\1/p')"
+  # Every unix socket: the ones NAMED the leader's socket path, by their own
+  # address (the leader's accepted connections; one is each client's peer).
+  all="$(lsof -U -Fdn 2>/dev/null)" || all=""
+  if [ -z "$all" ]; then
+    printf 'unknown\ncould not list unix sockets (lsof) to tell whether this grok session is connected to the leader at %s\n' "$sock"
+    return 0
+  fi
+  dev=""
+  while IFS= read -r line; do
+    case "$line" in
+      f*) dev="" ;;
+      d*) dev="${line#d}" ;;
+      n*) if [ "${line#n}" = "$sock" ] && [ -n "$dev" ]; then leader_devs="$leader_devs $dev "; fi ;;
+    esac
+  done <<LSOF_END
+$all
+LSOF_END
+  [ -n "$leader_devs" ] || { printf 'unknown\nno process was found holding %s, so this grok session cannot be shown connected to a leader\n' "$sock"; return 0; }
+  for p in $peers; do
+    case "$leader_devs" in *" $p "*) printf 'found\n%s\n' "$sock"; return 0 ;; esac
+  done
+  printf 'none\n\n'
+}
+
 # agmsg_grok_leader_socket_for <session_pid> <grok_home>
 #
 # The leader socket a grok-build session is attached to, for the witness.
@@ -213,10 +283,16 @@ EOF_GROK_PAIRS
 # when the flag is present). With no flag, grok's default
 # GROK_HOME/leader.sock.
 #
-# A plain, non-leader TUI is "none": the witness keeps an empty socket, so
-# agmsgd still never connects to (or has a leader started for) a seat that
-# is not in leader mode. A leader started by an earlier TUI and shared by
-# this one is not this session's child and is not adopted. Not on Windows.
+# No child leader is not yet "none". With use_leader = true, the second and
+# later TUIs on one GROK_HOME attach to the leader the first one started
+# (GROK_HOME/leader.sock) and have no leader child of their own; it is this
+# session's leader when the session's own process is connected to it
+# (_agmsg_grok_shared_leader_socket). A TUI that is not in leader mode stays
+# "none": the witness keeps an empty socket, so agmsgd still never connects to
+# (or has a leader started for) a seat that is not in leader mode. Recording a
+# socket nothing listens on starts nothing either: the channel probes the
+# socket before it spawns anything and stops at leader_not_running. Not on
+# Windows.
 agmsg_grok_leader_socket_for() {
   local pid="$1" grok_home="$2" table rc=0 cpid cppid comm args rest sock="" found_leader=0 arg prev="" lsof_out
   # The /proc root, overridable only so a test can stand in for it on any OS.
@@ -278,7 +354,7 @@ ARGV_END
 $table
 TABLE_END
   if [ "$found_leader" -eq 0 ]; then
-    printf 'none\n\n'
+    _agmsg_grok_shared_leader_socket "$pid" "$grok_home"
     return 0
   fi
   [ -n "$sock" ] || sock="$grok_home/leader.sock"

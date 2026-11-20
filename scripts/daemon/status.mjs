@@ -492,7 +492,27 @@ function formatGrokQueueSeats(inventory, all) {
     }
     if (seat.reason === "leader_socket_unknown") {
       const grokConfig = join(process.env.GROK_HOME || join(homedir(), ".grok"), "config.toml");
-      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
+      // Same reading as the hooks' own scan: the bare [cli] table's use_leader
+      // only. "on" / "off" are said only when the file was read; otherwise
+      // neither is claimed.
+      let leaderCfg = "unread";
+      try {
+        let inCli = false;
+        const text = readFileSync(grokConfig, "utf8");
+        leaderCfg = "off";
+        for (const line of text.split("\n")) {
+          if (/^[ \t]*\[[^\]]*\][ \t\r]*(#.*)?$/.test(line)) { inCli = /^[ \t]*\[[ \t]*cli[ \t]*\][ \t\r]*(#.*)?$/.test(line); continue; }
+          const m = inCli && /^[ \t]*use_leader[ \t]*=[ \t]*([^ \t\r#]*)/.exec(line);
+          if (m) { leaderCfg = m[1] === "true" ? "on" : "off"; break; }
+        }
+      } catch { /* leaderCfg stays "unread" */ }
+      if (leaderCfg === "on") {
+        lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: use_leader is on in ${grokConfig} but no grok leader was found for this session (restart the grok session)`);
+      } else if (leaderCfg === "unread") {
+        lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: no grok leader was found for this session, and ${grokConfig} could not be read to tell whether use_leader is on (restart the grok session)`);
+      } else {
+        lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
+      }
       continue;
     }
     const notRunning = /^leader_not_running:(.+)$/.exec(seat.reason ?? "")?.[1];
