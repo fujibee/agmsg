@@ -87,6 +87,9 @@ _agmsg_kill_confirmed() {
 }
 
 teardown() {
+  # A stub of kill/sleep/wait left in the test shell would also stop bats from ending its
+  # BATS_TEST_TIMEOUT watcher (this teardown does not go through teardown_test_env).
+  unset -f kill sleep wait 2>/dev/null || true
   local pid expect cmd rc=0
   while IFS=$'\t' read -r pid expect; do
     [ -n "$pid" ] || continue

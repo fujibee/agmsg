@@ -22,6 +22,9 @@ setup() {
 }
 
 teardown() {
+  # A stub of kill/sleep/wait left in the test shell would also stop bats from ending its
+  # BATS_TEST_TIMEOUT watcher (this teardown does not go through teardown_test_env).
+  unset -f kill sleep wait 2>/dev/null || true
   # A test that pauses an update at the writer pid-publish gate or holds a lock
   # must never leave either behind when an assertion fails first: release the
   # gate, then end the background jobs the test started (tests/state_root_reap.bash:
