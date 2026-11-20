@@ -126,7 +126,7 @@ PEERS_END
       if agmsg_write_atomic "$REC" "$(printf '%s\t%s\t%s' "$detail" "$AGMSG_NUDGE_PROJECT" "$dtype")" 2>/dev/null; then
         return 0
       fi
-      report unknown "placement_record_write_failed"; return 1 ;;
+      report "unknown:placement_record_write_failed"; return 1 ;;
     ambiguous*) report ambiguous "$detail"; return 1 ;;
     unknown*) report "unknown:$detail"; return 1 ;;
     *) report "${1:-no_pane}"; return 1 ;;

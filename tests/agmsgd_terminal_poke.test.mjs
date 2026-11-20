@@ -115,6 +115,24 @@ test('no_pane and pane_gone are reported as unaddressable, never silently droppe
   await channel.stop();
 });
 
+test('two seats of one type in the same place under different spellings are each other\'s peers', async (t) => {
+  const root = temporaryDirectory(t);
+  const place = path.join(root, 'proj');
+  mkdirSync(place);
+  const seen = [];
+  const { channel } = channelFixture(t, {
+    listSeats: () => ({ state: 'ok', seats: [
+      { team: 'test', agent: 'agy1', type: 'antigravity', project: place, teamConfig: {} },
+      { team: 'test', agent: 'agy2', type: 'antigravity', project: `${place}/.`, teamConfig: {} },
+    ] }),
+    nudge: async (args) => { seen.push([args.agent, args.peers]); return { kind: 'ok', state: 'notified', reason: '' }; },
+  });
+  await channel.pollOnce();
+  assert.deepEqual(seen.find(([agent]) => agent === 'agy1')?.[1], ['test/agy2']);
+  assert.deepEqual(seen.find(([agent]) => agent === 'agy2')?.[1], ['test/agy1']);
+  await channel.stop();
+});
+
 test('ambiguous panes are unaddressable, with the candidates as the reason, and nothing is confirmed', async (t) => {
   const { channel, state, db } = channelFixture(t);
   state.nudgeState = 'ambiguous';

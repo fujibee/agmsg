@@ -12,6 +12,7 @@ import { createSeatBook } from "../seat-book.mjs";
 import { assertPollActive, pollSignal, SEAT_DEADLINE_MS } from "../poll-deadline.mjs";
 import { createSeatPoller } from "../seat-poll.mjs";
 import { logLine } from "../log.mjs";
+import { realpathSync } from "node:fs";
 import { optedOutOfAgmsgd } from "./delivery-choice.mjs";
 import { withImmediateTransaction } from "../db.mjs";
 import {
@@ -331,14 +332,18 @@ export function createTerminalPokeChannel({
       const seats = [...roster.seats];
       // Seats of one type in one project cannot be told apart by that alone; a
       // pane found for one of them is only its own when no other is waiting.
+      // A project is the same place by its physical path (the pane search compares
+      // that too), so /p, /p/. and a symlink or /tmp vs /private/tmp are one project.
+      const placeOf = (project) => { try { return realpathSync(project); } catch { return project; } };
+      const groupOf = (seat) => `${seat.type}\u0000${placeOf(seat.project)}`;
       const groups = new Map();
       for (const seat of seats) {
-        const group = `${seat.type}\u0000${seat.project}`;
+        const group = groupOf(seat);
         groups.set(group, [...(groups.get(group) ?? []), seat]);
       }
       peerIndex = new Map(seats.map((seat) => [
         seatKey(seat.team, seat.agent),
-        (groups.get(`${seat.type}\u0000${seat.project}`) ?? [])
+        (groups.get(groupOf(seat)) ?? [])
           .filter((other) => !(other.team === seat.team && other.agent === seat.agent))
           .map((other) => `${other.team}/${other.agent}`),
       ]));
