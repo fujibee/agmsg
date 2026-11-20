@@ -12,7 +12,9 @@
 # The session is found from what grok records about it:
 #
 #   1. GROK_SESSION_ID names this session.
-#   2. GROK_HOME/active_sessions.json maps it to the session's own process, the TUI.
+#   2. GROK_HOME/active_sessions.json maps it to the session's own process, the TUI,
+#      accepted only when that process's age matches the start time grok recorded
+#      (a stale entry whose pid was reused by another process is not trusted).
 #   3. TUI -> pane: that process's own HERDR_* / TMUX* environment.
 #
 # Only a process with a `grok agent leader` among its ancestors takes this path; any
@@ -64,6 +66,31 @@ _agmsg_gop_under_leader() {
   return 2
 }
 
+# Is <pid> the process active_sessions.json recorded, not a later one that reused the
+# number? grok writes the process's start time (pid_start, microseconds since the
+# epoch) beside the pid; the process's age (ps etime) must put its start within a few
+# seconds of it. Checked against a live grok: pid 69890, etime 3-06:38:36 at epoch
+# 1795156925 -> start 1794873809, pid_start 1794873809001420.
+#   0 same process   1 a different one (or none)   2 cannot tell
+_agmsg_gop_same_process() {   # <pid> <pid_start>
+  local et days="" h m s secs start now
+  case "$2" in ''|*[!0-9]*) return 2 ;; esac
+  et="$(ps -o etime= -p "$1" 2>/dev/null)" || return 1
+  et="${et//[[:space:]]/}"
+  [ -n "$et" ] || return 1
+  case "$et" in *-*) days="${et%%-*}"; et="${et#*-}" ;; esac
+  case "$days$et" in *[!0-9:]*) return 2 ;; esac
+  IFS=: read -r h m s <<ETIME
+$et
+ETIME
+  if [ -z "$s" ]; then s="$m"; m="$h"; h=0; fi
+  secs=$(( 10#${days:-0} * 86400 + 10#${h:-0} * 3600 + 10#${m:-0} * 60 + 10#${s:-0} ))
+  now="$(date +%s)"
+  start=$((now - secs))
+  [ "$((start - $2 / 1000000))" -le "${AGMSG_GROK_START_SKEW:-5}" ] \
+    && [ "$(($2 / 1000000 - start))" -le "${AGMSG_GROK_START_SKEW:-5}" ]
+}
+
 _agmsg_gop_cache() { [ -n "${SKILL_DIR:-}" ] && printf '%s/run/grok-own-pane.%s\n' "$SKILL_DIR" "$1"; }
 
 # <kind> <session> [pid lstart reason], then KEY=VALUE lines on stdin.
@@ -78,7 +105,7 @@ _agmsg_gop_remember() {
 }
 
 agmsg_grok_own_pane() {
-  local sid="${GROK_SESSION_ID:-}" f kind ts pid lstart reason now cur env rc obj
+  local sid="${GROK_SESSION_ID:-}" f kind ts pid lstart reason now cur env rc obj pstart
   [ -n "${HERDR_ENV:-}${TMUX:-}${TMUX_PANE:-}${HERDR_PANE_ID:-}" ] || return 0
   case "$sid" in *[!A-Za-z0-9._-]*) return 0 ;; esac
 
@@ -123,10 +150,17 @@ agmsg_grok_own_pane() {
   else
     obj="$(agmsg_grok_active_session_lookup "${GROK_HOME:-${HOME:-}/.grok}/active_sessions.json" "$sid" 2>/dev/null)" || obj=""
     pid="$(printf '%s' "$obj" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+    pstart="$(printf '%s' "$obj" | sed -n 's/.*"pid_start"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
     case "$pid" in
       ''|*[!0-9]*) reason="grok_session_not_in_active_sessions" ;;
       *)
-        env="$(_agmsg_cop_env_of "$pid")" || env=""
+        rc=0; _agmsg_gop_same_process "$pid" "$pstart" || rc=$?
+        case "$rc" in
+          0) env="$(_agmsg_cop_env_of "$pid")" || env="" ;;
+          1) env=""; reason="grok_session_process_is_not_the_recorded_one" ;;
+          *) env=""; reason="grok_session_start_time_unverifiable" ;;
+        esac
+        [ -z "$reason" ] || { printf '' | _agmsg_gop_remember unknown "$sid" "" "" "$reason"; printf 'unknown\t%s\n' "$reason"; return 0; }
         case "$env" in
           *HERDR_PANE_ID=*|*TMUX_PANE=*)
             lstart="$(ps -o lstart= -p "$pid" 2>/dev/null)" || lstart=""
