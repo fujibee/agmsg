@@ -65,13 +65,13 @@ _drops_stubs() {
 @test "the teardown check sees through comments and one-line teardowns" {
   local d="$BATS_TEST_TMPDIR"
   printf '%s\n' 'teardown() {' '  # does not go through teardown_test_env' '  rm -rf x' '}' 'other() { teardown_test_env; }' > "$d/a.bats"
-  ! _drops_stubs <<<"$(_teardown_code "$d/a.bats")"
+  if _drops_stubs <<<"$(_teardown_code "$d/a.bats")"; then return 1; fi
   printf '%s\n' 'teardown() { rm -rf x; }' 'other() { unset -f kill sleep wait; }' > "$d/b.bats"
-  ! _drops_stubs <<<"$(_teardown_code "$d/b.bats")"
+  if _drops_stubs <<<"$(_teardown_code "$d/b.bats")"; then return 1; fi
   printf '%s\n' 'teardown() { teardown_test_env; }' > "$d/c.bats"
   _drops_stubs <<<"$(_teardown_code "$d/c.bats")"
   printf '%s\n' 'teardown() {' '  unset -f kill sleep wait 2>/dev/null || true' '  rm -rf x' '}' > "$d/d.bats"
   _drops_stubs <<<"$(_teardown_code "$d/d.bats")"
   printf '%s\n' 'teardown() {' '  unset -f kill sleep' '}' > "$d/e.bats"
-  ! _drops_stubs <<<"$(_teardown_code "$d/e.bats")"
+  if _drops_stubs <<<"$(_teardown_code "$d/e.bats")"; then return 1; fi
 }
