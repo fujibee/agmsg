@@ -367,11 +367,12 @@ stored_types() {
 # printf still has most of the list to write.
 @test "migrate: a long table list does not make a table be skipped" {
   bash "$SCRIPTS/send.sh" alpha ann bob "kept" >/dev/null
-  local i sql=""
+  # Through a file, not an argument: one argument is capped at 128 KB on Linux.
+  local i sqlfile="$BATS_TEST_TMPDIR/many-tables.sql"
   for i in $(seq 1 3000); do
-    sql="${sql}CREATE TABLE unrelated_table_with_a_long_name_$i(x);"
-  done
-  sqlite3 "$SHARED" "$sql"
+    printf 'CREATE TABLE unrelated_table_with_a_long_name_%s(x);\n' "$i"
+  done > "$sqlfile"
+  sqlite3 "$SHARED" < "$sqlfile"
   [ "$(sqlite3 "$SHARED" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" | tr -d '\r')" -gt 3000 ]
 
   run migrate alpha
