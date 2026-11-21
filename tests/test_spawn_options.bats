@@ -142,3 +142,87 @@ YAML
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# --- agmsg_spawn_options_sample_file / agmsg_ensure_spawn_options_sample ---
+
+@test "spawn_options_sample_file: defaults to ~/.agmsg/config/spawn_options.yaml.sample under HOME" {
+  unset AGMSG_SPAWN_OPTIONS_FILE
+  [ "$(agmsg_spawn_options_sample_file)" = "$HOME/.agmsg/config/spawn_options.yaml.sample" ]
+}
+
+@test "spawn_options_sample_file: resolves beside AGMSG_SPAWN_OPTIONS_FILE when set" {
+  export AGMSG_SPAWN_OPTIONS_FILE="/tmp/custom-dir/my_spawn_options.yaml"
+  [ "$(agmsg_spawn_options_sample_file)" = "/tmp/custom-dir/spawn_options.yaml.sample" ]
+}
+
+@test "ensure_spawn_options_sample: creates sample under ~/.agmsg/config/ when AGMSG_SPAWN_OPTIONS_FILE is unset" {
+  unset AGMSG_SPAWN_OPTIONS_FILE
+  local src="$TEST_SKILL_DIR/scripts/spawn_options.yaml.sample"
+  local dest="$HOME/.agmsg/config/spawn_options.yaml.sample"
+
+  [ -f "$src" ]
+  run agmsg_ensure_spawn_options_sample "$src"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$dest" ]
+  [ -f "$dest" ]
+  [ ! -e "$HOME/.agmsg/config/spawn_options.yaml" ]
+  # Must be LF-only (no CR bytes) so awk in spawn-options.sh parses tokens cleanly.
+  run grep -n $'\r' "$dest"
+  [ "$status" -eq 1 ]
+}
+
+@test "ensure_spawn_options_sample: creates sample beside AGMSG_SPAWN_OPTIONS_FILE and creates missing parent dirs" {
+  local custom_dir="$BATS_TEST_TMPDIR/nested/custom-cfg"
+  export AGMSG_SPAWN_OPTIONS_FILE="$custom_dir/spawn_options.yaml"
+  local src="$TEST_SKILL_DIR/scripts/spawn_options.yaml.sample"
+  local dest="$custom_dir/spawn_options.yaml.sample"
+
+  run agmsg_ensure_spawn_options_sample "$src"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$dest" ]
+  [ -f "$dest" ]
+  [ ! -e "$AGMSG_SPAWN_OPTIONS_FILE" ]
+}
+
+@test "ensure_spawn_options_sample: does not overwrite an existing sample file" {
+  local custom_dir="$BATS_TEST_TMPDIR/keep-existing"
+  mkdir -p "$custom_dir"
+  export AGMSG_SPAWN_OPTIONS_FILE="$custom_dir/spawn_options.yaml"
+  local dest="$custom_dir/spawn_options.yaml.sample"
+  printf '# user kept sample\n' > "$dest"
+
+  run agmsg_ensure_spawn_options_sample "$TEST_SKILL_DIR/scripts/spawn_options.yaml.sample"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(cat "$dest")" = "# user kept sample" ]
+}
+
+@test "shipped spawn_options.yaml.sample parses cleanly with expected balanced tokens" {
+  export AGMSG_SPAWN_OPTIONS_FILE="$TEST_SKILL_DIR/scripts/spawn_options.yaml.sample"
+
+  run agmsg_spawn_options_tokens codex
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "--sandbox" ]
+  [ "${lines[1]}" = "workspace-write" ]
+  [ "${lines[2]}" = "--ask-for-approval" ]
+  [ "${lines[3]}" = "on-request" ]
+  [ "${lines[4]}" = "-c" ]
+  [ "${lines[5]}" = "tui.disable_paste_burst=true" ]
+  [ "${#lines[@]}" -eq 6 ]
+
+  run agmsg_spawn_options_tokens claude-code
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "--permission-mode" ]
+  [ "${lines[1]}" = "acceptEdits" ]
+  [ "${#lines[@]}" -eq 2 ]
+
+  run agmsg_spawn_options_tokens antigravity
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "--mode" ]
+  [ "${lines[1]}" = "accept-edits" ]
+  [ "${#lines[@]}" -eq 2 ]
+
+  run agmsg_spawn_options_tokens opencode
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
