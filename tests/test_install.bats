@@ -3641,17 +3641,17 @@ CYG
   grep -Fxq "  --cmd <name>    Select one installation under ~/.agents/skills" "$out"
 }
 
-@test "install.sh: places spawn_options.yaml.sample under ~/.agmsg/config/ on fresh install and preserves it on --update" {
-  local sample="$FAKE_HOME/.agmsg/config/spawn_options.yaml.sample"
-  local active="$FAKE_HOME/.agmsg/config/spawn_options.yaml"
+@test "install.sh: creates and preserves the sample beside the configured spawn options file" {
+  local sample="$FAKE_HOME/spawn_options.yaml.sample"
+  local active="$FAKE_HOME/spawn_options.yaml"
 
-  run env -u AGMSG_SPAWN_OPTIONS_FILE HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  run env HOME="$FAKE_HOME" AGMSG_SPAWN_OPTIONS_FILE="$active" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ "$status" -eq 0 ]
   [ -f "$sample" ]
   [ ! -e "$active" ]
 
   printf '# kept across update\n' > "$sample"
-  run env -u AGMSG_SPAWN_OPTIONS_FILE HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd agmsg
+  run env HOME="$FAKE_HOME" AGMSG_SPAWN_OPTIONS_FILE="$active" bash "$REPO_ROOT/install.sh" --update --cmd agmsg
   [ "$status" -eq 0 ]
   [ "$(cat "$sample")" = "# kept across update" ]
   [ ! -e "$active" ]
