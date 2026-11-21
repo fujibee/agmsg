@@ -369,7 +369,7 @@ terminal_pane_state() {
       *)                     echo unknown; return 10 ;;
     esac
   fi
-  if grep -qx -- "$bare" <<<"$out"; then echo present; return 0; fi
+  case $'\n'"$out"$'\n' in *$'\n'"$bare"$'\n'*) echo present; return 0 ;; esac
   echo gone
   return 0
 }
