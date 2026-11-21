@@ -1,0 +1,189 @@
+#!/usr/bin/env bats
+#
+# A rerun of a CI shard runs only what the earlier attempt did not pass
+# (.github/scripts/bats-rerun-plan.sh, run-bats-timed.sh, fetch-prior-bats-results.sh).
+# The property that matters is the one-sided one: the plan may remove work only for
+# a file the record positively says passed, or narrow a file to tests the record
+# names as failed. Every doubt must run more.
+
+setup() {
+  load 'test_helper'
+  REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  PLAN="$REPO_ROOT/.github/scripts/bats-rerun-plan.sh"
+  TIMED="$REPO_ROOT/.github/scripts/run-bats-timed.sh"
+  FETCH="$REPO_ROOT/.github/scripts/fetch-prior-bats-results.sh"
+  unset AGMSG_BATS_PLAN AGMSG_BATS_RESULTS
+  W="$BATS_TEST_TMPDIR"
+  printf '%s\n' a.bats b.bats c.bats > "$W/manifest"
+}
+
+tab() { printf '\t'; }
+
+@test "plan: no record means every file runs" {
+  run "$PLAN" "$W/manifest"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'all\ta.bats\nall\tb.bats\nall\tc.bats')" ]
+  run "$PLAN" "$W/manifest" "$W/absent.tsv"
+  [ "$output" = "$(printf 'all\ta.bats\nall\tb.bats\nall\tc.bats')" ]
+}
+
+@test "plan: passed files are skipped, named failures narrow, unmentioned files run whole" {
+  printf 'pass\ta.bats\nfail\tb.bats\tfirst bad\nfail\tb.bats\tsecond bad\n' > "$W/prior"
+  run "$PLAN" "$W/manifest" "$W/prior"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'skip\ta.bats\nonly\tb.bats\tfirst bad\nonly\tb.bats\tsecond bad\nall\tc.bats')" ]
+}
+
+@test "plan: a failure without a test name runs the whole file" {
+  printf 'failfile\ta.bats\npass\tb.bats\npass\tc.bats\n' > "$W/prior"
+  run "$PLAN" "$W/manifest" "$W/prior"
+  [ "$output" = "$(printf 'all\ta.bats\nskip\tb.bats\nskip\tc.bats')" ]
+}
+
+@test "plan: a file recorded both passed and failed runs whole" {
+  printf 'pass\ta.bats\nfail\ta.bats\tx\npass\tb.bats\nfailfile\tb.bats\n' > "$W/prior"
+  run "$PLAN" "$W/manifest" "$W/prior"
+  [ "$(printf '%s\n' "$output" | grep -c '^all')" -eq 3 ]
+}
+
+@test "plan: a malformed record is not trusted at all" {
+  local bad
+  for bad in 'pass' 'pass\t' 'fail\ta.bats' 'fail\ta.bats\t' 'bogus\ta.bats' 'pass\ta.bats\textra'; do
+    { printf 'pass\tb.bats\n'; printf "$bad\n"; } > "$W/prior"
+    run "$PLAN" "$W/manifest" "$W/prior"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^all')" -eq 3 ] || { echo "kept a record with: $bad" >&2; return 1; }
+  done
+}
+
+@test "plan: an empty record runs every file" {
+  : > "$W/prior"
+  run "$PLAN" "$W/manifest" "$W/prior"
+  [ "$(printf '%s\n' "$output" | grep -c '^all')" -eq 3 ]
+}
+
+# ---- the runner, against real nested bats ----
+
+make_fixtures() {
+  cat > "$W/a.bats" <<'FIX'
+@test "fine one" { true; }
+@test "odd (name) [x] a.b|c*d" { [ -f "$FLAG" ]; }
+@test "fine two" { true; }
+FIX
+  cat > "$W/b.bats" <<'FIX'
+@test "b fine" { true; }
+FIX
+  printf '%s\n' "$W/a.bats" "$W/b.bats" > "$W/m"
+  export FLAG="$W/flag"
+}
+
+@test "runner: records pass and per-test failures; the rerun runs only the failed test and then passes" {
+  make_fixtures
+  AGMSG_BATS_RESULTS="$W/r1" run "$TIMED" "$W/m" "$W/t1"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$W/r1")" = "$(printf 'fail\t%s\todd (name) [x] a.b|c*d\npass\t%s' "$W/a.bats" "$W/b.bats")" ]
+
+  "$PLAN" "$W/m" "$W/r1" > "$W/plan"
+  : > "$FLAG"
+  AGMSG_BATS_PLAN="$W/plan" AGMSG_BATS_RESULTS="$W/r2" run "$TIMED" "$W/m" "$W/t2"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq -- "rerun 1 failed test(s)"
+  printf '%s\n' "$output" | grep -Fq -- "skip $W/b.bats"
+  # only the one failed test ran: its TAP plan is 1..1
+  printf '%s\n' "$output" | grep -Fq -- "1..1"
+  [ -z "$(printf '%s\n' "$output" | grep -F -- 'fine one')" ]
+  [ "$(sort "$W/r2")" = "$(printf 'pass\t%s\npass\t%s' "$W/a.bats" "$W/b.bats" | sort)" ]
+}
+
+@test "runner: a still-failing narrowed test fails the shard and is recorded again" {
+  make_fixtures
+  printf 'only\t%s\todd (name) [x] a.b|c*d\n' "$W/a.bats" > "$W/plan"
+  rm -f "$FLAG"
+  AGMSG_BATS_PLAN="$W/plan" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -ne 0 ]
+  [ "$(sed -n 1p "$W/r")" = "$(printf 'fail\t%s\todd (name) [x] a.b|c*d' "$W/a.bats")" ]
+}
+
+@test "runner: a named test that no longer exists runs the whole file" {
+  make_fixtures
+  : > "$FLAG"
+  printf 'only\t%s\tno such test\nskip\t%s\n' "$W/a.bats" "$W/b.bats" > "$W/plan"
+  AGMSG_BATS_PLAN="$W/plan" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq -- "running the whole file"
+  printf '%s\n' "$output" | grep -Fq -- "1..3"
+}
+
+@test "runner: an unreadable plan runs every file" {
+  make_fixtures
+  : > "$FLAG"
+  AGMSG_BATS_PLAN="$W/nope" run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq -- "1..3"
+  printf '%s\n' "$output" | grep -Fq -- "b fine"
+}
+
+@test "runner: a failing file whose report has no test name is recorded as a whole-file failure" {
+  printf '@test "x" { true; }\nsetup_file() { return 1; }\n' > "$W/s.bats"
+  printf '%s\n' "$W/s.bats" > "$W/m"
+  AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$W/r")" = "$(printf 'failfile\t%s' "$W/s.bats")" ]
+}
+
+@test "runner: without the variables the behaviour is unchanged and no record is written" {
+  make_fixtures
+  : > "$FLAG"
+  run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -eq 0 ]
+  [ ! -e "$W/r" ]
+}
+
+# ---- the fetch step fails open ----
+
+@test "fetch: attempt 1 or a bad attempt fetches nothing and leaves no file" {
+  : > "$W/out"
+  run "$FETCH" ubuntu-latest 3 1 "$W/out"
+  [ "$status" -eq 0 ]
+  [ ! -e "$W/out" ]
+  run "$FETCH" ubuntu-latest 3 x "$W/out"
+  [ "$status" -eq 0 ]
+  [ ! -e "$W/out" ]
+}
+
+@test "fetch: an API failure leaves no file and exits 0 (the shard then runs whole)" {
+  mkdir "$W/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$W/bin/gh"; chmod +x "$W/bin/gh"
+  PATH="$W/bin:$PATH" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 run "$FETCH" ubuntu-latest 3 2 "$W/out"
+  [ "$status" -eq 0 ]
+  [ ! -e "$W/out" ]
+}
+
+@test "fetch: takes the newest earlier attempt that left a record" {
+  mkdir "$W/bin"
+  cat > "$W/bin/gh" <<'GH'
+#!/bin/sh
+case "$1" in
+  api) printf 'bats-results-ubuntu-latest-3-a1\nbats-results-ubuntu-latest-3-a2\nbats-results-ubuntu-latest-4-a3\n' ;;
+  run) shift; while [ "$#" -gt 0 ]; do [ "$1" = -D ] && d="$2"; [ "$1" = -n ] && n="$2"; shift; done
+       printf 'pass\t%s\n' "$n" > "$d/bats-results.tsv" ;;
+esac
+GH
+  chmod +x "$W/bin/gh"
+  PATH="$W/bin:$PATH" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 run "$FETCH" ubuntu-latest 3 4 "$W/out"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$W/out")" = "$(printf 'pass\tbats-results-ubuntu-latest-3-a2')" ]
+}
+
+# ---- the workflow wiring ----
+
+@test "workflow: results are uploaded per attempt and the plan step can only narrow" {
+  local wf="$REPO_ROOT/.github/workflows/tests.yml"
+  grep -Fq 'name: bats-results-${{ matrix.os }}-${{ matrix.shard }}-a${{ github.run_attempt }}' "$wf"
+  grep -Fq 'path: ${{ runner.temp }}/bats-results.tsv' "$wf"
+  grep -Fq 'AGMSG_BATS_RESULTS: ${{ runner.temp }}/bats-results.tsv' "$wf"
+  grep -Fq '.github/scripts/fetch-prior-bats-results.sh' "$wf"
+  grep -Fq '.github/scripts/bats-rerun-plan.sh shard-files.txt' "$wf"
+  # the plan step may never fail the job: an error there means the whole shard runs
+  awk '/- name: Plan the rerun from the earlier attempt/ {f=1} f && /continue-on-error: true/ {ok=1} f && /run: \|/ {exit} END {exit !ok}' "$wf"
+}

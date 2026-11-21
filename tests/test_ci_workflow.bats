@@ -243,7 +243,7 @@ GIT
   grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
   # Every heavy shard step skips on a reused tree, the same set the docs-only
   # skip gates; nothing heavy is left gated on docs_only alone.
-  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 10 ]
+  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 12 ]
   # And the run says which green it is, on the shard and on the aggregate.
   grep -Fq "format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run)" "$workflow"
   grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
