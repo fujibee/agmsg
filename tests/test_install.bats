@@ -19,6 +19,11 @@ setup() {
   # Same for the storage and config overrides: an ambient one would send the
   # installer's database init to a real store instead of FAKE_HOME.
   unset AGMSG_STORAGE_PATH AGMSG_CONFIG AGMSG_STORAGE_DRIVER AGMSG_APP_BASE AGMSG_SPAWN_OPTIONS_FILE
+  # The state of an install lives under $AGMSG_HOME (default $HOME/.agmsg): an ambient
+  # AGMSG_HOME would link this fixture to the real state, and AGMSG_INSTALL_HOME moves only
+  # the install location. Tests that need either set it for one command.
+  unset AGMSG_HOME AGMSG_INSTALL_HOME
+  agmsg_guard_real_state_begin
   # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
@@ -109,6 +114,7 @@ teardown() {
     esac
   done <<< "$WATCHED_PIDS"
   rm -rf "$FAKE_HOME"
+  agmsg_guard_real_state_end || rc=1
   return "$rc"
 }
 
