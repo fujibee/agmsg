@@ -111,7 +111,7 @@ union_of_shards() {
   calls="$BATS_TEST_TMPDIR/calls.txt"
   mkdir -p "$fake_bin"
   printf '%s\n' tests/fail.bats tests/pass.bats > "$manifest"
-  printf '%s\n' '#!/usr/bin/env bash' 'echo "$2" >> "$BATS_CALLS"' 'case "$2" in *fail*) exit 7 ;; esac' > "$fake_bin/bats"
+  printf '%s\n' '#!/usr/bin/env bash' 'last="${@: -1}"' 'echo "$last" >> "$BATS_CALLS"' 'case "$last" in *fail*) exit 7 ;; esac' > "$fake_bin/bats"
   chmod +x "$fake_bin/bats"
 
   run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" "$TIMED_RUNNER" "$manifest" "$timings"
