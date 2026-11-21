@@ -3721,10 +3721,10 @@ cmd_forget() {
       echo "agmsg: cannot inspect team store '$store_path'; refusing to delete it" >&2
       exit 1
     }
-    if printf '%s\n' "$tables" | grep -qx events; then
+    if grep -qx events <<<"$tables"; then
       event_count="$(agmsg_sqlite "$store_path" "SELECT COUNT(*) FROM events;")"
     fi
-    if printf '%s\n' "$tables" | grep -qx messages; then
+    if grep -qx messages <<<"$tables"; then
       # Only legacy rows the event log does not already carry: every message is
       # written to both tables (#689), so counting both in full reports twice
       # the number of messages about to be deleted.

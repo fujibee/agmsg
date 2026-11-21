@@ -58,7 +58,7 @@ agmsg_plugin_shadow_warn() {  # skill-dir before
   cmd="$(agmsg_plugin_cmd "$skill")"
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
-    printf '%s\n' "$before" | grep -qxF -- "$ref" && continue
+    grep -qxF -- "$ref" <<<"$before" && continue
     winner="$(_agmsg_plugin_shadow_winner "$skill" "${ref%%/*}" "${ref#*/}")"
     [ -n "$winner" ] || continue
     [ "$winner" != "$skill/scripts/drivers/$ref" ] || continue

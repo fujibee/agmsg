@@ -942,7 +942,7 @@ _doctor_scan_pair() {
   # line (captured independently into GLOBAL_WATCH_LINE above and checked
   # once, globally, after the whole scope has been scanned -- see below the
   # scan loop).
-  if printf '%s\n' "$delivery_output" | grep -q "stale pidfile ("; then
+  if grep -q "stale pidfile (" <<<"$delivery_output"; then
     _redact_project "$project"
     _warn "[$_REDACT_OUT] watcher/bridge pidfile present but process not running (see delivery status above)"
   fi

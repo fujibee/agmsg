@@ -147,7 +147,7 @@ is_monitor_project() {
   fi
   local status
   status="$("$delivery_script" status codex "$project" 2>/dev/null || true)"
-  printf '%s\n' "$status" | grep -qx "mode: monitor"
+  grep -qx "mode: monitor" <<<"$status"
 }
 
 real_codex="$(resolve_real_codex)"
