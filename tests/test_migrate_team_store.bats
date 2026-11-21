@@ -358,6 +358,30 @@ stored_types() {
   [ "$(sqlite3 "$dest" "SELECT id||'|'||team||'|'||from_agent||'|'||to_agent||'|'||body||'|'||created_at||'|'||COALESCE(read_at,'-') FROM messages WHERE id=9001;")" = "9001|alpha|ann|bob|what both sides hold|$at|-" ]
 }
 
+# The table list is passed to grep -q. A pipe from printf into grep -q, under
+# pipefail, fails whenever grep leaves before printf has finished writing, and
+# `|| continue` then skipped that table: its rows stayed in the shared store with
+# no message but a write error. With a list longer than a pipe buffer that
+# happens on every run, so this does not depend on timing: the real tables sort
+# first in sqlite_master, grep finds them in the first lines and leaves while
+# printf still has most of the list to write.
+@test "migrate: a long table list does not make a table be skipped" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "kept" >/dev/null
+  local i sql=""
+  for i in $(seq 1 3000); do
+    sql="${sql}CREATE TABLE unrelated_table_with_a_long_name_$i(x);"
+  done
+  sqlite3 "$SHARED" "$sql"
+  [ "$(sqlite3 "$SHARED" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" | tr -d '\r')" -gt 3000 ]
+
+  run migrate alpha
+  [ "$status" -eq 0 ]
+  [ "$(shared_rows alpha)" -eq 0 ]
+  [ "$(sqlite3 "$SHARED" "SELECT COUNT(*) FROM messages WHERE team='alpha';" | tr -d '\r')" -eq 0 ]
+  local dest; dest="$(store_of alpha)"
+  [ "$(sqlite3 "$dest" "SELECT body FROM messages WHERE team='alpha';" | tr -d '\r')" = "kept" ]
+}
+
 @test "migrate: a cursor at a different position is refused" {
   # ONLY the cursor differs. The containment check returns at the FIRST table
   # that is short, so a test that also leaves an events row behind never reaches
