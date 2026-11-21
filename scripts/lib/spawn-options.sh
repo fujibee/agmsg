@@ -27,6 +27,39 @@ agmsg_spawn_options_file() {
   printf '%s' "${AGMSG_SPAWN_OPTIONS_FILE:-$HOME/.agmsg/config/spawn_options.yaml}"
 }
 
+# Companion sample path beside the resolved spawn_options.yaml:
+# dirname($AGMSG_SPAWN_OPTIONS_FILE)/spawn_options.yaml.sample when set,
+# else ~/.agmsg/config/spawn_options.yaml.sample.
+agmsg_spawn_options_sample_file() {
+  local target dir
+  target="$(agmsg_spawn_options_file)"
+  dir="$(dirname "$target")"
+  if [ "$dir" = "/" ]; then
+    printf '/spawn_options.yaml.sample'
+  else
+    printf '%s/spawn_options.yaml.sample' "$dir"
+  fi
+}
+
+# Place spawn_options.yaml.sample beside the resolved spawn_options.yaml path
+# when absent. Never touches spawn_options.yaml itself and never overwrites an
+# existing sample file. Best-effort: prints the created path on stdout only when
+# newly written, and returns 0 even if the target directory is not writable.
+agmsg_ensure_spawn_options_sample() {
+  local src="$1" dest dir
+  [ -f "$src" ] || return 0
+  dest="$(agmsg_spawn_options_sample_file)"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    return 0
+  fi
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  if ( set -C; tr -d '\r' < "$src" > "$dest" ) 2>/dev/null; then
+    printf '%s\n' "$dest"
+  fi
+  return 0
+}
+
 # Emit one shell token per output line for <type>'s section. Each line is a
 # complete argv token — the caller must read line-by-line (never word-split
 # the output), so a value containing spaces stays a single token.

@@ -649,6 +649,11 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_zoom(zoom);
             }
+            // Place spawn_options.yaml.sample beside spawn_options.yaml if absent
+            // (best-effort — never blocks startup and never touches spawn_options.yaml).
+            if let Err(err) = agmsg::ensure_spawn_options_sample() {
+                eprintln!("agmsg: could not initialize spawn_options.yaml.sample: {err}");
+            }
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
             // Members and agents add-ons made before the app last stopped: settle what a crash left half done.

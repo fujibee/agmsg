@@ -3640,3 +3640,31 @@ CYG
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --help > "$out" 2>&1
   grep -Fxq "  --cmd <name>    Select one installation under ~/.agents/skills" "$out"
 }
+
+@test "install.sh: creates and preserves the sample beside the configured spawn options file" {
+  local sample="$FAKE_HOME/spawn_options.yaml.sample"
+  local active="$FAKE_HOME/spawn_options.yaml"
+
+  run env HOME="$FAKE_HOME" AGMSG_SPAWN_OPTIONS_FILE="$active" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ -f "$sample" ]
+  [ ! -e "$active" ]
+
+  printf '# kept across update\n' > "$sample"
+  run env HOME="$FAKE_HOME" AGMSG_SPAWN_OPTIONS_FILE="$active" bash "$REPO_ROOT/install.sh" --update --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ "$(cat "$sample")" = "# kept across update" ]
+  [ ! -e "$active" ]
+}
+
+@test "install.sh: places spawn_options.yaml.sample beside AGMSG_SPAWN_OPTIONS_FILE when set" {
+  local custom_dir="$BATS_TEST_TMPDIR/custom-spawn-opts"
+  local custom_file="$custom_dir/spawn_options.yaml"
+  local custom_sample="$custom_dir/spawn_options.yaml.sample"
+
+  run env HOME="$FAKE_HOME" AGMSG_SPAWN_OPTIONS_FILE="$custom_file" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ -f "$custom_sample" ]
+  [ ! -e "$custom_file" ]
+  [ ! -e "$FAKE_HOME/.agmsg/config/spawn_options.yaml.sample" ]
+}

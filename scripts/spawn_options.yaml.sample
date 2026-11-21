@@ -1,0 +1,88 @@
+# agmsg spawn_options.yaml.sample
+# Copy or rename to spawn_options.yaml to activate.
+# Default location: ~/.agmsg/config/spawn_options.yaml
+# Override path with: AGMSG_SPAWN_OPTIONS_FILE
+#
+# Recommended default profile: balanced
+#
+# Format rules:
+#   - Top-level section names match scripts/drivers/types/<type>/type.conf (name=)
+#   - Indent entries with exactly two spaces (tabs and deeper nesting are ignored)
+#   - Place comment lines at column 0 (starting with '#')
+#   - Value semantics:
+#       <key>: <value>  -> emit two tokens: <key> <value>
+#       <key>: true     -> emit one token:  <key>
+#       <key>: false    -> omit flag
+#   - Do not quote values (quotes are passed literally)
+#   - Use LF line endings on all platforms (including Windows)
+#   - Do not specify initial prompts or resume options here
+
+# --------------------------------------------------
+# Codex
+# --------------------------------------------------
+codex:
+# Allow writes inside the workspace
+  --sandbox: workspace-write
+# Request approval when necessary
+  --ask-for-approval: on-request
+# Prevent Codex TUI paste-burst detection from treating rapid input + Enter
+# as a pasted newline instead of submitting agmsg messages
+  -c: tui.disable_paste_burst=true
+
+# --------------------------------------------------
+# Claude Code
+# --------------------------------------------------
+claude-code:
+# Auto-approve file edits, retain other checks
+  --permission-mode: acceptEdits
+# Do not bypass permission checks globally
+  --dangerously-skip-permissions: false
+
+# --------------------------------------------------
+# Google Antigravity
+# --------------------------------------------------
+antigravity:
+# Auto-approve edits, retain command checks
+  --mode: accept-edits
+
+# --------------------------------------------------
+# Gemini CLI
+# --------------------------------------------------
+gemini:
+# Auto-approve editing operations (requires modern @google/gemini-cli)
+  --approval-mode: auto_edit
+# Preserve sandbox defaults unless explicitly set
+  --sandbox: false
+
+# --------------------------------------------------
+# GitHub Copilot CLI
+# --------------------------------------------------
+copilot:
+# Keep default tool/path/URL approvals
+  --allow-all-tools: false
+  --allow-all-paths: false
+  --allow-all-urls: false
+
+# --------------------------------------------------
+# Cursor CLI
+# --------------------------------------------------
+cursor:
+# Keep default approval behavior
+  --force: false
+
+# --------------------------------------------------
+# Grok Build
+# --------------------------------------------------
+grok-build:
+# Use automatic permission evaluation
+  --permission-mode: auto
+# Do not blindly approve everything
+  --always-approve: false
+
+# --------------------------------------------------
+# OpenCode
+# --------------------------------------------------
+opencode:
+# OpenCode v2 root TUI does not accept --agent (set default_agent in opencode.json/jsonc)
+# Respect configured permission policy
+  --auto: false
