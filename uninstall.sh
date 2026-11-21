@@ -495,6 +495,32 @@ _uninstall_one() {
     fi
   done
   unset _state_part _state_target
+  # The links name a root; whether that root is this install's is what its .owner
+  # says. A copy made with cp -R keeps the links of the original, and an install
+  # that took a root over another's name shares it: neither may remove data that
+  # belongs to someone else. Only a root owned by this install is removed; any
+  # other (or one with no owner record) is kept and only the links go.
+  if [ -n "$STATE_PARENT" ]; then
+    local _state_owner="" _state_owner_ok=false
+    if [ -f "$STATE_PARENT/.owner" ]; then
+      _state_owner="$(<"$STATE_PARENT/.owner")"
+      if [ "$_state_owner" = "$SKILL_DIR" ] \
+        || { [ -n "$_state_owner" ] && [ -d "$_state_owner" ] && [ -d "$SKILL_DIR" ] \
+             && [ "$(cd -P "$_state_owner" 2>/dev/null && pwd -P)" = "$(cd -P "$SKILL_DIR" 2>/dev/null && pwd -P)" ]; }; then
+        _state_owner_ok=true
+      fi
+    fi
+    if [ "$_state_owner_ok" != true ]; then
+      if [ -n "$_state_owner" ]; then
+        echo "  ~ the state in $STATE_PARENT belongs to $_state_owner, not to this install: kept (only the links in $SKILL_DIR are removed)"
+      else
+        echo "  ~ the state in $STATE_PARENT has no owner record for this install: kept (only the links in $SKILL_DIR are removed)"
+      fi
+      echo "    To remove it, uninstall the install that owns it, or delete that directory yourself."
+      STATE_PARENT=""
+    fi
+    unset _state_owner _state_owner_ok
+  fi
   # The Codex entries carry the resolved spelling of that path (/private/var
   # for /var on macOS); read before the directory goes.
   if [ -n "$STATE_PARENT" ]; then

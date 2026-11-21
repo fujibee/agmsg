@@ -693,6 +693,49 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -f "$ST/.trash/backup" ]
 }
 
+@test "uninstall --yes keeps a state root whose .owner names another install that is gone, says so, and removes only its own links" {
+  inst
+  mkdir -p "$ST/teams/t"
+  printf 'keep\n' > "$ST/teams/t/data"
+  printf '%s\n' "$FAKE_HOME/.agents/skills/other" > "$ST/.owner"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "belongs to $FAKE_HOME/.agents/skills/other, not to this install: kept" <<<"$output"
+  [ -f "$ST/teams/t/data" ]
+  [ -d "$ST/db" ]
+  [ "$(cat "$ST/.owner")" = "$FAKE_HOME/.agents/skills/other" ]
+}
+
+@test "uninstall --yes keeps a state root that has no .owner record" {
+  inst
+  mkdir -p "$ST/teams/t"
+  printf 'keep\n' > "$ST/teams/t/data"
+  command rm -f "$ST/.owner"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "has no owner record for this install: kept" <<<"$output"
+  [ -f "$ST/teams/t/data" ]
+}
+
+@test "uninstall --yes --keep-data keeps the backup copies of a root owned by another install" {
+  inst
+  mkdir -p "$FAKE_HOME/.agents/skills/other"
+  printf 'keep\n' > "$ST/.trash/backup"
+  printf '%s\n' "$FAKE_HOME/.agents/skills/other" > "$ST/.owner"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes --keep-data
+  [ "$status" -eq 0 ]
+  [ -f "$ST/.trash/backup" ]
+}
+
+@test "uninstall --yes still removes the state of a root this install owns" {
+  inst
+  mkdir -p "$ST/teams/t"
+  printf 'x\n' > "$ST/teams/t/data"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  [ ! -e "$ST/teams" ]
+}
+
 @test "updating a copy gives it its own state and leaves the original's backups, marker, owner and links alone" {
   inst
   printf 'keep\n' > "$ST/.trash/original-backup"
