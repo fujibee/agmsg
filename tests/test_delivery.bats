@@ -432,7 +432,13 @@ eperm_pid() {
     [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
-@test "delivery status: a Codex project with no hooks file reads as agmsgd-delivered only while agmsgd is on and its seats have destinations" {
+# 2026-11-20 decision (unification, no codex exception): run/delivery-choice
+# is the single source of truth for "mode: agmsgd" for every type, the
+# same helper watch.sh checks -- whether this project's Codex seats
+# actually have a destination recorded is no longer part of the MODE
+# decision (it used to gate it; that disagreed with watch.sh, which stops
+# on agmsgd desired-on alone regardless of any seat's registration state).
+@test "delivery status: a Codex project with no hooks file reads agmsgd once agmsgd is desired on, regardless of seat destinations" {
   export SKILL_DIR="$TEST_SKILL_DIR"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
@@ -448,18 +454,82 @@ eperm_pid() {
   esac
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
-  # agmsgd on, but alice has no recorded destination yet: unchanged.
+  # agmsgd on, no choice recorded, no destination for alice either: the
+  # no-choice fallback alone is enough.
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
-  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
-
-  source "$SCRIPTS/lib/role-session.sh"
-  agmsg_role_session_record team alice thread-1 "$TEST_PROJECT" codex "" "$TEST_PROJECT/codex-home"
-  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
-  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)" ]
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project directly; no Monitor is started)" ]
 
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+}
+
+# review, 2026-11-20: `agmsg delivery agmsgd` for Codex installs the
+# monitor hooks file (delivery-cli.sh keeps it so a session that has not
+# yet moved to agmsgd still has something) -- status used to only even
+# attempt its own agmsgd/seats check while NO hooks file existed at all,
+# so once that hooks file was present (true right after choosing agmsgd)
+# it read "mode: monitor" forever and never "mode: agmsgd". The generic
+# delivery-choice check now runs upstream of Codex's own plug and
+# overrides it regardless of any hooks file.
+@test "delivery status: a Codex project reads agmsgd once it explicitly chose agmsgd, even with its monitor hooks file still installed" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" = "mode: monitor" ]
+
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'codex\t%s\tagmsgd\n' "$(cd "$TEST_PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project directly; no Monitor is started)" ]
+}
+
+# review, 2026-11-20 -- a terminal-poke-only type (e.g. antigravity) is
+# agmsgd-reachable the same way claude-code/codex/grok-build are, just
+# through a different channel. `delivery.sh status` used to report nothing
+# but the generic "mode: off (unrecognized: ...)" for every type except
+# claude-code, even when agmsgd was already delivering to it via poke --
+# the one place a seat (or a template) reads to decide whether to keep
+# starting its own monitor.
+@test "delivery status: a terminal-poke-eligible type (antigravity) reads agmsgd once agmsgd is on and ready" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  run bash "$SCRIPTS/delivery.sh" status antigravity "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project directly; no Monitor is started)" ]
+}
+
+@test "delivery status: a type that explicitly chose something other than agmsgd never reads agmsgd, even with agmsgd on and ready" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  printf 'gemini\t%s\toff\n' "$(cd "$TEST_PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/delivery.sh" status gemini "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" != "mode: agmsgd (agmsgd delivers to this project directly; no Monitor is started)" ]
 }
 
 @test "daemon state: on Linux the boot id is the kernel boot_id, and a record holding btime is unverifiable rather than stopped" {
@@ -3900,10 +3970,30 @@ JSON
   echo "$output" | grep -q "will not reach this seat"
 }
 
-@test "delivery status (grok-build): reports agmsgd when its real hooks are present" {
+@test "delivery status (grok-build): reports agmsgd once this project's own choice (run/delivery-choice) says so" {
   env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  # 2026-11-20 decision: run/delivery-choice (what `agmsg delivery agmsgd`
+  # itself records) is the only thing that decides "mode: agmsgd" now, not
+  # a type's own hooks/rule-file marker -- the real CLI path writes this
+  # line; this direct delivery.sh invocation does not, so it is set here to
+  # match what the real flow would have recorded.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'grok-build\t%s\tagmsgd\n' "$(cd "$TEST_PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
   run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [[ "$output" =~ "mode: agmsgd" ]]
+}
+
+@test "delivery status (grok-build): a stale hooks.json from an earlier agmsgd choice does NOT read as agmsgd once the project moved to turn" {
+  env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" set agmsgd grok-build "$TEST_PROJECT" >/dev/null
+  [ -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'grok-build\t%s\tturn\n' "$(cd "$TEST_PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
+  run env GROK_HOME="$BATS_TEST_TMPDIR/grokhome" bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  refute grep -qF "mode: agmsgd" <<<"$output"
 }
 
 @test "delivery set agmsgd then turn (grok-build): tears down the real hooks AND relinquishes use_leader it added" {

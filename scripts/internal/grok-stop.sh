@@ -4,11 +4,13 @@ set -euo pipefail
 # in order:
 #
 #   1. Mark this seat's witness (grok-session-start.sh's file) as past its
-#      first turn -- measured live (2026-11-15): session/prompt on a session
-#      before its first turn has a response replays the ENTIRE prior
-#      transcript via session/update before the agent sees the new prompt
-#      (session/load's own documented behavior), so the channel withholds a
-#      nudge until this marker is set.
+#      first turn. A TUI on the welcome screen runs a turn it did not submit
+#      itself without displaying it (measured live, grok 1.0.89, 2026-11-20),
+#      so the channel withholds a nudge until the TUI's own first turn has
+#      ended and put it on the chat screen. A session reopened with --resume /
+#      --continue starts on the chat screen: grok-session-start.sh already
+#      marked it (SessionStart source "load"), so this only matters for a
+#      fresh session.
 #   2. Delegate to check-inbox.sh exactly as every other type's Stop hook
 #      does -- grok's {"decision":"block","reason":...} contract is honored
 #      the same way Claude Code's is (measured live, 2026-11-15, up to 8

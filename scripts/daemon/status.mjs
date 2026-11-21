@@ -421,6 +421,16 @@ function formatTerminalPokeSeats(inventory, all) {
       lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat (no native channel, no pane)`);
       continue;
     }
+    const shared = /^ambiguous:seats_without_pane:(.+?) pane:(.+)$/.exec(seat.reason ?? "");
+    if (shared) {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat: ${shared[2]} runs this seat's agent, but ${shared[1]} (same type and project, no pane recorded) could be the one in it; run an agmsg command from the right pane so it is recorded`);
+      continue;
+    }
+    const ambiguous = /^ambiguous:(.+)$/.exec(seat.reason ?? "")?.[1];
+    if (ambiguous) {
+      lines.push(`Terminal poke ${label}: agmsgd cannot reach this seat: more than one pane runs this seat's agent in its project (${ambiguous}); run an agmsg command from the right one so it is recorded`);
+      continue;
+    }
     if (seat.reason === "pane_gone") {
       lines.push(`Terminal poke ${label}: pane gone`);
       continue;
@@ -487,12 +497,32 @@ function formatGrokQueueSeats(inventory, all) {
       continue;
     }
     if (seat.reason === "first_turn_pending") {
-      lines.push(`Grok queue ${label}: pending: first turn not complete yet`);
+      lines.push(`Grok queue ${label}: pending: on the welcome screen, delivered after its first turn ends (a --resume/--continue session is not held)`);
       continue;
     }
     if (seat.reason === "leader_socket_unknown") {
       const grokConfig = join(process.env.GROK_HOME || join(homedir(), ".grok"), "config.toml");
-      lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
+      // Same reading as the hooks' own scan: the bare [cli] table's use_leader
+      // only. "on" / "off" are said only when the file was read; otherwise
+      // neither is claimed.
+      let leaderCfg = "unread";
+      try {
+        let inCli = false;
+        const text = readFileSync(grokConfig, "utf8");
+        leaderCfg = "off";
+        for (const line of text.split("\n")) {
+          if (/^[ \t]*\[[^\]]*\][ \t\r]*(#.*)?$/.test(line)) { inCli = /^[ \t]*\[[ \t]*cli[ \t]*\][ \t\r]*(#.*)?$/.test(line); continue; }
+          const m = inCli && /^[ \t]*use_leader[ \t]*=[ \t]*([^ \t\r#]*)/.exec(line);
+          if (m) { leaderCfg = m[1] === "true" ? "on" : "off"; break; }
+        }
+      } catch { /* leaderCfg stays "unread" */ }
+      if (leaderCfg === "on") {
+        lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: use_leader is on in ${grokConfig} but no grok leader was found for this session (restart the grok session)`);
+      } else if (leaderCfg === "unread") {
+        lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: no grok leader was found for this session, and ${grokConfig} could not be read to tell whether use_leader is on (restart the grok session)`);
+      } else {
+        lines.push(`Grok queue ${label}: agmsgd cannot reach this seat: grok is not running in leader mode (set use_leader = true under [cli] in ${grokConfig}, or start grok with --leader, then restart the grok session)`);
+      }
       continue;
     }
     const notRunning = /^leader_not_running:(.+)$/.exec(seat.reason ?? "")?.[1];

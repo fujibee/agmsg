@@ -75,3 +75,17 @@ test('an aborted signal cancels rather than reports a false state', async (t) =>
   const result = await promise;
   assert.equal(result.kind, 'cancelled');
 });
+
+test('the seat type and project reach the script, so it can find a pane for a seat with no record', async (t) => {
+  const dir = temporaryDirectory(t);
+  const scriptPath = writeFakeScript(dir, [
+    'printf "%s|%s|%s\\n" "$AGMSG_NUDGE_TYPE" "$AGMSG_NUDGE_PROJECT" "$AGMSG_NUDGE_PEERS" > "' + dir + '/env.txt"',
+    'echo "state=notified reason="',
+  ].join('\n'));
+  const result = await runTerminalNudge({
+    scriptPath, team: 'test', agent: 'agy1', type: 'antigravity', project: '/work/demo', peers: ['t/agy2'], body: 'x', timeoutMs: 5000,
+  });
+  assert.equal(result.kind, 'ok');
+  const fs = await import('node:fs');
+  assert.equal(fs.readFileSync(path.join(dir, 'env.txt'), 'utf8').trim(), 'antigravity|/work/demo|t/agy2');
+});

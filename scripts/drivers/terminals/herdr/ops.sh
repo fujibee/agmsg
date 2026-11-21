@@ -1643,6 +1643,53 @@ EOF
   return 0
 }
 
+# Every pane of every running instance with the agent herdr sees in it and the
+# directories it reports: what a caller needs to find the pane a hand-started
+# agent is in. One row per pane,
+#   <socket>:<wN:pX> <TAB> <1 if that instance is herdr's default, else 0> <TAB>
+#   <agent> <TAB> <cwd> <TAB> <foreground_cwd>
+# and `!<TAB><socket>` for an instance whose answer could not be read, so a
+# caller can tell "no such pane" from "could not look". rc 10 when the instance
+# list itself cannot be read. A pane with no agent, or a path holding a tab or
+# newline (a line-based channel cannot carry it), is left out. An empty directory
+# is written `-` (a run of tabs would collapse when read back).
+terminal_enumerate_agent_panes() {
+  local sessions jesc rows sock isdefault out tab
+  tab="$(printf '\t')"
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  sessions="$(herdr session list --json 2>/dev/null)" || return 10
+  [ -n "$sessions" ] || return 10
+  jesc="$(printf '%s' "$sessions" | LC_ALL=C sed "s/'/''/g")"
+  rows="$(sqlite3 -separator "$tab" :memory: "SELECT json_extract(value,'\$.socket_path'), CASE WHEN json_extract(value,'\$.default') IN (1,'true') THEN 1 ELSE 0 END FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running')='true' AND json_type(value,'\$.socket_path')='text' AND instr(json_extract(value,'\$.socket_path'), char(9))=0 AND instr(json_extract(value,'\$.socket_path'), char(10))=0" 2>/dev/null)" || return 10
+  while IFS="$tab" read -r sock isdefault; do
+    [ -n "$sock" ] || continue
+    out="$(HERDR_SOCKET_PATH="$sock" herdr pane list 2>/dev/null)" || { printf '!\t%s\n' "$sock"; continue; }
+    _herdr_agent_rows_of "$sock" "$isdefault" "$out" || printf '!\t%s\n' "$sock"
+  done <<EOF
+$rows
+EOF
+  return 0
+}
+
+_herdr_agent_rows_of() {   # <socket> <1|0 default> <pane-list-json>
+  local sock="$1" isdefault="$2" jesc tab n_all n_ok rows
+  tab="$(printf '\t')"
+  jesc="$(printf '%s' "$3" | LC_ALL=C sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.panes')='array' THEN json_array_length('$jesc','\$.result.panes') ELSE -1 END" 2>/dev/null)" || return 1
+  case "$n_all" in ''|*[!0-9]*) return 1 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  [ "$n_ok" = "$n_all" ] || return 1
+  rows="$(sqlite3 -separator "$tab" :memory: "SELECT json_extract(value,'\$.pane_id'), COALESCE(json_extract(value,'\$.agent'),''), COALESCE(NULLIF(json_extract(value,'\$.cwd'),''),'-'), COALESCE(NULLIF(json_extract(value,'\$.foreground_cwd'),''),'-') FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text' AND json_type(value,'\$.agent')='text' AND instr(json_extract(value,'\$.pane_id'), char(9))=0 AND instr(COALESCE(json_extract(value,'\$.cwd'),''), char(9))=0 AND instr(COALESCE(json_extract(value,'\$.cwd'),''), char(10))=0 AND instr(COALESCE(json_extract(value,'\$.foreground_cwd'),''), char(9))=0 AND instr(COALESCE(json_extract(value,'\$.foreground_cwd'),''), char(10))=0" 2>/dev/null)" || return 1
+  local pane agent cwd fcwd
+  while IFS="$tab" read -r pane agent cwd fcwd; do
+    [ -n "$pane" ] || continue
+    printf '%s:%s\t%s\t%s\t%s\t%s\n' "$sock" "$pane" "$isdefault" "$agent" "$cwd" "$fcwd"
+  done <<EOF
+$rows
+EOF
+}
+
 # The pane ids in one `pane list` payload, each prefixed with its instance.
 # Separate so the strictness lives in one place: a payload whose `panes` is not
 # an array, or that holds an entry with no text `pane_id`, is not a short list --

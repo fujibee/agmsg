@@ -17,7 +17,11 @@ set -euo pipefail
 #   notified                         poke.sh delivered it (its exit 0)
 #   not_ready:<reason>                driver says the seat is mid-turn/blocked
 #   unknown:<reason>                  driver could not answer either way
-#   no_pane                           no placement record for this seat
+#   no_pane                           no placement record for this seat, and no
+#                                     pane the terminal shows as running the
+#                                     seat's agent in its project
+#   ambiguous                         more than one such pane; reason= lists them
+#                                     (nothing is delivered to any of them)
 #   pane_gone                         record exists but did not resolve to a
 #                                     loadable terminal + pane id
 #   busy                             poke.sh's own retry budget was exhausted
@@ -40,6 +44,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/type-registry.sh"      # agmsg_type_get
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/resolve-project.sh"    # agmsg_registered_type (#1391)
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/pane-discovery.sh"     # agmsg_discover_agent_pane
 
 die_usage() {
   echo "terminal-nudge: $1" >&2
@@ -86,9 +92,49 @@ trap cleanup_body EXIT
 # script's failure reporting (one short state= line, never poke.sh's
 # human-readable stderr) is deliberately different shaped.
 REC="$(agmsg_spawn_path "$TEAM" "$AGENT")"
+
+# A seat opened by hand has no placement record until its agent runs an agmsg
+# script once. Ask the terminals which pane runs this seat's agent in its project
+# and record that pane when there is exactly one (lib/pane-discovery.sh). The
+# daemon passes the seat's own type and project; with none (a manual run) there
+# is nothing to match and the answer stays no_pane.
+discover_pane() {   # -> 0: recorded (REC now holds the pane), 1: reported (caller exits)
+  local dtype="${AGMSG_NUDGE_TYPE:-}" verdict detail
+  [ -n "$dtype" ] || dtype="$(agmsg_registered_type "$TEAM" "$AGENT" 2>/dev/null || true)"
+  [ -n "${AGMSG_NUDGE_PROJECT:-}" ] && [ -n "$dtype" ] || { report "${1:-no_pane}"; return 1; }
+  verdict="$(agmsg_discover_agent_pane "$dtype" "$AGMSG_NUDGE_PROJECT" "$REC")"
+  detail="${verdict#*$'\t'}"
+  case "$verdict" in
+    found*)
+      # One pane, but which seat is it? Another seat of the same type and project
+      # with no placement record could equally be the one in it: nothing is
+      # assigned, and they are named.
+      local peer peer_team peer_agent peer_rec unrecorded=""
+      while IFS= read -r peer; do
+        [ -n "$peer" ] || continue
+        peer_team="${peer%%/*}"; peer_agent="${peer#*/}"
+        peer_rec="$(agmsg_spawn_path "$peer_team" "$peer_agent" 2>/dev/null)" || peer_rec=""
+        [ -n "$peer_rec" ] && [ -f "$peer_rec" ] || unrecorded="${unrecorded:+$unrecorded }$peer"
+      done <<PEERS_END
+${AGMSG_NUDGE_PEERS:-}
+PEERS_END
+      if [ -n "$unrecorded" ]; then
+        report ambiguous "seats_without_pane:$unrecorded pane:$detail"
+        return 1
+      fi
+      mkdir -p "$(dirname "$REC")" 2>/dev/null || true
+      if agmsg_write_atomic "$REC" "$(printf '%s\t%s\t%s' "$detail" "$AGMSG_NUDGE_PROJECT" "$dtype")" 2>/dev/null; then
+        return 0
+      fi
+      report "unknown:placement_record_write_failed"; return 1 ;;
+    ambiguous*) report ambiguous "$detail"; return 1 ;;
+    unknown*) report "unknown:$detail"; return 1 ;;
+    *) report "${1:-no_pane}"; return 1 ;;
+  esac
+}
+
 if [ ! -f "$REC" ]; then
-  report no_pane
-  exit 0
+  discover_pane no_pane || exit 0
 fi
 
 IFS=$'\t' read -r REF _PROJ TYPE _FENCE < "$REC" || true
@@ -130,6 +176,20 @@ CLI="$(agmsg_type_get "$TYPE" cli)"
 if declare -F terminal_team_input_ready >/dev/null 2>&1; then
   READY_RC=0
   READY_OUT="$(terminal_team_input_ready "$BARE_ID" "$CLI" 2>/dev/null)" || READY_RC=$?
+  # A recorded pane with no agent in it any more (closed, or the agent restarted
+  # elsewhere): look once for the pane that runs this seat's agent now, exactly as
+  # for a seat with no record, and re-check that one.
+  if [ "$READY_RC" -eq 1 ] && [ "$READY_OUT" = "not_ready:agent_not_found" ]; then
+    if discover_pane pane_gone; then
+      IFS=$'\t' read -r REF _PROJ TYPE _FENCE < "$REC" || true
+      BARE_ID="$(agmsg_terminal_ref_id "$REF")" || BARE_ID=""
+      agmsg_terminal_load "$(agmsg_terminal_ref_terminal "$REF")" 2>/dev/null || { report pane_gone "driver_load_failed"; exit 0; }
+      READY_RC=0
+      READY_OUT="$(terminal_team_input_ready "$BARE_ID" "$CLI" 2>/dev/null)" || READY_RC=$?
+    else
+      exit 0
+    fi
+  fi
   case "$READY_RC" in
     0) : ;;
     1) report "not_ready:${READY_OUT#not_ready:}"; exit 0 ;;

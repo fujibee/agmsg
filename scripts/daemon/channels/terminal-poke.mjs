@@ -12,12 +12,14 @@ import { createSeatBook } from "../seat-book.mjs";
 import { assertPollActive, pollSignal, SEAT_DEADLINE_MS } from "../poll-deadline.mjs";
 import { createSeatPoller } from "../seat-poll.mjs";
 import { logLine } from "../log.mjs";
+import { realpathSync } from "node:fs";
 import { optedOutOfAgmsgd } from "./delivery-choice.mjs";
 import { withImmediateTransaction } from "../db.mjs";
 import {
   messageStorePath,
   openMessageStore,
   readStorageDriver,
+  storeHasMessageTables,
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
 import { listTerminalPokeRegistrations } from "./terminal-poke-store.mjs";
@@ -63,6 +65,7 @@ function latestNotifiedCursor(db, seat) {
 // unread set had changed -- a nudge for an unchanged unread set was then
 // retried immediately instead of waiting out the backoff.
 function readOwnUnreadMarker(store, team, agent) {
+  if (!storeHasMessageTables(store)) return "0:0";   // a store nothing was ever sent through
   const eventRow = store.prepare(`
     SELECT COALESCE(MAX(seq), 0) AS n FROM events WHERE type = 'message_sent' AND team = ? AND to_agent = ?
   `).get(team, agent);
@@ -109,10 +112,13 @@ function createSendAttempt(db, { seat, upTo, expectedOpGen }, now) {
 // class A -- nothing here stops agmsg, it only defers one write). A seat no
 // channel can reach at all is shown in status (§10 class D), never silently
 // dropped.
-function classifyNudgeState(state) {
+function classifyNudgeState(state, detail = "") {
   if (state === "notified") return { confirm: true, seatState: "notified", reason: "" };
   if (state === "no_pane") return { confirm: false, seatState: "unaddressable", reason: "no_pane" };
   if (state === "pane_gone") return { confirm: false, seatState: "unaddressable", reason: "pane_gone" };
+  // More than one pane runs this seat's agent in its project: nothing is typed into
+  // any of them, and the candidates are shown.
+  if (state === "ambiguous") return { confirm: false, seatState: "unaddressable", reason: `ambiguous:${detail}` };
   if (state.startsWith("not_ready:")) return { confirm: false, seatState: "pending", reason: state };
   if (state.startsWith("unknown:")) return { confirm: false, seatState: "pending", reason: state };
   if (state === "busy") return { confirm: false, seatState: "pending", reason: "input_in_progress" };
@@ -147,6 +153,8 @@ export function createTerminalPokeChannel({
   let stopped = false;
   const book = createSeatBook(now);
   let rosterReasons = new Map();
+  // seat key -> the other registered seats of the same type and project (this poll).
+  let peerIndex = new Map();
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
@@ -253,6 +261,9 @@ export function createTerminalPokeChannel({
         scriptPath: nudgeScriptPath,
         team,
         agent,
+        type,
+        project,
+        peers: peerIndex.get(key) ?? [],
         body: nudgeText(type, cmdName),
         timeoutMs,
         env,
@@ -269,7 +280,7 @@ export function createTerminalPokeChannel({
       return;
     }
 
-    const classified = classifyNudgeState(result.state);
+    const classified = classifyNudgeState(result.state, result.reason);
     if (classified.confirm) {
       setQueueState(db, id, "confirmed");
       pendingBackoff.delete(key);
@@ -319,6 +330,23 @@ export function createTerminalPokeChannel({
       const paths = storagePaths(installRoot, env);
       recordSkippedTeams(roster.skipped ?? []);
       const seats = [...roster.seats];
+      // Seats of one type in one project cannot be told apart by that alone; a
+      // pane found for one of them is only its own when no other is waiting.
+      // A project is the same place by its physical path (the pane search compares
+      // that too), so /p, /p/. and a symlink or /tmp vs /private/tmp are one project.
+      const placeOf = (project) => { try { return realpathSync(project); } catch { return project; } };
+      const groupOf = (seat) => `${seat.type}\u0000${placeOf(seat.project)}`;
+      const groups = new Map();
+      for (const seat of seats) {
+        const group = groupOf(seat);
+        groups.set(group, [...(groups.get(group) ?? []), seat]);
+      }
+      peerIndex = new Map(seats.map((seat) => [
+        seatKey(seat.team, seat.agent),
+        (groups.get(groupOf(seat)) ?? [])
+          .filter((other) => !(other.team === seat.team && other.agent === seat.agent))
+          .map((other) => `${other.team}/${other.agent}`),
+      ]));
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
       for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       for (const key of book.keys()) {

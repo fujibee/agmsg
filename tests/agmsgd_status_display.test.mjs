@@ -222,6 +222,17 @@ test('terminal-poke seats are shown with the channel\'s own status vocabulary', 
   assert.match(text, /Terminal poke test\/g5: pending: agmsgd cannot find herdr on its PATH \(from a shell where herdr works, run agmsg daemon stop, then agmsg daemon start\)/);
 });
 
+test('terminal poke: an ambiguous seat names its candidate panes', async t => {
+  const f = fixture(t);
+  await fakeDaemon(t, f, {
+    terminalPoke: [{ seat: JSON.stringify(['test', 'agy1']), state: 'unaddressable', reason: 'ambiguous:herdr:/s:w1:p1 herdr:/s:w1:p2' },
+      { seat: JSON.stringify(['test', 'agy3']), state: 'unaddressable', reason: 'ambiguous:seats_without_pane:test/agy4 pane:herdr:/s:w1:p9' }],
+  });
+  const text = await runAsync(f.root);
+  assert.match(text, /Terminal poke test\/agy1: agmsgd cannot reach this seat: more than one pane runs this seat's agent in its project \(herdr:\/s:w1:p1 herdr:\/s:w1:p2\)/);
+  assert.match(text, /test\/agy3: .*herdr:\/s:w1:p9 runs this seat's agent, but test\/agy4 \(same type and project, no pane recorded\) could be the one in it/);
+});
+
 test('grok queue seats are shown with the channel\'s own status vocabulary', async t => {
   const f = fixture(t);
   await fakeDaemon(t, f, {
@@ -238,10 +249,35 @@ test('grok queue seats are shown with the channel\'s own status vocabulary', asy
   assert.match(text, /Grok queue test\/ga1: notified via grok queue$/m);
   assert.match(text, /Grok queue test\/ga2: notified via grok queue \(warning: the leader socket's directory is readable\/writable by group or other/);
   assert.match(text, /Grok queue test\/ga3: session process gone/);
-  assert.match(text, /Grok queue test\/ga4: pending: first turn not complete yet/);
+  assert.match(text, /Grok queue test\/ga4: pending: on the welcome screen, delivered after its first turn ends/);
   assert.match(text, /Grok queue test\/ga5: pending: nudge_timeout/);
   // An empty socket the hooks could not vouch for shows why, not "not in leader mode".
   assert.match(text, /Grok queue test\/ga6: agmsgd cannot reach this seat: could not list processes to find grok's leader \(ps exit 1: denied\)/);
+});
+
+test('grok queue: an empty leader socket says use_leader on, off, in another table, or unreadable apart', async t => {
+  const f = fixture(t);
+  const home = join(f.root, 'grokhome');
+  mkdirSync(home);
+  const prior = process.env.GROK_HOME;
+  process.env.GROK_HOME = home;
+  t.after(() => { if (prior === undefined) delete process.env.GROK_HOME; else process.env.GROK_HOME = prior; });
+  await fakeDaemon(t, f, {
+    grokQueue: [{ seat: JSON.stringify(['test', 'gl1']), state: 'unaddressable', reason: 'leader_socket_unknown' }],
+  });
+  const say = async cfg => {
+    if (cfg === null) rmSync(join(home, 'config.toml'), { force: true });
+    else writeFileSync(join(home, 'config.toml'), cfg);
+    return runAsync(f.root);
+  };
+  assert.match(await say('[cli]\nuse_leader = true\n'), /gl1: agmsgd cannot reach this seat: use_leader is on in .* but no grok leader was found/);
+  assert.match(await say('[cli]\nuse_leader = false\n'), /gl1: agmsgd cannot reach this seat: grok is not running in leader mode/);
+  // use_leader in some other table is not the [cli] one.
+  assert.match(await say('[cli]\nuse_leader = false\n[other]\nuse_leader = true\n'), /gl1: .*not running in leader mode/);
+  // No file: nothing was read, so neither on nor off is claimed.
+  const unread = await say(null);
+  assert.match(unread, /gl1: .*could not be read to tell whether use_leader is on/);
+  assert.doesNotMatch(unread, /not running in leader mode/);
 });
 
 test('grok queue seats not yet on agmsgd delivery are hidden without --all, shown with it', async t => {

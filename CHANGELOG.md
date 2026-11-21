@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-11-21
+
+### Fixed
+- grok-build: agmsgd reaches every grok opened with use_leader, not only the first one; a grok attached to an earlier grok's leader is reached through that leader's socket, and status describes leader mode correctly (#1998)
+- grok-build: a grok opened with --resume or --continue is reached as soon as it opens; a grok opened plainly is reached after its first turn, because its welcome screen does not show a received turn, and status says so until then (#1999)
+- grok-build: the pane of a grok attached to an earlier grok's leader is taken from that grok's own TUI; when it cannot be determined, no pane is recorded and status gives the reason and how to recover (reopen it and run actas, or open it with spawn) (#2002)
+- terminal-poke: an agent opened by hand (without spawn or actas) is reached when agmsgd finds exactly one pane running that agent's CLI in the project; with more than one, nothing is delivered and status lists the candidates. Status on a fresh install no longer looks like a failure before the first message (#2000)
+- delivery: a seat records one delivery mode, the one chosen with `agmsg delivery` (agmsgd when none was chosen and agmsgd is on), and status and the team listing show it for every type. On an agmsgd seat, watch.sh starts no Monitor and says why in one line, and the Antigravity and Grok skills no longer start one (#2001)
+- tests: the terminal driver ABI test accounts for the new pane-enumeration op, which takes no pane id and which tmux does not have by design (#2003)
+
+[1.8.2]: https://github.com/fujibee/agmsg/compare/v1.8.1...v1.8.2
+
 ## [1.8.1] - 2026-11-17
 
 ### Fixed
