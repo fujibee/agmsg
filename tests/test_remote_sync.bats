@@ -690,6 +690,170 @@ prepare_push() {
   [ "$(agmsg_sqlite "$db" "SELECT transport_cursor FROM sync_bindings;" | tr -d '\r')" = 2 ]
 }
 
+_read_state_fingerprint() {
+  node -e '
+    const fs = require("node:fs");
+    console.log(JSON.stringify([process.argv[1], process.argv[1] + "-wal"].map(path => {
+      try { const s = fs.statSync(path); return [s.mtimeMs, s.size]; }
+      catch (e) { if (e.code === "ENOENT") return null; throw e; }
+    })));
+  ' "$(agmsg_db_path demo)"
+}
+
+@test "Stage-2 unchanged snapshot application preserves the existing no-write behavior" {
+  # Behavior guard: a same-value UPDATE of a column in no index already leaves
+  # the page unwritten, so this does not demonstrate a write reduction from the
+  # conditional updates. It keeps a repeated snapshot from writing the store.
+  local context snapshot before after
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"0","local_agents":["bob"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"}]}'
+  snapshot=$(printf '%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"0"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"0"}')
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  before=$(_read_state_fingerprint)
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  after=$(_read_state_fingerprint)
+  [ "$before" = "$after" ]
+}
+
+@test "Stage-2 stable preparation after a server-projected read does not write the store" {
+  local context snapshot before after prepared replay db
+  _1966_page 1 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"1","local_agents":["bob"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"}]}'
+  snapshot=$(printf '%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"1"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"1"}')
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  # Stop after prepare, then restart it in a fresh process without applying a
+  # response. A covered read is still durable and exports no redundant exact.
+  prepared=$(printf '%s\n' "$context" |
+    bash "$SCRIPTS/internal/storage-sync-driver.sh" read-prepare demo "$SERVER_ID" "$TEAM_ID" 1)
+  replay=$(printf '%s\n' "$context" |
+    bash "$SCRIPTS/internal/storage-sync-driver.sh" read-prepare demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$prepared" = "$replay" ]
+  [ "$(printf '%s\n' "$replay" | jq -r 'select(.type=="sync_read_frontier")|.server_seq')" = 1 ]
+  [ "$(printf '%s\n' "$replay" | jq -s '[.[]|select(.type=="sync_read_exact")]|length')" -eq 0 ]
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 0 ]
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM events WHERE type='message_read';")" -eq 1 ]
+  before=$(_read_state_fingerprint)
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  after=$(_read_state_fingerprint)
+  [ "$before" = "$after" ]
+}
+
+@test "Stage-2 preparation updates membership and floors while preserving a member block" {
+  local context db prepared
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"2","local_agents":["bob","carol"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"},{"member_id":"018f3f7e-0000-7000-8000-000000000011","name":"carol"}]}'
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' '{"type":"sync_read_block","member_id":"018f3f7e-0000-7000-8000-000000000010","reason":"read-state-limit-exceeded"}' |
+    storage_sync_block_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$context" | jq -c '.members |= map(select(.name=="carol")) | .min_available_seq="1"' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT active FROM sync_read_members WHERE agent='bob';")" = 0 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_read_prepared;")" -eq 1 ]
+  prepared=$(printf '%s\n' "$context" | jq -c '.min_available_seq="2"' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(agmsg_sqlite "$db" "SELECT active||':'||remote_server_seq||':'||min_available_seq||':'||blocked_reason FROM sync_read_members WHERE agent='bob';")" = '1:2:2:read-state-limit-exceeded' ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_read_prepared;")" -eq 2 ]
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_frontier")|.server_seq')" = 2 ]
+  # Local roster changes must also invalidate the materialized frontier.
+  printf '%s\n' "$context" | jq -c '.local_agents=["carol"]' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(agmsg_sqlite "$db" "SELECT name_mismatch FROM sync_read_members WHERE agent='bob';")" = 1 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_read_prepared;")" -eq 1 ]
+}
+
+@test "Stage-2 covered aliases use each recipient's own remote frontier" {
+  local context prepared second_local
+  _1966_page 1 2 3 | jq -c 'if .type=="sync_pull_message" then .projection.to_agent="carol" else . end' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"3","local_agents":["bob","carol"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"},{"member_id":"018f3f7e-0000-7000-8000-000000000011","name":"carol"}]}'
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"3"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"3"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000011","server_seq":"0"}' |
+    storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  second_local=$(storage_history demo | jq -r 'select(.body=="msg 2")|.id')
+  storage_read_cursor_consume demo carol "$(storage_watch_tip demo:carol)" "$second_local" >/dev/null
+  prepared=$(printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_exact")|.wire_id')" = 550e8400-e29b-41d4-a716-446655440902 ]
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_exact")|.member_id')" = 018f3f7e-0000-7000-8000-000000000011 ]
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_frontier" and .member_id=="018f3f7e-0000-7000-8000-000000000011")|.server_seq')" = 0 ]
+}
+
+@test "Stage-2 rejoin with the same name and floor restores active read exports" {
+  local context prepared replay third_local db
+  _1966_page 1 2 3 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"3","local_agents":["bob"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"}]}'
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$context" | jq -c '.members=[] | .local_agents=[]' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  third_local=$(storage_history demo | jq -r 'select(.body=="msg 3")|.id')
+  storage_read_cursor_consume demo bob "$(storage_watch_tip demo:bob)" "$third_local" >/dev/null
+  prepared=$(printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT active FROM sync_read_members WHERE agent='bob';")" = 1 ]
+  [ "$(_968_frontier "$prepared")" = 0 ]
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_exact")|.wire_id')" = 550e8400-e29b-41d4-a716-446655440903 ]
+  # No response is applied between preparations: the exact read must survive.
+  replay=$(printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$prepared" = "$replay" ]
+}
+
+@test "Stage-2 a remote rename refreshes the name while mismatch persists" {
+  local context db
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"0","local_agents":[],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"robert"}]}'
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$context" | jq -c '.members[0].name="robin"' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT agent||':'||remote_agent||':'||name_mismatch FROM sync_read_members;")" = robert:robin:1 ]
+}
+
+@test "Stage-2 prepare alone advances the floor below an existing remote frontier" {
+  local context db
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"3","local_agents":["bob"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"}]}'
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"3"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"3"}' |
+    storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  # The remote frontier cannot trigger an upsert: it is already above the floor.
+  printf '%s\n' "$context" | jq -c '.min_available_seq="2"' |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT remote_server_seq||':'||min_available_seq FROM sync_read_members;")" = 3:2 ]
+}
+
+@test "Stage-2 repeated snapshots still project reads onto messages imported later" {
+  local context snapshot db
+  context='{"type":"sync_read_context","min_available_seq":"0","current_seq":"2","local_agents":["bob"],"members":[{"member_id":"018f3f7e-0000-7000-8000-000000000010","name":"bob"}]}'
+  snapshot=$(printf '%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"2"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"1"}' \
+    '{"type":"sync_read_exact","member_id":"018f3f7e-0000-7000-8000-000000000010","wire_id":"550e8400-e29b-41d4-a716-446655440902"}')
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  # The frontier and exact read from the first snapshot must cover messages
+  # imported after that snapshot was applied.
+  _1966_page 1 2 | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 2 ]
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 0 ]
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM events WHERE type='message_read';")" -eq 2 ]
+  printf '%s\n' "$snapshot" | storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM events WHERE type='message_read';")" -eq 2 ]
+}
+
 @test "Stage-2 rename mismatch blocks remote frontier in either ordering" {
   local old_context new_context local_first_context prepared db member
   member=018f3f7e-0000-7000-8000-000000000010

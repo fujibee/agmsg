@@ -194,6 +194,23 @@ only exact facts whose own durable mapping proves
 `server_seq <= remote_server_seq`. It MUST NOT garbage-collect by wire ID alone.
 It never changes transport or decrypt/import progress.
 
+The bundled SQLite driver recomputes preparation and projection against durable
+state inside each transaction. It updates member activity and prepared frontiers
+only when their stored values differ from the calculated values. Local read
+aliases covered by the corresponding member's stored remote frontier are omitted,
+including those of departed members. Exact exports contain only active members'
+reads above their prepared frontiers. Each snapshot projects coverage onto any
+messages imported before its application, including messages that arrived after
+an earlier application of that snapshot.
+
+Every pull page, including an empty page, executes apply so bounded quarantine
+cleanup can continue. Once pending imports and cleanup are complete, cycles with
+stable membership and read state perform no persistent message-store writes and
+can arm the sync engine's idle checkpoint. An armed engine may poll at intervals
+of up to 60 seconds after a quiet period, so receiving messages and remote read
+state can wait until the next poll. Local writes wake the engine within the
+steady interval; skipping prepare does not itself defer a cycle's pull request.
+
 ### HTTP operation
 
 `POST /v1/read-state/sync` uses the normal team credential and standard HTTP v1

@@ -3581,8 +3581,9 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   // nothing, and was eligible to push if there had been something -- that
   // call still spawns on the order of 50 processes between the storage and
   // roster drivers, every few seconds, for nothing on an idle engine. The
-  // pull side below is untouched either way (still plain HTTP every cycle),
-  // so an inbound message is never delayed by this.
+  // pull side below runs every cycle whether prepare is skipped or not. The
+  // skip itself does not defer an inbound request; runLoop's adaptive interval
+  // can space those cycles up to 60s apart while idle.
   //
   //   1. A checkpoint exists at all.
   //   2. It is not yet IDLE_SAFETY_NET_MS old. Even a correctly-armed
@@ -3854,6 +3855,8 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
     // The storage cursor is the transport checkpoint. Apply the idempotent
     // roster side first so a registry failure cannot advance past an event it
     // did not durably record; a later storage failure simply replays roster.
+    // Empty pages still apply so the driver can resume bounded quarantine
+    // cleanup left over from earlier pulls. They also retain pull.applied.
     const applied = await driverCall("apply", config, messageRecords);
     await logApplyCall(config, messageRecords, applied);
     await eventCall("pull.applied", {
