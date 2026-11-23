@@ -561,18 +561,24 @@ function runAge(args, input) {
   return result;
 }
 
-// One scratch directory for every decryption in this process, instead of a
+// One scratch directory shared by the decryptions in flight, instead of a
 // mkdtemp + rmdir per message. Each ciphertext is a file of its own inside it
-// (age reads the identity on stdin, so the ciphertext has to be a path), removed
-// as soon as its decryption ends; the directory goes when the process does.
+// (age reads the identity on stdin, so the ciphertext has to be a path). It is
+// created when a decryption starts and removed when the last one in flight
+// ends, so a process that goes idle -- or is stopped between decryptions --
+// leaves nothing behind; no exit or signal handler is involved. (A process
+// killed WHILE a decryption runs leaves the directory, as the per-message one
+// was left before.)
 let decryptScratch = null;
 function decryptScratchDir() {
-  if (decryptScratch) return decryptScratch;
-  decryptScratch = mkdtempSync(join(nodeOs.tmpdir(), "agmsg-age-open."));
-  process.once("exit", () => {
-    try { rmSync(decryptScratch, { recursive: true, force: true }); } catch { /* best effort */ }
-  });
+  decryptScratch ??= mkdtempSync(join(nodeOs.tmpdir(), "agmsg-age-open."));
   return decryptScratch;
+}
+function decryptScratchRelease() {
+  if (decryptActive > 0 || decryptWaiters.length > 0 || !decryptScratch) return;
+  const dir = decryptScratch;
+  decryptScratch = null;
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 let decryptFileCounter = 0;
 
@@ -630,14 +636,16 @@ function runAgeAsync(args, input) {
 }
 
 async function runAgeWithIdentity(ageFile, identityBytes) {
-  const ciphertextPath = join(decryptScratchDir(), `m${decryptFileCounter += 1}.age`);
-  writeFileSync(ciphertextPath, ageFile, { mode: 0o600, flag: "wx" });
   await decryptSlot();
+  let ciphertextPath = null;
   try {
+    ciphertextPath = join(decryptScratchDir(), `m${decryptFileCounter += 1}.age`);
+    writeFileSync(ciphertextPath, ageFile, { mode: 0o600, flag: "wx" });
     return await runAgeAsync(["--decrypt", "--identity", "-", ciphertextPath], identityBytes);
   } finally {
+    if (ciphertextPath) rmSync(ciphertextPath, { force: true });
     decryptSlotDone();
-    rmSync(ciphertextPath, { force: true });
+    decryptScratchRelease();
   }
 }
 

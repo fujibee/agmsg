@@ -655,3 +655,61 @@ test("decryptConcurrency: half the cores, at most four, at least one; an overrid
   assert.equal(decryptConcurrency(8, { AGMSG_AGE_DECRYPT_JOBS: "1" }), 1);
   assert.equal(decryptConcurrency(8, { AGMSG_AGE_DECRYPT_JOBS: "x" }), 4);
 });
+
+// A decryption leaves no scratch directory behind once it is done, and a process
+// that is stopped by a signal while idle afterwards leaves none either -- there
+// is no exit or signal handler for that: the directory is removed by the last
+// decryption in flight.
+const OPEN_ONE_SCRIPT = `
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { openEnvelope } from ${JSON.stringify(new URL("../scripts/internal/sync-cipher.mjs", import.meta.url).href)};
+const spec = JSON.parse(readFileSync(process.argv[1], "utf8"));
+const identityFile = join(process.argv[2], "id");
+writeFileSync(identityFile, spec.identity + "\\n", { mode: 0o600 });
+const projection = await openEnvelope({ envelope: spec.envelope, protocol_version: spec.protocol_version,
+  team_id: spec.team_id, wire_id: spec.wire_id, identity_file: identityFile,
+  expected_recipients: [spec.recipient], max_blob_bytes: 1048576 });
+if (!projection) process.exit(3);
+console.log("READY");
+setInterval(() => {}, 1000);
+`;
+
+async function openOneSpec(dir) {
+  const vector = manifest.vectors.find((v) => v.expected_state === "importable");
+  const spec = { envelope: resolveEnvelope(vector), identity: manifest.recipient_sets[vector.identity].identity,
+    recipient: manifest.recipient_sets.team_a.recipient, protocol_version: manifest.binding.protocol_version,
+    team_id: manifest.binding.team_id, wire_id: manifest.binding.wire_id };
+  const path = join(dir, "spec.json");
+  await writeFile(path, JSON.stringify(spec));
+  return path;
+}
+
+for (const signal of [null, "SIGTERM", "SIGINT"]) {
+  test(`age decryption leaves no scratch directory, idle or stopped by ${signal ?? "nothing"}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agmsg-age-scratch-test-"));
+    try {
+      const tmp = join(root, "tmp"); const work = join(root, "work");
+      const { mkdirSync, readdirSync } = await import("node:fs");
+      mkdirSync(tmp); mkdirSync(work);
+      const specPath = await openOneSpec(work);
+      const child = spawn(process.execPath, ["--input-type=module", "-e", OPEN_ONE_SCRIPT, specPath, work],
+        { env: { ...process.env, TMPDIR: tmp }, stdio: ["ignore", "pipe", "inherit"] });
+      await new Promise((resolve, reject) => {
+        child.stdout.on("data", (chunk) => { if (String(chunk).includes("READY")) resolve(); });
+        child.on("exit", (code) => reject(new Error(`child exited early (${code})`)));
+      });
+      assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("agmsg-age-open.")), []);
+      if (signal) {
+        const done = new Promise((resolve) => child.on("exit", (code, sig) => resolve(sig)));
+        child.kill(signal);
+        assert.equal(await done, signal);   // the signal still ends the process
+        assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("agmsg-age-open.")), []);
+      } else {
+        child.removeAllListeners("exit"); child.kill("SIGKILL");
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
