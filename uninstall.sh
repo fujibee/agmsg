@@ -485,7 +485,7 @@ _uninstall_one() {
   # the data they point at is removed here, by the same rules: with --keep-data
   # only the backup copies in .trash go, otherwise everything but the install
   # operation lock database.
-  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target full_remove=false
+  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target full_remove=false STATE_FOREIGN=false
   for _state_part in db teams ext-tools .trash run; do
     if [ -L "$SKILL_DIR/$_state_part" ]; then
       _state_target="$(readlink "$SKILL_DIR/$_state_part")"
@@ -518,6 +518,7 @@ _uninstall_one() {
       fi
       echo "    To remove it, uninstall the install that owns it, or delete that directory yourself."
       STATE_PARENT=""
+      STATE_FOREIGN=true
     fi
     unset _state_owner _state_owner_ok
   fi
@@ -561,7 +562,11 @@ _uninstall_one() {
         case "$(basename "$_entry")" in
         uninstall.sh|.install-op-uninstaller-retired.*|.install-op) continue ;;
         esac
-        if [ "$(basename "$_entry")" = "run" ]; then
+        if [ "$(basename "$_entry")" = "run" ] && [ "$STATE_FOREIGN" = true ] && [ -L "$_entry" ]; then
+          # run/ is a link into a root that is not this install's: its contents stay
+          # (the link itself goes with the operation cleanup below).
+          continue
+        elif [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
             case "$(basename "$_run_entry")" in

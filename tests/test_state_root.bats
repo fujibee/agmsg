@@ -706,6 +706,26 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ "$(cat "$ST/.owner")" = "$FAKE_HOME/.agents/skills/other" ]
 }
 
+@test "uninstall --yes of a root owned by another install leaves its run/ contents alone and removes only the run link" {
+  inst
+  printf 'keep\n' > "$ST/run/foreign-sentinel"
+  printf '%s\n' "$FAKE_HOME/.agents/skills/gone" > "$ST/.owner"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "kept (only the links" <<<"$output"
+  [ -f "$ST/run/foreign-sentinel" ]
+  [ ! -L "$SK/run" ]
+}
+
+@test "uninstall --yes of a root with no .owner leaves its run/ contents alone" {
+  inst
+  printf 'keep\n' > "$ST/run/foreign-sentinel"
+  command rm -f "$ST/.owner"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  [ -f "$ST/run/foreign-sentinel" ]
+}
+
 @test "uninstall --yes keeps a state root that has no .owner record" {
   inst
   mkdir -p "$ST/teams/t"
