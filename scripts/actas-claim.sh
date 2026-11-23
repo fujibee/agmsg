@@ -110,6 +110,25 @@ while IFS= read -r team; do
             claimed="${claimed:+$claimed$'\n'}$team"
             continue
           fi
+          # A driver that takes over must not report "the old chat holds it" when
+          # the takeover itself failed: say why, as an unverified claim, so the
+          # cause (a write, a rename, the reclaim mutex) is visible. Partial
+          # claims are still rolled back first.
+          case "$handoff" in
+            held:*) : ;;   # the ordinary claim itself found another holder
+            *)
+              case "$handoff" in
+                unknown:*) _why="${handoff#unknown:}" ;;
+                *)         _why="takeover_unrecognized" ;;
+              esac
+              while IFS= read -r c_team; do
+                [ -z "$c_team" ] && continue
+                actas_lock_release "$c_team" "$NAME" "$SESSION_ID" 2>/dev/null || true
+              done <<< "$claimed"
+              printf 'status=unverified team=%s reason=%s\n' "$team" "$_why"
+              exit 1
+              ;;
+          esac
         fi
       fi
       # Roll back any partial claims so the user can retry cleanly.
