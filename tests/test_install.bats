@@ -953,6 +953,50 @@ EOF
   grep -q unrelated "$wrong_root/run/down/agmsgd.json"
 }
 
+# A CI-only (never reproduced locally) failure measured this week (bats #24,
+# 11-21 macOS run 44850365985, 11-23 ubuntu job 137494736304): "install.db:
+# reading the install id failed (sqlite3 rc=5)" right as install --update
+# started, immediately behind that same test's own prior sqlite3 write to
+# install.db. agmsg_install_db_ensure_meta's CREATE TABLE/SELECT/INSERT ran
+# with the default busy_timeout=0 -- the same race
+# agmsg_install_db_apply_schema below already guards against (see its own
+# comment), just missed here. Proven directly here, the same way: a
+# background writer holds an EXCLUSIVE transaction on the (not yet
+# bootstrapped) db file for longer than sqlite3's default busy_timeout but
+# well inside the 5000ms this function now asks for, and the call still
+# succeeds once that writer lets go. Remove the `.timeout 5000` from
+# agmsg_install_db_ensure_meta's CREATE TABLE call and this goes red with
+# exactly the measured "reading the install id failed (sqlite3 rc=5)" line.
+@test "agmsg_install_db_ensure_meta: tolerates a brief exclusive hold instead of failing immediately (flaky bats #24)" {
+  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install-meta.db" fifodir in_fifo out_fifo holder_pid
+  fifodir="$FAKE_HOME/meta-lock-fifos"
+  in_fifo="$fifodir/in"; out_fifo="$fifodir/out"
+  mkdir -p "$fifodir"
+  mkfifo "$in_fifo" "$out_fifo"
+  # A real held EXCLUSIVE lock on the db file BEFORE it has ever been
+  # bootstrapped by ensure_meta itself -- this races ensure_meta's own
+  # first statement (CREATE TABLE IF NOT EXISTS), not a later read against
+  # an already-populated db.
+  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
+  holder_pid=$!
+  _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
+  exec 9> "$in_fifo"
+  exec 8< "$out_fifo"
+  printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
+  local line
+  IFS= read -r -t 5 -u 8 line
+  [ "$line" = held ]
+  ( sleep 0.5; printf 'COMMIT;\n' >&9 2>/dev/null || true ) &
+  local releaser_pid=$!
+  run bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$lib" "$db"
+  wait "$releaser_pid" 2>/dev/null || true
+  exec 9>&- 8<&-
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM meta;")" = 1 ]
+  [ "$(sqlite3 "$db" "SELECT install_id FROM meta;")" = "$output" ]
+}
+
 # A CI-only (never reproduced locally) failure measured on #1904: a schema
 # apply right after a prior test's real agmsgd stop occasionally failed with
 # "could not apply the daemon schema to install.db" -- `cmd_stop` confirms
