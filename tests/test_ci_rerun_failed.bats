@@ -169,6 +169,34 @@ STUB
   [ "$(cat "$W/r")" = "$(printf 'fail\tx.bats\tfirst')" ]
 }
 
+# mktemp failing must never turn into an empty --output or a delete at the root.
+@test "runner: no temp dir runs bats without a report, records a failure whole-file, touches nothing else" {
+  mkdir -p "$W/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$W/bin/mktemp"
+  printf '#!/bin/sh\necho "rm $*" >> "%s/calls"\n' "$W" > "$W/bin/rm"
+  printf '#!/bin/sh\necho "rmdir $*" >> "%s/calls"\n' "$W" > "$W/bin/rmdir"
+  printf '#!/bin/sh\necho "bats $*" >> "%s/calls"\nexit 3\n' "$W" > "$W/bin/bats"
+  chmod +x "$W/bin/mktemp" "$W/bin/rm" "$W/bin/rmdir" "$W/bin/bats"
+  printf 'x.bats\n' > "$W/m"
+  PATH="$W/bin:$PATH" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -eq 3 ]
+  [ "$(cat "$W/r")" = "$(printf 'failfile\tx.bats')" ]
+  [ "$(cat "$W/calls")" = "bats --print-output-on-failure x.bats" ]
+}
+
+@test "fetch: no temp dir fetches nothing and runs no download or delete" {
+  mkdir -p "$W/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$W/bin/mktemp"
+  printf '#!/bin/sh\ncase "$1" in api) echo bats-results-ubuntu-latest-3-a1;; *) echo "gh $*" >> "%s/calls";; esac\n' "$W" > "$W/bin/gh"
+  printf '#!/bin/sh\necho "rm $*" >> "%s/calls"\n' "$W" > "$W/bin/rm"
+  chmod +x "$W/bin/mktemp" "$W/bin/gh" "$W/bin/rm"
+  PATH="$W/bin:$PATH" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 run "$FETCH" ubuntu-latest 3 2 "$W/out"
+  [ "$status" -eq 0 ]
+  [ ! -e "$W/out" ]
+  # the only delete is the script's own clearing of its output path; no download
+  [ "$(cat "$W/calls")" = "rm -f -- $W/out" ]
+}
+
 @test "runner: without the variables the behaviour is unchanged and no record is written" {
   make_fixtures
   : > "$FLAG"

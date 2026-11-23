@@ -47,7 +47,8 @@ plan="${AGMSG_BATS_PLAN:-}"
 # Escape every ERE metacharacter of a test name.
 escape_re() { printf '%s' "$1" | sed -e 's#[][\\.^$*+?(){}|/-]#\\&#g'; }
 
-record() { [ -z "$results" ] || printf '%s\n' "$1" >> "$results"; }
+# record <printf format> <args...>: no command substitution, so no fork per record.
+record() { [ -z "$results" ] || printf "$@" >> "$results"; }
 
 # A TAP report is complete only when it has a `1..N` plan, exactly N result lines,
 # and no bail-out. Anything else (the run was killed, timed out, or bats died
@@ -111,7 +112,7 @@ while IFS= read -r file <&3; do
 
   if [ "$mode" = skip ]; then
     echo "bats timing: skip $file (passed in the previous attempt)"
-    record "$(printf 'pass\t%s' "$file")"
+    record 'pass\t%s\n' "$file"
     continue
   fi
 
@@ -133,29 +134,43 @@ while IFS= read -r file <&3; do
     fi
   fi
 
-  repdir="$(mktemp -d)"
-  bats --print-output-on-failure --report-formatter tap --output "$repdir" \
-    ${filter_args[@]+"${filter_args[@]}"} "$file" </dev/null
+  # The TAP report is optional evidence. If no private temp dir can be made, run
+  # without it; a failure is then recorded as a whole-file failure.
+  repdir=""
+  if [ -n "$results" ]; then
+    repdir="$(mktemp -d 2>/dev/null)" || repdir=""
+    [ -n "$repdir" ] && [ -d "$repdir" ] || repdir=""
+  fi
+  if [ -n "$repdir" ]; then
+    bats --print-output-on-failure --report-formatter tap --output "$repdir" \
+      ${filter_args[@]+"${filter_args[@]}"} "$file" </dev/null
+  else
+    bats --print-output-on-failure \
+      ${filter_args[@]+"${filter_args[@]}"} "$file" </dev/null
+  fi
   status=$?
 
   if [ -n "$results" ]; then
     if [ "$status" -eq 0 ]; then
-      record "$(printf 'pass\t%s' "$file")"
+      record 'pass\t%s\n' "$file"
     else
-      failed="$(failed_names "$repdir/report.tap")"
-      if ! tap_complete "$repdir/report.tap" || [ -z "$failed" ] || printf '%s\n' "$failed" | grep -qE '^(setup_file|teardown_file|setup_suite|teardown_suite)'; then
-        record "$(printf 'failfile\t%s' "$file")"
+      failed=""
+      [ -z "$repdir" ] || failed="$(failed_names "$repdir/report.tap")"
+      if [ -z "$repdir" ] || ! tap_complete "$repdir/report.tap" || [ -z "$failed" ] || printf '%s\n' "$failed" | grep -qE '^(setup_file|teardown_file|setup_suite|teardown_suite)'; then
+        record 'failfile\t%s\n' "$file"
       else
         while IFS= read -r n; do
           [ -n "$n" ] || continue
-          case "$n" in *"$(printf '\t')"*) record "$(printf 'failfile\t%s' "$file")"; continue ;; esac
-          record "$(printf 'fail\t%s\t%s' "$file" "$n")"
+          case "$n" in *$'\t'*) record 'failfile\t%s\n' "$file"; continue ;; esac
+          record 'fail\t%s\t%s\n' "$file" "$n"
         done <<< "$failed"
       fi
     fi
   fi
-  rm -f -- "$repdir/report.tap"
-  rmdir -- "$repdir" 2>/dev/null || true
+  if [ -n "$repdir" ]; then
+    rm -f -- "$repdir/report.tap"
+    rmdir -- "$repdir" 2>/dev/null || true
+  fi
 
   ended_epoch="$(date -u +%s)"
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

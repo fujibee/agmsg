@@ -29,7 +29,11 @@ n=$((attempt - 1))
 while [ "$n" -ge 1 ]; do
   name="bats-results-$os-$shard-a$n"
   if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
-    dir="$(mktemp -d)"
+    dir="$(mktemp -d 2>/dev/null)" || dir=""
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+      echo "${0##*/}: could not make a temp directory; running the whole shard"
+      exit 0
+    fi
     if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$name" -D "$dir" >/dev/null 2>&1 \
        && [ -s "$dir/bats-results.tsv" ]; then
       cp -- "$dir/bats-results.tsv" "$out"
