@@ -506,6 +506,10 @@ _uninstall_one() {
     if [ -L "$SKILL_DIR/run" ] && [ "$(readlink "$SKILL_DIR/run")" != "$STATE_PARENT/run" ]; then
       STATE_FOREIGN=true
       echo "  ~ $SKILL_DIR/run does not link into the state ${STATE_PARENT:-of this install}: that link's target is kept (only the link is removed)"
+    elif [ -n "$STATE_PARENT" ] && [ -L "$STATE_PARENT/run" ]; then
+      # The recorded root's own run is a link: it is unlinked below, never walked.
+      STATE_FOREIGN=true
+      echo "  ~ $STATE_PARENT/run is itself a link: its target is kept (only the link is removed)"
     fi
   fi
   unset _m_skill _m_state
@@ -569,6 +573,11 @@ _uninstall_one() {
       if [ -n "$STATE_PARENT" ]; then
         local _state_dir
         for _state_dir in db teams ext-tools .trash; do
+          if [ -L "$STATE_PARENT/$_state_dir" ]; then
+            # a link inside the recorded root: unlinked, its target is never followed
+            _uninstall_checked_rm -f "$STATE_PARENT/$_state_dir" || return 1
+            continue
+          fi
           [ -d "$STATE_PARENT/$_state_dir" ] || continue
           _uninstall_checked_rm -rf "$STATE_PARENT/$_state_dir" || return 1
         done
@@ -677,7 +686,9 @@ _uninstall_one() {
     if [ -L "$SKILL_DIR/run" ]; then
       rm -f "$SKILL_DIR/run"
     fi
-    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
+    if [ -n "$STATE_PARENT" ] && [ -L "$STATE_PARENT/run" ]; then
+      rm -f "$STATE_PARENT/run"
+    elif [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
       for _left in "$STATE_PARENT/run"/* "$STATE_PARENT/run"/.[!.]*; do
         [ -e "$_left" ] || continue
         case "${_left##*/}" in install-op.lock.db*) continue ;; esac

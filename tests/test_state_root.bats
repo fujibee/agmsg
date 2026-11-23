@@ -693,6 +693,29 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ ! -L "$SK/run" ] && [ ! -L "$SK/teams" ]
 }
 
+@test "uninstall does not walk a run/ inside the recorded root that is itself a link" {
+  inst
+  mkdir -p "$FAKE_HOME/elsewhere/run"
+  printf 'keep\n' > "$FAKE_HOME/elsewhere/run/sentinel"
+  command mv "$ST/run" "$ST/run-original"
+  ln -s "$FAKE_HOME/elsewhere/run" "$ST/run"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "$ST/run is itself a link: its target is kept" <<<"$output"
+  [ -f "$FAKE_HOME/elsewhere/run/sentinel" ]
+}
+
+@test "uninstall unlinks a db/teams inside the recorded root that is itself a link and keeps its target" {
+  inst
+  mkdir -p "$FAKE_HOME/elsewhere/teams/t"
+  printf 'keep\n' > "$FAKE_HOME/elsewhere/teams/t/data"
+  command rm -rf "$ST/teams"
+  ln -s "$FAKE_HOME/elsewhere/teams" "$ST/teams"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  [ -f "$FAKE_HOME/elsewhere/teams/t/data" ]
+}
+
 @test "uninstalling a copy keeps the original's db, teams and run, and says the state belongs to the original" {
   inst
   mkdir -p "$ST/teams/t"
