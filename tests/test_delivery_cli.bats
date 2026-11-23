@@ -239,3 +239,23 @@ STUB
   refute grep -Fq "this project: monitor (legacy)" <<<"$output"
   grep -Fq "mode: agmsgd (agmsgd is turned off; turn it on with: agmsg delivery agmsgd)" <<<"$output"
 }
+
+@test "delivery agmsgd: a Codex project gets agmsgd's own result, not monitor-mode setup text or a shim instruction" {
+  _mark_daemon_ready
+  run bash "$SCRIPTS/agmsg" delivery agmsgd --type codex --project "$PROJECT"
+  [ "$status" -eq 0 ]
+  grep -Fq "This session keeps its current delivery" <<<"$output"
+  refute grep -Fq "Codex monitor is enabled" <<<"$output"
+  refute grep -Fq "shell function" <<<"$output"
+  refute grep -Fq "codex-shim" <<<"$output"
+  refute grep -Fq "codex-monitor-beta" <<<"$output"
+  refute grep -Fq "Delivery mode set to" <<<"$output"
+  run bash "$SCRIPTS/agmsg" delivery status --type codex --project "$PROJECT"
+  grep -Fq "this project: agmsgd" <<<"$output"
+}
+
+@test "delivery monitor: a Codex project still gets the monitor setup text" {
+  _mark_daemon_ready
+  run bash "$SCRIPTS/agmsg" delivery monitor --type codex --project "$PROJECT"
+  grep -Fq "Codex monitor is enabled" <<<"$output"
+}
