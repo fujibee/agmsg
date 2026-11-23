@@ -674,6 +674,17 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -n "$(sed -n 's/^reason=run links to //p' "$SK/.agmsg")" ]
 }
 
+@test "an update says when run/ links somewhere other than the computed state root, and leaves the link" {
+  inst
+  mkdir -p "$FAKE_HOME/elsewhere/run"
+  command rm "$SK/run"
+  ln -s "$FAKE_HOME/elsewhere/run" "$SK/run"
+  run inst --update
+  [ "$status" -eq 0 ]
+  grep -qF -- "$SK/run links to $FAKE_HOME/elsewhere/run, not to $ST: left as it is" <<<"$output"
+  [ "$(readlink "$SK/run")" = "$FAKE_HOME/elsewhere/run" ]
+}
+
 @test "uninstall removes the state the record names and never follows a link that points elsewhere" {
   inst
   mkdir -p "$FAKE_HOME/elsewhere/run" "$FAKE_HOME/elsewhere/teams/t"
