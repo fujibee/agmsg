@@ -48,6 +48,10 @@ test('only the current ready owner with unchanged intent publishes; an old owner
     assert.equal(writeHeartbeat(db, root, { gen: 2, expectedOpGen: 2 }, 2, now), false);
     clearHeartbeat(db, root, 1);
     assert.equal(readFileSync(heartbeatPath(root), 'utf8'), first);
+    put(root, { install_id: 'replacement-install' });
+    clearHeartbeat(db, root, 2);
+    assert.equal(JSON.parse(readFileSync(heartbeatPath(root), 'utf8')).install_id, 'replacement-install');
+    put(root);
     db.exec("UPDATE daemon_intent SET desired='off'");
     assert.equal(writeHeartbeat(db, root, { gen: 2, expectedOpGen: 3 }, 3, now), false);
     clearHeartbeat(db, root, 2);

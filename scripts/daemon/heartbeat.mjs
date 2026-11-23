@@ -44,10 +44,11 @@ export function writeHeartbeat(db, root, { gen, expectedOpGen }, sequence, now =
 
 export function clearHeartbeat(db, root, gen) {
   return withImmediateTransaction(db, () => {
+    const installId = db.prepare('SELECT install_id FROM meta').get()?.install_id;
     let record;
     try { record = JSON.parse(readFileSync(heartbeatPath(root), 'utf8')); }
     catch (error) { if (error.code === 'ENOENT') return; throw error; }
-    if (record.gen === gen) rmSync(heartbeatPath(root), { force: true });
+    if (record.install_id === installId && record.gen === gen) rmSync(heartbeatPath(root), { force: true });
   });
 }
 
