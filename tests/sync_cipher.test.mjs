@@ -688,27 +688,34 @@ async function openOneSpec(dir) {
 for (const signal of [null, "SIGTERM", "SIGINT"]) {
   test(`age decryption leaves no scratch directory, idle or stopped by ${signal ?? "nothing"}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "agmsg-age-scratch-test-"));
+    // Held outside the try so the finally can always end the child this test
+    // owns, whether an assertion failed, READY never came, or the wait timed out.
+    let child = null;
+    let exited = null;
     try {
       const tmp = join(root, "tmp"); const work = join(root, "work");
       const { mkdirSync, readdirSync } = await import("node:fs");
       mkdirSync(tmp); mkdirSync(work);
       const specPath = await openOneSpec(work);
-      const child = spawn(process.execPath, ["--input-type=module", "-e", OPEN_ONE_SCRIPT, specPath, work],
+      child = spawn(process.execPath, ["--input-type=module", "-e", OPEN_ONE_SCRIPT, specPath, work],
         { env: { ...process.env, TMPDIR: tmp }, stdio: ["ignore", "pipe", "inherit"] });
+      exited = new Promise((resolve) => child.on("exit", (code, sig) => resolve({ code, sig })));
       await new Promise((resolve, reject) => {
-        child.stdout.on("data", (chunk) => { if (String(chunk).includes("READY")) resolve(); });
-        child.on("exit", (code) => reject(new Error(`child exited early (${code})`)));
+        const timer = setTimeout(() => reject(new Error("child did not report READY in 20 s")), 20_000);
+        child.stdout.on("data", (chunk) => { if (String(chunk).includes("READY")) { clearTimeout(timer); resolve(); } });
+        child.on("error", (error) => { clearTimeout(timer); reject(error); });
+        exited.then(({ code }) => { clearTimeout(timer); reject(new Error(`child exited early (${code})`)); });
       });
-      assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("agmsg-age-open.")), []);
+      const left = () => readdirSync(tmp).filter((name) => name.startsWith("agmsg-age-open."));
+      assert.deepEqual(left(), []);
       if (signal) {
-        const done = new Promise((resolve) => child.on("exit", (code, sig) => resolve(sig)));
         child.kill(signal);
-        assert.equal(await done, signal);   // the signal still ends the process
-        assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("agmsg-age-open.")), []);
-      } else {
-        child.removeAllListeners("exit"); child.kill("SIGKILL");
+        assert.equal((await exited).sig, signal);   // the signal still ends the process
+        assert.deepEqual(left(), []);
       }
     } finally {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      if (exited) await exited;
       await rm(root, { recursive: true, force: true });
     }
   });
