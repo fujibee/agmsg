@@ -13,6 +13,9 @@ setup() {
   TIMED="$REPO_ROOT/.github/scripts/run-bats-timed.sh"
   FETCH="$REPO_ROOT/.github/scripts/fetch-prior-bats-results.sh"
   unset AGMSG_BATS_PLAN AGMSG_BATS_RESULTS
+  # The outer bats' per-test timeout (CI sets it) must not reach the nested bats:
+  # on Linux a nested bats that runs a failing test under it never exits.
+  unset BATS_TEST_TIMEOUT
   W="$BATS_TEST_TMPDIR"
   printf '%s\n' a.bats b.bats c.bats > "$W/manifest"
 }
