@@ -6032,3 +6032,87 @@ test("recordSkips: a count that only went up rewrites the record but does not st
     await rm(root, { recursive: true, force: true });
   }
 });
+
+function reprocessFixture(count, evaluateCall, extra = {}) {
+  const capabilities = {
+    protocol_version: 1, server_instance_id: config.server_instance_id,
+    team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
+    current_seq: String(count), next_sequence_boundary: String(count + 1),
+    accepted_envelope_versions: [1], write_allowed_ciphers: ["none"],
+    policy_revision: "0", effective_from_seq: "1", max_blob_bytes: "1048576",
+    policy_history: [{ policy_revision: "0", effective_from_seq: "1",
+      accepted_envelope_versions: [1], write_allowed_ciphers: ["none"] }],
+  };
+  const ids = Array.from({ length: count }, (_, i) =>
+    `550e8400-e29b-41d4-a716-4466554400${String(i + 10)}`);
+  const applied = [];
+  let done = false;
+  const deps = {
+    healthCall: async () => ({ server_instance_id: config.server_instance_id, team_id: config.remote_team_id }),
+    requestCall: async () => capabilities,
+    driverCall: async (operation, _config, input) => {
+      if (operation === "apply") {
+        done = true;
+        for (const record of input) if (record.id) applied.push(record.id);
+        return [{ type: "sync_apply_result", transport_cursor: String(count), corrupt_count: 0 },
+          ...ids.map((id, i) => ({ type: "sync_apply_outcome", id, server_seq: String(i + 1), status: "imported" }))];
+      }
+      return [
+        { type: "sync_state", driver_generation: "g", transport_cursor: String(count) },
+        ...(done ? [] : ids).map((id, i) => ({ type: "sync_reprocess_candidate", server_seq: String(i + 1), id,
+          server_received_at: "2026-07-22T11:00:00.000000Z",
+          envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" },
+          prior_status: "authentication_failed" })),
+        { type: "sync_reprocess_page", next_after: null, has_more: false },
+      ];
+    },
+    evaluateCall,
+    eventCall: async () => {},
+    logApplyCall: async () => {},
+    ...extra,
+  };
+  return { deps, ids, applied };
+}
+const importable = (id) => ({ status: "importable", projection: { body: id, created_at: "2026-07-22T11:00:00.000000Z",
+  from_agent: "alice", to_agent: "bob" }, policy_revision: "0", local_security_revision: "0" });
+
+test("reprocess evaluates a few candidates at once but applies them in candidate order", async () => {
+  let inFlight = 0; let peak = 0;
+  const fixture = reprocessFixture(8, async (_c, _caps, message) => {
+    inFlight += 1; peak = Math.max(peak, inFlight);
+    // Earlier candidates take longer, so an unordered consumer would reverse them.
+    await new Promise((resolve) => setTimeout(resolve, 40 - Number(message.server_seq) * 4));
+    inFlight -= 1;
+    return importable(message.id);
+  });
+  await reprocessCycle(config, 100, fixture.deps);
+  assert.deepEqual(fixture.applied, fixture.ids);
+  assert.ok(peak > 1, `expected overlap, peak was ${peak}`);
+});
+
+test("reprocess reports the first failing candidate in order, even if a later one failed first", async () => {
+  const fixture = reprocessFixture(4, async (_c, _caps, message) => {
+    if (message.server_seq === "2") { await new Promise((r) => setTimeout(r, 30)); throw new Error("second failed"); }
+    if (message.server_seq === "4") throw new Error("fourth failed");
+    return importable(message.id);
+  });
+  await assert.rejects(() => reprocessCycle(config, 100, fixture.deps), /second failed/);
+  assert.deepEqual(fixture.applied, []);
+});
+
+test("reprocess evaluates again what was started ahead of a key rotation", async () => {
+  const calls = {};
+  const fixture = reprocessFixture(4, async (_c, _caps, message) => {
+    calls[message.server_seq] = (calls[message.server_seq] ?? 0) + 1;
+    if (message.server_seq === "2") {
+      return { status: "importable", projection: { kind: "key_rotated", epoch: "1" },
+        policy_revision: "0", local_security_revision: "0" };
+    }
+    return importable(message.id);
+  }, { rosterDriverCall: async () => [], activateKeyRotationsCall: async () => {} });
+  await reprocessCycle(config, 100, fixture.deps);
+  assert.equal(calls["1"], 1);
+  assert.equal(calls["2"], 1);
+  assert.equal(calls["3"], 2);
+  assert.equal(calls["4"], 2);
+});

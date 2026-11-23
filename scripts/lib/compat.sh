@@ -198,6 +198,28 @@ compat_uuid7() {
     "${hex:0:8}" "${hex:8:4}" "${rnd:0:3}" "${rnd:3:3}" "${rnd:6:12}"
 }
 
+# <count> UUIDv7s, one per line, for a caller that needs many at once (a page of
+# imported messages): the timestamp is read once and the random bytes come from
+# one /dev/urandom read, then each id is formatted with builtins only. The same
+# shape as compat_uuid7 -- the timestamp has second resolution there too, so ids
+# made together share it either way -- at a fixed number of process launches
+# instead of several per id.
+compat_uuid7_bulk() {
+  local count="$1" ms hex rnd out="" i off
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$count" -ge 1 ] || return 0
+  ms=$(( $(date -u +%s) * 1000 ))
+  hex=$(printf '%012x' "$ms")
+  rnd=$(head -c $((count * 10)) /dev/urandom | od -An -v -tx1 | tr -d ' \n')
+  [ "${#rnd}" -eq $((count * 20)) ] || return 1
+  for ((i = 0; i < count; i++)); do
+    off=$((i * 20))
+    out="${out}${hex:0:8}-${hex:8:4}-7${rnd:$off:3}-8${rnd:$((off + 3)):3}-${rnd:$((off + 6)):12}
+"
+  done
+  printf '%s' "$out"
+}
+
 # Get file size in bytes.
 # Replaces: stat -f %z (macOS) / stat -c %s (Linux/MSYS2)
 #

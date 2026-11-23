@@ -644,3 +644,79 @@ test("body_hex is a local form, not a wire form", async () => {
   assert.throws(() => sealEnvelope({ ...bodyBase,
     projection: bodyProjection({ body_b64: Buffer.from([0xff]).toString("base64") }) }));
 });
+
+test("decryptConcurrency: half the cores, at most four, at least one; an override wins", async () => {
+  const { decryptConcurrency } = await import("../scripts/internal/sync-cipher.mjs");
+  assert.equal(decryptConcurrency(1, {}), 1);
+  assert.equal(decryptConcurrency(2, {}), 1);
+  assert.equal(decryptConcurrency(4, {}), 2);
+  assert.equal(decryptConcurrency(8, {}), 4);
+  assert.equal(decryptConcurrency(64, {}), 4);
+  assert.equal(decryptConcurrency(8, { AGMSG_AGE_DECRYPT_JOBS: "1" }), 1);
+  assert.equal(decryptConcurrency(8, { AGMSG_AGE_DECRYPT_JOBS: "x" }), 4);
+});
+
+// A decryption leaves no scratch directory behind once it is done, and a process
+// that is stopped by a signal while idle afterwards leaves none either -- there
+// is no exit or signal handler for that: the directory is removed by the last
+// decryption in flight.
+const OPEN_ONE_SCRIPT = `
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { openEnvelope } from ${JSON.stringify(new URL("../scripts/internal/sync-cipher.mjs", import.meta.url).href)};
+const spec = JSON.parse(readFileSync(process.argv[1], "utf8"));
+const identityFile = join(process.argv[2], "id");
+writeFileSync(identityFile, spec.identity + "\\n", { mode: 0o600 });
+const projection = await openEnvelope({ envelope: spec.envelope, protocol_version: spec.protocol_version,
+  team_id: spec.team_id, wire_id: spec.wire_id, identity_file: identityFile,
+  expected_recipients: [spec.recipient], max_blob_bytes: 1048576 });
+if (!projection) process.exit(3);
+console.log("READY");
+setInterval(() => {}, 1000);
+`;
+
+async function openOneSpec(dir) {
+  const vector = manifest.vectors.find((v) => v.expected_state === "importable");
+  const spec = { envelope: resolveEnvelope(vector), identity: manifest.recipient_sets[vector.identity].identity,
+    recipient: manifest.recipient_sets.team_a.recipient, protocol_version: manifest.binding.protocol_version,
+    team_id: manifest.binding.team_id, wire_id: manifest.binding.wire_id };
+  const path = join(dir, "spec.json");
+  await writeFile(path, JSON.stringify(spec));
+  return path;
+}
+
+for (const signal of [null, "SIGTERM", "SIGINT"]) {
+  test(`age decryption leaves no scratch directory, idle or stopped by ${signal ?? "nothing"}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agmsg-age-scratch-test-"));
+    // Held outside the try so the finally can always end the child this test
+    // owns, whether an assertion failed, READY never came, or the wait timed out.
+    let child = null;
+    let exited = null;
+    try {
+      const tmp = join(root, "tmp"); const work = join(root, "work");
+      const { mkdirSync, readdirSync } = await import("node:fs");
+      mkdirSync(tmp); mkdirSync(work);
+      const specPath = await openOneSpec(work);
+      child = spawn(process.execPath, ["--input-type=module", "-e", OPEN_ONE_SCRIPT, specPath, work],
+        { env: { ...process.env, TMPDIR: tmp }, stdio: ["ignore", "pipe", "inherit"] });
+      exited = new Promise((resolve) => child.on("exit", (code, sig) => resolve({ code, sig })));
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("child did not report READY in 20 s")), 20_000);
+        child.stdout.on("data", (chunk) => { if (String(chunk).includes("READY")) { clearTimeout(timer); resolve(); } });
+        child.on("error", (error) => { clearTimeout(timer); reject(error); });
+        exited.then(({ code }) => { clearTimeout(timer); reject(new Error(`child exited early (${code})`)); });
+      });
+      const left = () => readdirSync(tmp).filter((name) => name.startsWith("agmsg-age-open."));
+      assert.deepEqual(left(), []);
+      if (signal) {
+        child.kill(signal);
+        assert.equal((await exited).sig, signal);   // the signal still ends the process
+        assert.deepEqual(left(), []);
+      }
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      if (exited) await exited;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

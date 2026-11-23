@@ -11,7 +11,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync
   rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { ageExecutableVersion, CipherStateError, openEnvelope,
+import { ageExecutableVersion, CipherStateError, decryptConcurrency, openEnvelope,
   readNativeAgeIdentity } from "./sync-cipher.mjs";
 import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 import { STORAGE_ROSTER_KINDS } from "./wire-kinds.mjs";
@@ -4401,7 +4401,27 @@ export async function reprocessCycle(config, limit, dependencies = {}, scope = "
         cursorRecord ? [...pendingRosterRecords, cursorRecord] : pendingRosterRecords);
       pendingRosterRecords = [];
     };
-    for (const candidate of candidates) {
+    // Candidates are evaluated a few at a time ahead of the loop (decryption is
+    // an age process per message), but consumed strictly in order, so results,
+    // errors and the order of everything applied are the same as one at a time.
+    // A key rotation changes how every later sequence is read, so what was
+    // started ahead of one is thrown away and evaluated again after it.
+    const lookahead = decryptConcurrency() * 2;
+    const ahead = new Map();
+    const evaluateAhead = (index) => {
+      for (let j = index; j < candidates.length && j < index + lookahead; j += 1) {
+        if (ahead.has(j)) continue;
+        const c = candidates[j];
+        if (c.server_seq === "0") break;
+        const promise = Promise.resolve().then(() => evaluateCall(config, capabilities,
+          { server_seq: c.server_seq, id: c.id, server_received_at: c.server_received_at,
+            envelope: c.envelope }));
+        promise.catch(() => {});   // reported when consumed in order, not as unhandled
+        ahead.set(j, promise);
+      }
+    };
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
       const token = reprocessCandidateToken(candidate);
       if (seenTokens.has(token)) throw new Error("driver reprocess repeated a candidate");
       seenTokens.add(token);
@@ -4420,10 +4440,13 @@ export async function reprocessCycle(config, limit, dependencies = {}, scope = "
       }
       const message = { server_seq: candidate.server_seq, id: candidate.id,
         server_received_at: candidate.server_received_at, envelope: candidate.envelope };
-      const evaluated = await evaluateCall(config, capabilities, message);
+      evaluateAhead(index);
+      const evaluated = await ahead.get(index);
+      ahead.delete(index);
       const record = { type: "sync_pull_message", ...message, ...evaluated };
       storageRecords.push(record);
       if (record.status === "importable" && record.projection?.kind === "key_rotated") {
+        ahead.clear();
         // A rotation changes how every later sequence is interpreted. Flush
         // earlier roster mutations before publishing and activating it; a
         // page may interleave both kinds, and the journal is append-only.
