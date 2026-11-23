@@ -7,6 +7,20 @@
 # its wall-clock cap, every completed file remains useful evidence instead of
 # disappearing with the unfinished bats invocation. Files from several runs can
 # be concatenated directly: the run metadata is repeated on every row.
+#
+# Two optional environment variables make a rerun cheaper (see
+# bats-rerun-plan.sh, which writes the plan):
+#
+#   AGMSG_BATS_RESULTS  one record per file: `pass<TAB>file`, `fail<TAB>file<TAB>name`
+#                       per failed test, or `failfile<TAB>file` for a failure with no
+#                       usable test name. The next attempt reads it.
+#   AGMSG_BATS_PLAN     `skip file` is not run (recorded as passed), `only file name`
+#                       runs just those tests, anything else runs the whole file. A
+#                       file the plan does not mention runs whole.
+#
+# Narrowing never runs less than it was told to: a filter that selects fewer tests
+# than the names asked for (renamed, or a name bats cannot match) runs the whole
+# file instead.
 set -u
 
 usage() {
@@ -25,6 +39,31 @@ sha="${GITHUB_SHA:-unknown}"
 runner_os="${RUNNER_OS:-unknown}"
 shard="${SHARD:-unknown}"
 shard_total="${SHARD_TOTAL:-unknown}"
+results="${AGMSG_BATS_RESULTS:-}"
+plan="${AGMSG_BATS_PLAN:-}"
+[ -z "$plan" ] || [ -r "$plan" ] || { echo "bats timing: cannot read plan $plan; running every file" >&2; plan=""; }
+[ -z "$results" ] || : > "$results"
+
+# Escape every ERE metacharacter of a test name.
+escape_re() { printf '%s' "$1" | sed -e 's#[][\\.^$*+?(){}|/-]#\\&#g'; }
+
+# record <printf format> <args...>: no command substitution, so no fork per record.
+record() { [ -z "$results" ] || printf "$@" >> "$results"; }
+
+# A TAP report is complete only when it has a `1..N` plan, exactly N result lines,
+# and no bail-out. Anything else (the run was killed, timed out, or bats died
+# part-way) means tests may not have run at all, so the failure names it lists
+# are not the whole picture.
+tap_complete() {
+  awk '
+    /^Bail out!/ { bad = 1 }
+    /^1\.\.[0-9]+$/ { split($0, p, "\\.\\."); plan = p[2] + 0; have_plan = 1; next }
+    /^(not ok|ok) [0-9]+( |$)/ { n++ }
+    END { exit !(have_plan && !bad && n == plan) }' "$1" 2>/dev/null
+}
+
+# Failed test names of a TAP report, one per line.
+failed_names() { grep -E '^not ok [0-9]+ ' "$1" 2>/dev/null | sed -E 's/^not ok [0-9]+ //'; }
 
 printf 'schema\trecord\trun_id\trun_attempt\tsha\tos\tshard\tshard_total\tfile\tstarted_at\tended_at\telapsed_seconds\tstatus\n' > "$timings"
 
@@ -60,8 +99,78 @@ while IFS= read -r file <&3; do
     "$file" "$started_at" >> "$timings"
   echo "bats timing: start $file at $started_at"
 
-  bats --print-output-on-failure "$file" </dev/null
+  mode=all
+  names=""
+  if [ -n "$plan" ]; then
+    names="$(awk -F'\t' -v f="$file" '$2 == f && $1 == "only" { print $3 }' "$plan")"
+    if awk -F'\t' -v f="$file" '$2 == f && $1 == "skip" { found = 1 } END { exit !found }' "$plan"; then
+      mode=skip
+    elif [ -n "$names" ]; then
+      mode=only
+    fi
+  fi
+
+  if [ "$mode" = skip ]; then
+    echo "bats timing: skip $file (passed in the previous attempt)"
+    record 'pass\t%s\n' "$file"
+    continue
+  fi
+
+  filter_args=()
+  if [ "$mode" = only ]; then
+    want="$(printf '%s\n' "$names" | grep -c .)"
+    re=""
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      re="${re:+$re|}$(escape_re "$n")"
+    done <<< "$names"
+    have="$(bats --count --filter "^($re)\$" "$file" </dev/null 2>/dev/null)" || have=0
+    case "$have" in ''|*[!0-9]*) have=0 ;; esac
+    if [ "$have" -ge "$want" ]; then
+      filter_args=(--filter "^($re)\$")
+      echo "bats timing: rerun $want failed test(s) of $file"
+    else
+      echo "bats timing: $file: filter selects $have of $want named test(s); running the whole file"
+    fi
+  fi
+
+  # The TAP report is optional evidence. If no private temp dir can be made, run
+  # without it; a failure is then recorded as a whole-file failure.
+  repdir=""
+  if [ -n "$results" ]; then
+    repdir="$(mktemp -d 2>/dev/null)" || repdir=""
+    [ -n "$repdir" ] && [ -d "$repdir" ] || repdir=""
+  fi
+  if [ -n "$repdir" ]; then
+    bats --print-output-on-failure --report-formatter tap --output "$repdir" \
+      ${filter_args[@]+"${filter_args[@]}"} "$file" </dev/null
+  else
+    bats --print-output-on-failure \
+      ${filter_args[@]+"${filter_args[@]}"} "$file" </dev/null
+  fi
   status=$?
+
+  if [ -n "$results" ]; then
+    if [ "$status" -eq 0 ]; then
+      record 'pass\t%s\n' "$file"
+    else
+      failed=""
+      [ -z "$repdir" ] || failed="$(failed_names "$repdir/report.tap")"
+      if [ -z "$repdir" ] || ! tap_complete "$repdir/report.tap" || [ -z "$failed" ] || printf '%s\n' "$failed" | grep -qE '^(setup_file|teardown_file|setup_suite|teardown_suite)'; then
+        record 'failfile\t%s\n' "$file"
+      else
+        while IFS= read -r n; do
+          [ -n "$n" ] || continue
+          case "$n" in *$'\t'*) record 'failfile\t%s\n' "$file"; continue ;; esac
+          record 'fail\t%s\t%s\n' "$file" "$n"
+        done <<< "$failed"
+      fi
+    fi
+  fi
+  if [ -n "$repdir" ]; then
+    rm -f -- "$repdir/report.tap"
+    rmdir -- "$repdir" 2>/dev/null || true
+  fi
 
   ended_epoch="$(date -u +%s)"
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

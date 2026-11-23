@@ -490,6 +490,10 @@ jobs:
     # claiming a runner to run a no-op checkout+skip.
     if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: ${{ matrix.os }}
+    # `actions: read` lets a rerun find the earlier attempt's results record (below).
+    permissions:
+      contents: read
+      actions: read
     # NOT "a timeout is a genuine hang" (#848): a cancellation here is a wall-
     # clock cap being reached, and a shard that is still passing tests right up
     # to the cap looks identical to one that is actually stuck. #857 hit this
@@ -578,8 +582,48 @@ jobs:
             echo "::notice title=bats files skipped::$skipped test file(s) skipped because nothing they read changed; this shard runs $(grep -c . shard-files.txt || true)"
           fi
 
+      # A rerun (run_attempt > 1) runs only what the earlier attempt of THIS shard
+      # did not pass: files recorded as passed are skipped, files with named
+      # failures run just those tests, everything else runs whole. The record is
+      # the bats-results artifact each attempt uploads. No record, an unreadable
+      # one, or any error here means the whole shard runs: this step can only
+      # remove work from a file the record positively says passed.
+      - name: Plan the rerun from the earlier attempt
+        id: plan
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHARD: ${{ matrix.shard }}
+          MATRIX_OS: ${{ matrix.os }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          rm -f "$RUNNER_TEMP/bats-plan.tsv" "$RUNNER_TEMP/bats-prior.tsv"
+          if [ "$ATTEMPT" -gt 1 ] && [ -s shard-files.txt ]; then
+            .github/scripts/fetch-prior-bats-results.sh "$MATRIX_OS" "$SHARD" "$ATTEMPT" "$RUNNER_TEMP/bats-prior.tsv"
+            if [ -s "$RUNNER_TEMP/bats-prior.tsv" ]; then
+              if .github/scripts/bats-rerun-plan.sh shard-files.txt "$RUNNER_TEMP/bats-prior.tsv" > "$RUNNER_TEMP/bats-plan.tsv.new"; then
+                mv "$RUNNER_TEMP/bats-plan.tsv.new" "$RUNNER_TEMP/bats-plan.tsv"
+                skip="$(awk -F'\t' '$1 == "skip"' "$RUNNER_TEMP/bats-plan.tsv" | grep -c .)"
+                only="$(awk -F'\t' '$1 == "only" { print $2 }' "$RUNNER_TEMP/bats-plan.tsv" | sort -u | grep -c .)"
+                all="$(awk -F'\t' '$1 == "all"' "$RUNNER_TEMP/bats-plan.tsv" | grep -c .)"
+                echo "::notice title=bats rerun::attempt $ATTEMPT: $skip file(s) passed before and are skipped, $only file(s) rerun only their failed tests, $all file(s) run whole"
+                if [ "$all" -eq 0 ] && [ "$only" -eq 0 ]; then
+                  echo "all_skip=true" >> "$GITHUB_OUTPUT"
+                fi
+              else
+                echo "::notice title=bats rerun::attempt $ATTEMPT: could not build a rerun plan; the whole shard runs"
+                rm -f "$RUNNER_TEMP/bats-plan.tsv.new" "$RUNNER_TEMP/bats-plan.tsv"
+              fi
+            else
+              echo "::notice title=bats rerun::attempt $ATTEMPT: no earlier results for this shard; the whole shard runs"
+            fi
+          fi
+          exit 0
+
       - name: Ensure sqlite3 is available (Linux)
-        if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
       # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
@@ -587,14 +631,14 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
+        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
         run: |
           bash --version | head -1
           sqlite3 --version
@@ -607,7 +651,7 @@ jobs:
       # measuring. It closes fds 3 and 4 for the same reason, and gives itself a
       # hard lifetime so it cannot outlive the job it is watching.
       - name: Start hang sampler
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
         continue-on-error: true
         run: |
           set +e
@@ -648,8 +692,14 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
         env:
           SHARD: ${{ matrix.shard }}
+          AGMSG_BATS_RESULTS: ${{ runner.temp }}/bats-results.tsv
         run: |
           set +e
+          # The plan (rerun only) is read by the runner; absent on a first attempt
+          # and whenever planning failed, which runs every file.
+          if [ -s "$RUNNER_TEMP/bats-plan.tsv" ]; then
+            export AGMSG_BATS_PLAN="$RUNNER_TEMP/bats-plan.tsv"
+          fi
           if [ ! -s shard-files.txt ]; then
             echo "this shard has no test files left after the skips"
             : > "$RUNNER_TEMP/bats-done"
@@ -728,6 +778,19 @@ jobs:
           path: ${{ runner.temp }}/hang-samples.txt
           if-no-files-found: ignore
           retention-days: 3
+
+      # What this attempt saw per file, for the next attempt of this shard. The
+      # attempt number is in the name because a rerun cannot re-upload a name an
+      # earlier attempt of the same run already used.
+      - name: Upload bats results (for a rerun)
+        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-results-${{ matrix.os }}-${{ matrix.shard }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bats-results.tsv
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload bats timings
         if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
