@@ -24,7 +24,10 @@ rulefile_apply() {
   case "$mode" in
     turn|both)
       mkdir -p "$(dirname "$rule_file")"
-      cat > "$rule_file" <<EOF
+      if [ "$type" = antigravity ]; then
+        printf '%s\n' '---' 'trigger: always_on' '---' '' > "$rule_file"
+      fi
+      cat >> "$rule_file" <<EOF
 # agmsg Integration Rule
 
 ## PostToolUse

@@ -2885,6 +2885,48 @@ JSON
   [ "$count" -eq 1 ]
 }
 
+@test "antigravity turn rules start with always_on trigger frontmatter" {
+  run bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local header
+  header="$(head -n 5 "$TEST_PROJECT/.agent/rules/agmsg.md")"
+  [ "$header" = $'---\ntrigger: always_on\n---\n\n# agmsg Integration Rule' ]
+  # Other rule-file consumers retain their own formats.
+  bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
+  [ "$(head -n 1 "$TEST_PROJECT/.agent/rules/agmsg.md")" = '# agmsg Integration Rule' ]
+}
+
+@test "antigravity monitor migration accepts the legacy turn rule without frontmatter" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  local file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  sed '1,4d' "$file" > "$TEST_PROJECT/legacy-rule"
+  cp "$TEST_PROJECT/legacy-rule" "$file"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$file"
+}
+
+@test "antigravity monitor migration accepts the manually prepended trigger workaround" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  local file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  sed '1,4d' "$file" > "$TEST_PROJECT/legacy-rule"
+  { printf '%s\n' '---' 'trigger: always_on' '---' ''; cat "$TEST_PROJECT/legacy-rule"; } > "$file"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$file"
+}
+
+@test "antigravity monitor migration preserves custom rules with trigger frontmatter" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  local file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  printf '\nCustom project guidance.\n' >> "$file"
+  cp "$file" "$TEST_PROJECT/custom-rule"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  grep -qF 'existing rule file is not in agmsg format' <<<"$output"
+  cmp "$file" "$TEST_PROJECT/custom-rule"
+}
+
 @test "antigravity supports off mode: removes rule file" {
   bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
