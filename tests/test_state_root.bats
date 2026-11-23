@@ -51,7 +51,6 @@ demote() {
     command rm "$SK/$p"
     command mv "$ST/$p" "$SK/$p"
   done
-  command rm "$ST/.owner"
   command rmdir "$ST"
   command rm -f "$SK/.agmsg" && : > "$SK/.agmsg"
 }
@@ -580,19 +579,6 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   grep -qF -- "looks like a copy of $SK and shares its state" <<<"$output"
 }
 
-@test "a state root made for another install is never shared: the refusal names the owner, nothing moves" {
-  inst
-  # a second install whose name maps to the same root
-  mkdir -p "$FAKE_HOME/.agents/skills/other"
-  : > "$FAKE_HOME/.agents/skills/other/.agmsg"
-  mkdir -p "$FAKE_HOME/.agents/skills/other/teams"
-  source "$REPO_ROOT/scripts/lib/state-root.sh"
-  run env HOME="$FAKE_HOME" bash -c "source '$REPO_ROOT/scripts/lib/state-root.sh'; agmsg_state_preflight '$FAKE_HOME/.agents/skills/other' '$ST'"
-  [ "$status" -eq 1 ]
-  grep -qF -- "state of 'other' stays in $FAKE_HOME/.agents/skills/other: $ST belongs to $SK" <<<"$output"
-  [ -d "$FAKE_HOME/.agents/skills/other/teams" ] && [ ! -L "$FAKE_HOME/.agents/skills/other/teams" ]
-}
-
 @test "an install outside ~/.agents/skills gets its own name: directory name plus a hash of its path" {
   source "$REPO_ROOT/scripts/lib/state-root.sh"
   local a b
@@ -637,9 +623,8 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   ! grep -q '/\.agmsg/agmsg-second' "$FAKE_HOME/.codex/config.toml"
 }
 
-@test "a hand-made layout (links to the right root, no .owner, bare marker) is adopted: .owner and marker written, nothing moved or stopped" {
+@test "a hand-made layout (links to the right root, bare marker) gets its marker written: nothing moved or stopped, and no .owner" {
   inst
-  command rm "$ST/.owner"
   : > "$SK/.agmsg"
   echo keep > "$ST/db/keepme"
   local before after
@@ -647,21 +632,11 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   run inst --update
   [ "$status" -eq 0 ]
   refute grep -qF -- "moving the state" <<<"$output"
-  [ "$(cat "$ST/.owner")" = "$SK" ]
+  [ ! -e "$ST/.owner" ]
   [ "$(sed -n 's/^skill=//p' "$SK/.agmsg")" = "$SK" ]
   [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = "$ST" ]
   [ "$(ls -i "$ST/db/keepme")" = "$before" ]
   [ "$(readlink "$SK/db")" = "$ST/db" ]
-}
-
-@test "a hand-made layout whose root belongs to another existing install is refused, not adopted" {
-  inst
-  mkdir -p "$FAKE_HOME/.agents/skills/elsewhere"
-  printf '%s\n' "$FAKE_HOME/.agents/skills/elsewhere" > "$ST/.owner"
-  run inst --update
-  [ "$status" -eq 0 ]
-  grep -qF -- "belongs to $FAKE_HOME/.agents/skills/elsewhere" <<<"$output"
-  [ "$(cat "$ST/.owner")" = "$FAKE_HOME/.agents/skills/elsewhere" ]
 }
 
 @test "--cmd config is a stated install error; nothing is created" {
@@ -687,6 +662,52 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -L "$SK/db" ]
 }
 
+@test "the marker's state= is computed from the state base and the install name, and is in-place while run/ links elsewhere" {
+  inst
+  [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = "$ST" ]
+  command rm "$SK/run"
+  mkdir -p "$FAKE_HOME/elsewhere/run"
+  ln -s "$FAKE_HOME/elsewhere/run" "$SK/run"
+  source "$REPO_ROOT/scripts/lib/state-root.sh"
+  agmsg_state_marker_write "$SK" "$FAKE_HOME/.agents"
+  [ "$(sed -n 's/^state=//p' "$SK/.agmsg")" = "in-place" ]
+  [ -n "$(sed -n 's/^reason=run links to //p' "$SK/.agmsg")" ]
+}
+
+@test "uninstall removes the state the record names and never follows a link that points elsewhere" {
+  inst
+  mkdir -p "$FAKE_HOME/elsewhere/run" "$FAKE_HOME/elsewhere/teams/t"
+  printf 'keep\n' > "$FAKE_HOME/elsewhere/run/sentinel"
+  printf 'keep\n' > "$FAKE_HOME/elsewhere/teams/t/data"
+  mkdir -p "$ST/teams/t"
+  printf 'gone\n' > "$ST/teams/t/data"
+  command rm "$SK/run" "$SK/teams"
+  ln -s "$FAKE_HOME/elsewhere/run" "$SK/run"
+  ln -s "$FAKE_HOME/elsewhere/teams" "$SK/teams"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "does not link into the state $ST: that link's target is kept" <<<"$output"
+  [ ! -e "$ST/teams" ]
+  [ -f "$FAKE_HOME/elsewhere/run/sentinel" ]
+  [ -f "$FAKE_HOME/elsewhere/teams/t/data" ]
+  [ ! -L "$SK/run" ] && [ ! -L "$SK/teams" ]
+}
+
+@test "uninstalling a copy keeps the original's db, teams and run, and says the state belongs to the original" {
+  inst
+  mkdir -p "$ST/teams/t"
+  printf 'keep\n' > "$ST/teams/t/data"
+  printf 'keep\n' > "$ST/run/original-run-file"
+  command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
+  run env HOME="$FAKE_HOME" bash "$FAKE_HOME/.agents/skills/agmsg-copy/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- "belongs to $SK" <<<"$output"
+  [ -f "$ST/teams/t/data" ]
+  [ -f "$ST/run/original-run-file" ]
+  [ -d "$ST/db" ]
+  [ -L "$SK/db" ]
+}
+
 @test "uninstalling a copy with --keep-data leaves the original's state alone too" {
   inst
   printf 'keep\n' > "$ST/.trash/backup"
@@ -696,24 +717,23 @@ scan_uninstall() {   # <config.toml> <directory of the install>
   [ -f "$ST/.trash/backup" ]
 }
 
-@test "updating a copy gives it its own state and leaves the original's backups, marker, owner and links alone" {
+@test "updating a copy gives it its own state and leaves the original's backups, marker and links alone" {
   inst
   printf 'keep\n' > "$ST/.trash/original-backup"
   printf 'keep\n' > "$ST/run/original-run-file"
   command cp -R "$SK" "$FAKE_HOME/.agents/skills/agmsg-copy"
-  local before_marker before_owner
+  local before_marker
   before_marker="$(<"$SK/.agmsg")"
-  before_owner="$(<"$ST/.owner")"
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd agmsg-copy
   [ "$status" -eq 0 ]
   grep -qF -- "was linked into the state of $SK; this install now has its own" <<<"$output"
   [ "$(<"$SK/.agmsg")" = "$before_marker" ]
-  [ "$(<"$ST/.owner")" = "$before_owner" ]
   [ -f "$ST/.trash/original-backup" ]
   [ -f "$ST/run/original-run-file" ]
   [ "$(readlink "$SK/run")" = "$ST/run" ]
   [ "$(readlink "$FAKE_HOME/.agents/skills/agmsg-copy/run")" = "$FAKE_HOME/.agmsg/agmsg-copy/run" ]
-  [ "$(<"$FAKE_HOME/.agmsg/agmsg-copy/.owner")" = "$FAKE_HOME/.agents/skills/agmsg-copy" ]
+  [ ! -e "$FAKE_HOME/.agmsg/agmsg-copy/.owner" ]
+  [ "$(sed -n 's/^state=//p' "$FAKE_HOME/.agents/skills/agmsg-copy/.agmsg")" = "$FAKE_HOME/.agmsg/agmsg-copy" ]
 }
 
 @test "agmsgd state: only one 'none' row is stopped; unreadable, no row, several rows and other values are unknown" {
