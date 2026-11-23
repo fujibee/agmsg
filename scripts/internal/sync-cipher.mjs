@@ -2,7 +2,7 @@
 
 import { createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 // Namespace import, not `{ tmpdir, availableParallelism }`: availableParallelism
 // only exists from Node 18.14, and a missing NAMED export is a link error that
 // would break every seal, not just the batch path. Looked up defensively below.
@@ -561,14 +561,83 @@ function runAge(args, input) {
   return result;
 }
 
-function runAgeWithIdentity(ageFile, identityBytes) {
-  const scratch = mkdtempSync(join(nodeOs.tmpdir(), "agmsg-age-open."));
-  const ciphertextPath = join(scratch, "message.age");
+// One scratch directory for every decryption in this process, instead of a
+// mkdtemp + rmdir per message. Each ciphertext is a file of its own inside it
+// (age reads the identity on stdin, so the ciphertext has to be a path), removed
+// as soon as its decryption ends; the directory goes when the process does.
+let decryptScratch = null;
+function decryptScratchDir() {
+  if (decryptScratch) return decryptScratch;
+  decryptScratch = mkdtempSync(join(nodeOs.tmpdir(), "agmsg-age-open."));
+  process.once("exit", () => {
+    try { rmSync(decryptScratch, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+  return decryptScratch;
+}
+let decryptFileCounter = 0;
+
+// How many age decryptions may run at once: half the cores, at most four, at
+// least one, so a bulk unlock leaves the machine responsive.
+// AGMSG_AGE_DECRYPT_JOBS overrides it (1 = one at a time, the old behaviour).
+export function decryptConcurrency(cores = hostParallelism(), env = process.env) {
+  const forced = Number.parseInt(env.AGMSG_AGE_DECRYPT_JOBS ?? "", 10);
+  if (Number.isInteger(forced) && forced >= 1) return Math.min(forced, 16);
+  return Math.max(1, Math.min(4, Math.floor(cores / 2)));
+}
+
+let decryptActive = 0;
+const decryptWaiters = [];
+async function decryptSlot() {
+  if (decryptActive >= decryptConcurrency()) {
+    await new Promise((resolve) => decryptWaiters.push(resolve));
+  } else {
+    decryptActive += 1;
+  }
+}
+function decryptSlotDone() {
+  const next = decryptWaiters.shift();
+  if (next) next(); else decryptActive -= 1;
+}
+
+// Same result shape as spawnSync (status, stdout, stderr, error), run without
+// blocking so several can be in flight, at low priority so they yield to the
+// user's own work.
+function runAgeAsync(args, input) {
+  const age = process.env.AGMSG_AGE_BIN || "age";
+  return new Promise((resolve, reject) => {
+    const child = spawn(age, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const out = []; const err = []; let size = 0; let failed = null;
+    try { nodeOs.setPriority(child.pid, 10); } catch { /* priority is a courtesy */ }
+    child.stdout.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) { failed ??= new Error("age output exceeds maxBuffer"); child.kill(); } else out.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => { if (err.length < 64) err.push(chunk); });
+    child.on("error", (error) => { failed ??= error; });
+    child.stdin.on("error", () => { /* age may exit before reading all of it */ });
+    child.on("close", (status) => {
+      if (failed) {
+        if (failed.code === "ENOENT") {
+          reject(new CipherStateError("unsupported_cipher",
+            `age executable "${age}" was not found on PATH (set AGMSG_AGE_BIN to its path)`));
+        } else reject(failed);
+        return;
+      }
+      resolve({ status, stdout: Buffer.concat(out), stderr: Buffer.concat(err) });
+    });
+    child.stdin.end(input);
+  });
+}
+
+async function runAgeWithIdentity(ageFile, identityBytes) {
+  const ciphertextPath = join(decryptScratchDir(), `m${decryptFileCounter += 1}.age`);
+  writeFileSync(ciphertextPath, ageFile, { mode: 0o600, flag: "wx" });
+  await decryptSlot();
   try {
-    writeFileSync(ciphertextPath, ageFile, { mode: 0o600, flag: "wx" });
-    return runAge(["--decrypt", "--identity", "-", ciphertextPath], identityBytes);
+    return await runAgeAsync(["--decrypt", "--identity", "-", ciphertextPath], identityBytes);
   } finally {
-    rmSync(scratch, { recursive: true });
+    decryptSlotDone();
+    rmSync(ciphertextPath, { force: true });
   }
 }
 
@@ -834,7 +903,7 @@ async function openAge({ envelope, protocol_version: protocolVersion, team_id: t
   if (validateAgeHeader(ageFile).x25519StanzaCount !== expectedRecipients.length) {
     authenticationFailed("age recipient stanza count differs from the manifest");
   }
-  const result = runAgeWithIdentity(ageFile, identity.bytes);
+  const result = await runAgeWithIdentity(ageFile, identity.bytes);
   if (result.status !== 0) authenticationFailed("age decryption failed");
   const bytes = result.stdout;
   if (bytes.length < 24 || !bytes.subarray(0, 16).equals(MAGIC)) authenticationFailed("age frame magic is invalid");

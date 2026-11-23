@@ -644,3 +644,14 @@ test("body_hex is a local form, not a wire form", async () => {
   assert.throws(() => sealEnvelope({ ...bodyBase,
     projection: bodyProjection({ body_b64: Buffer.from([0xff]).toString("base64") }) }));
 });
+
+test("decryptConcurrency: half the cores, at most four, at least one; an override wins", async () => {
+  const { decryptConcurrency } = await import("../scripts/internal/sync-cipher.mjs");
+  assert.equal(decryptConcurrency(1, {}), 1);
+  assert.equal(decryptConcurrency(2, {}), 1);
+  assert.equal(decryptConcurrency(4, {}), 2);
+  assert.equal(decryptConcurrency(8, {}), 4);
+  assert.equal(decryptConcurrency(64, {}), 4);
+  assert.equal(decryptConcurrency(8, { AGMSG_AGE_DECRYPT_JOBS: "1" }), 1);
+  assert.equal(decryptConcurrency(8, { AGMSG_AGE_DECRYPT_JOBS: "x" }), 4);
+});
