@@ -49,6 +49,18 @@ escape_re() { printf '%s' "$1" | sed -e 's#[][\\.^$*+?(){}|/-]#\\&#g'; }
 
 record() { [ -z "$results" ] || printf '%s\n' "$1" >> "$results"; }
 
+# A TAP report is complete only when it has a `1..N` plan, exactly N result lines,
+# and no bail-out. Anything else (the run was killed, timed out, or bats died
+# part-way) means tests may not have run at all, so the failure names it lists
+# are not the whole picture.
+tap_complete() {
+  awk '
+    /^Bail out!/ { bad = 1 }
+    /^1\.\.[0-9]+$/ { split($0, p, "\\.\\."); plan = p[2] + 0; have_plan = 1; next }
+    /^(not ok|ok) [0-9]+( |$)/ { n++ }
+    END { exit !(have_plan && !bad && n == plan) }' "$1" 2>/dev/null
+}
+
 # Failed test names of a TAP report, one per line.
 failed_names() { grep -E '^not ok [0-9]+ ' "$1" 2>/dev/null | sed -E 's/^not ok [0-9]+ //'; }
 
@@ -131,7 +143,7 @@ while IFS= read -r file <&3; do
       record "$(printf 'pass\t%s' "$file")"
     else
       failed="$(failed_names "$repdir/report.tap")"
-      if [ -z "$failed" ] || printf '%s\n' "$failed" | grep -qE '^(setup_file|teardown_file|setup_suite|teardown_suite)'; then
+      if ! tap_complete "$repdir/report.tap" || [ -z "$failed" ] || printf '%s\n' "$failed" | grep -qE '^(setup_file|teardown_file|setup_suite|teardown_suite)'; then
         record "$(printf 'failfile\t%s' "$file")"
       else
         while IFS= read -r n; do

@@ -131,6 +131,44 @@ FIX
   [ "$(cat "$W/r")" = "$(printf 'failfile\t%s' "$W/s.bats")" ]
 }
 
+# A report that ends early (killed, timed out, bailed out) lists only the failures
+# it reached; the tests it never ran must not be lost by narrowing the next attempt.
+stub_bats_with_report() {
+  mkdir -p "$W/bin"
+  cat > "$W/bin/bats" <<STUB
+#!/usr/bin/env bash
+while [ "\$#" -gt 0 ]; do [ "\$1" = --output ] && out="\$2"; shift; done
+printf '%s' "$1" > "\$out/report.tap"
+exit $2
+STUB
+  chmod +x "$W/bin/bats"
+}
+
+@test "runner: a truncated TAP report (plan 1..2, one result) is a whole-file failure" {
+  printf 'x.bats\n' > "$W/m"
+  stub_bats_with_report $'1..2\nnot ok 1 first\n' 124
+  PATH="$W/bin:$PATH" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$status" -eq 124 ]
+  [ "$(cat "$W/r")" = "$(printf 'failfile\tx.bats')" ]
+}
+
+@test "runner: a report with no plan line, or a bail-out, is a whole-file failure" {
+  printf 'x.bats\n' > "$W/m"
+  stub_bats_with_report $'not ok 1 first\n' 1
+  PATH="$W/bin:$PATH" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$(cat "$W/r")" = "$(printf 'failfile\tx.bats')" ]
+  stub_bats_with_report $'1..2\nnot ok 1 first\nBail out! stop\nnot ok 2 second\n' 1
+  PATH="$W/bin:$PATH" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$(cat "$W/r")" = "$(printf 'failfile\tx.bats')" ]
+}
+
+@test "runner: a complete report still records the named failure" {
+  printf 'x.bats\n' > "$W/m"
+  stub_bats_with_report $'1..2\nnot ok 1 first\nok 2 second\n' 1
+  PATH="$W/bin:$PATH" AGMSG_BATS_RESULTS="$W/r" run "$TIMED" "$W/m" "$W/t"
+  [ "$(cat "$W/r")" = "$(printf 'fail\tx.bats\tfirst')" ]
+}
+
 @test "runner: without the variables the behaviour is unchanged and no record is written" {
   make_fixtures
   : > "$FLAG"
