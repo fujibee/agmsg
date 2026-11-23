@@ -214,7 +214,7 @@ agmsg_sync_autostart() {
     # up here rather than left as a new kind of leaked empty directory. A
     # no-op either way if the child got here first and already removed it.
     _agmsg_dir_drop "$tmp.gaveup" 2>/dev/null
-    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'already running'; then
+    if [ "$rc" -eq 0 ] && case "$out" in *"already running"*) true ;; *) false ;; esac; then
       continue
     fi
     if [ "$rc" -eq 0 ]; then
