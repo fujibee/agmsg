@@ -142,6 +142,24 @@ agmsg_storage_dir() {
 
 # Echo the full path to a team's message store, in a form sqlite3 can open.
 #
+# Echo <dir> with every symlink in it resolved (the physical path). A directory
+# that does not exist, or cannot be entered, is echoed unchanged.
+#
+# Codex refuses a writable workspace root that has a symlink component
+# ("symlinked writable roots are not supported"), and the shell it would have
+# started for the seat is refused with it. db/, teams/ and run/ under the skill
+# directory are links into the state root, so the roots handed to the Codex
+# bridge name the directories they point to, the same as writable_roots in
+# Codex's config.toml (agmsg_codex_writable_paths).
+agmsg_real_dir() {
+  local dir="$1" real
+  if [ -d "$dir" ] && real="$(cd -P "$dir" 2>/dev/null && pwd -P)" && [ -n "$real" ]; then
+    printf '%s\n' "$real"
+  else
+    printf '%s\n' "$dir"
+  fi
+}
+
 # Echo the full path to a team's message store, in a form sqlite3 can open.
 #
 # WHICH store depends on the team's partition driver, and teams choose separately:

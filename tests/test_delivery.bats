@@ -2998,6 +2998,40 @@ EOF
   grep -q -- "--inline-inbox" "$log"
 }
 
+# Codex 0.171 refuses a writable root with a symlink component (#2013).
+@test "session-start.sh for codex passes workspace roots as physical paths (#2013)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-123 "$TEST_PROJECT" codex
+  local fake="$TEST_SKILL_DIR/fake-codex-bridge"
+  local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$AGMSG_TEST_LOG"\n' >"$fake"
+  chmod +x "$fake"
+  mkdir -p "$TEST_SKILL_DIR/real-store"
+  ln -s "$TEST_SKILL_DIR/real-store" "$TEST_SKILL_DIR/store-link"
+  mv "$TEST_SKILL_DIR/teams" "$TEST_SKILL_DIR/teams-real"
+  ln -s "$TEST_SKILL_DIR/teams-real" "$TEST_SKILL_DIR/teams"
+
+  AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/store-link" \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
+  AGMSG_CODEX_BRIDGE_CMD="$fake" \
+  AGMSG_TEST_LOG="$log" \
+  CODEX_THREAD_ID="thread-123" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  for _ in {1..20}; do
+    [ -f "$log" ] && break
+    sleep 0.1
+  done
+
+  local real
+  real="$(cd -P "$TEST_SKILL_DIR" && pwd -P)"
+  [ -f "$log" ]
+  grep -q -- "--workspace-root $real/real-store " "$log"
+  grep -q -- "--workspace-root $real/teams-real " "$log"
+  [ -z "$(grep -F -e "store-link" -e "--workspace-root $TEST_SKILL_DIR/teams " "$log")" ]
+}
+
 @test "session-start.sh for codex writes the bridge request from a seat record alone (#1056)" {
   # No AGMSG_CODEX_BRIDGE_APP_SERVER, no unix:// token on the agent's cmdline
   # (AGMSG_AGENT_PID is "" per setup()), and no .sock file -- the first three
