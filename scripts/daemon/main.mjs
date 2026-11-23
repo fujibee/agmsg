@@ -16,6 +16,7 @@ import { createControlServer } from "./control.mjs";
 import { captureWatchState, watchForDrift } from "./lifecycle.mjs";
 import { logLine, deliveryEvent, recordPollTimeout } from "./log.mjs";
 import { classify } from "./status.mjs";
+import { writeHeartbeat, clearHeartbeat } from './heartbeat.mjs';
 import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
 import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
@@ -161,6 +162,8 @@ export async function pollCycle(db, installRoot, context, channelHooks) {
 // falls through to its generic "stopped" text).
 export async function gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason, { timeoutMs = STOP_DEADLINE_MS } = {}) {
   markStopping(db, gen);
+  try { clearHeartbeat(db, installRoot, gen); }
+  catch (error) { logLine(installRoot, `heartbeat: could not remove stopped owner's record: ${error.message}`); }
   for (const hook of channelHooks) {
     try {
       await withDeadline(() => hook.stop(), { timeoutMs, signal: null, reason: 'channel_stop_deadline' });
@@ -197,6 +200,11 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   let gen;
   let stopping = false;
   let timer;
+  let heartbeatSequence = 0;
+  const publishHeartbeat = () => {
+    try { writeHeartbeat(db, installRoot, { gen, expectedOpGen }, ++heartbeatSequence); }
+    catch (error) { logLine(installRoot, `heartbeat: could not record liveness: ${error.message}`); }
+  };
   const lifetime = new AbortController();
 
   async function doStop(reason) {
@@ -263,6 +271,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   }
   gen = started.gen;
   controlHandle = started.controlHandle;
+  publishHeartbeat();
   channelHooks.push(...(createChannels ? createChannels({ db, installRoot, expectedOpGen }) : [
     createCodexQueueChannel({ db, installRoot, expectedOpGen }),
     createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
@@ -276,6 +285,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   let polling = false;
   timer = setInterval(async () => {
     if (stopping) return;
+    publishHeartbeat();
     if (polling) {
       deliveryEvent(message => logLine(installRoot, message), { event: 'poll_skipped', channel: 'daemon', reason: 'previous_cycle_running' });
       return;

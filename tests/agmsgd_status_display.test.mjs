@@ -46,14 +46,14 @@ async function fakeDaemon(t, { root, db }, { codex = [], terminalPoke = [], grok
       c.on('data', (d) => { b += d; let i;
         while ((i = b.indexOf('\\n')) >= 0) { const msg = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); n += 1;
           if (msg.type === 'hello') c.write(JSON.stringify({ type: 'hello_ok' }) + '\\n');
-          else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true }) + '\\n'); c.end(); }
+          else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true, gen: 1 }) + '\\n'); c.end(); }
           else if (msg.type === 'seats' && mode !== 'silent') {
             c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: JSON.parse(rows) }, claude_code: { polled: true, seats: [] }, terminal_poke: { polled: true, seats: JSON.parse(tpRows) }, grok_queue: { polled: true, seats: JSON.parse(gqRows) } }) + '\\n'); c.end(); } } });
     }).listen(socket, () => console.log('up'));
   `, socket, mode, JSON.stringify(codex), JSON.stringify(terminalPoke), JSON.stringify(grokQueue)], { stdio: ['ignore', 'pipe', 'inherit'] });
   t.after(() => child.kill());
   await new Promise((resolve) => child.stdout.once('data', resolve));
-  db.prepare("UPDATE daemon_owner SET state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
+  db.prepare("UPDATE daemon_owner SET gen=1, state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
   db.prepare("UPDATE daemon_intent SET desired='on'").run();
   db.prepare("UPDATE meta SET node_path=?").run(process.execPath);
   return child;
