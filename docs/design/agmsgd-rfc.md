@@ -14,7 +14,7 @@ This is a large change, so the benefits come first. Each of these is a thing you
 
 1. **Messages stop getting lost.** Nothing is ever marked read until the agent actually fetches it. Today a broken or leftover watcher can consume messages that no one ever saw; after this change that failure is structurally impossible, and an untaken message stays visibly "delivered but unread" instead of vanishing.
 2. **Notifications stop eating your agent's context.** Today, monitor mode pushes the full message text into the session — spending the agent's context window whether it wanted the message now or not. After this change the agent gets a one-line notification (sender + subject) and decides for itself when to spend the context on the full text.
-3. **Codex works without the launch wrapper.** Real-time delivery to Codex no longer requires starting it through a wrapper — the single largest source of Codex bugs we have shipped. (The Codex desktop app is not covered in the first version; see the Codex section.)
+3. **Codex works without the launch wrapper.** Real-time delivery to Codex no longer requires starting it through a wrapper — the single largest source of Codex bugs we have shipped. The Codex desktop app is covered by the Codex queue channel using its recorded thread and profile (verified on macOS; see the Codex section).
 4. **One process instead of a fleet.** On one busy machine we counted roughly fifteen agmsg background processes (watchers, per-team sync, Codex helpers). They become one supervised daemon. When delivery misbehaves there is a single process to inspect.
 5. **One agent name across tools, and messages to groups.** Your agent keeps one identity whether it runs on Claude Code or Codex, and one message can address a group tag with each recipient's state tracked separately (today: impossible on both counts).
 6. **Groundwork for remote control.** The same machinery that executes `despawn` safely is what will later let you peek at a pane from your phone — with an explicit authorization model, not ad-hoc parsing.
@@ -296,7 +296,7 @@ Real-time delivery to Codex today requires launching it through a wrapper script
 
 Under this proposal, Codex delivery uses two official mechanisms and nothing else: its hooks (end of turn, and after each tool call while a turn runs) and, when it runs in a pane the terminal driver resolved, the same write into the pane that every other agent type receives. **Neither changes how Codex starts.** The one situation left uncovered is a Codex session with no pane — a bare terminal, or a headless worker — sitting idle: nothing fires a hook, and there is no pane to write to. Such a session receives at its next turn. Running it inside tmux, herdr or another supported pane manager makes it reachable while idle. For that uncovered case the old bridge remains available as an opt-in fallback, and we expect to retire even that once we can verify that recent Codex versions let an ordinarily-launched session be reached from outside.
 
-The **Codex desktop app** is not covered by the first version. Supporting it is on the roadmap.
+The **Codex desktop app** is covered by the implemented Codex queue channel. `actas` records its thread and `codex_home` (`~/.codex` in the app); agmsgd uses that destination to reach even an idle app conversation. Verified on macOS on 2026-11-23 with agmsg 1.8.2 and agmsgd running as a login service: app notices arrived 1–5 seconds after sending. This native channel supersedes the hook/pane-only proposal above for those sessions. Run `actas` again in a new chat to transfer delivery; without it, delivery stays with the old chat. The terminal CLI's monitor (legacy) bridge does not apply to the app.
 
 ## Compatibility and migration
 
@@ -337,13 +337,13 @@ Migration facts:
 - **Wire format:** the first version kept messages at four fixed fields and derived an id from the content. Instead, new messages carry a shared id, subject and summary as fields; clients from 1.3.1 on skip fields they do not know. No server change.
 - **Older clients:** the first version said an older client would refuse a whole page containing something new and stop. Measured on the real path: 1.3.0 and earlier set new rows aside one by one and keep going. Upgrading re-reads them.
 - **Channel choice** is made per registration from whether its pane resolved, not from whether a pane manager is present. A session whose location cannot be determined is not delivered to.
-- **Claude Code without a pane** receives through its Monitor's process output; there is no separate session socket.
+- **Claude Code without a pane:** the implemented native channel uses the session's cross-session socket, including Local sessions in the desktop Code tab; Monitor remains an alternative when direct delivery is unavailable (verified on macOS).
 - **Registration** happens at session start for every tool (Codex at its first turn), not through join / actas.
 - **A session with no identity** cannot use agmsg at all, rather than receiving nothing.
 - **Exclusivity** is per install, not per machine or per team.
 - **Despawn** by the daemon is graceful only; queued requests expire.
 - **Without the daemon**, Claude Code keeps a thin automatic delivery; the first version said none.
-- **The Codex desktop app** is out of the first version.
+- **The Codex desktop app** is covered by the implemented Codex queue channel, including idle conversations, using the thread and profile recorded by `actas` (verified on macOS).
 - **Release order:** the new store and the daemon ship together as 2.0.0, validated with release candidates, instead of the store first and the daemon later. 1.x gains `agmsg migrate --check` and a warning at join.
 - **Name folding** stops only on real ambiguity (two ids, or two live owners for one name); several registrations under one name are fine.
 - **New sections:** external tools, and seeing what the daemon is doing.

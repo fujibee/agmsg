@@ -207,7 +207,7 @@ To check in 2.0.0 release candidates: the switch on a copy of a real store (matc
 | Within an install, at most one session holds an identity | Overlap with another install or another machine is not prevented (diagnostics only) |
 | Sends and reads are accepted only with the current holder's token | Not while the groundwork is deactivated |
 | A session never has two channels chosen at once | Duplicates after a crash are within at-least-once |
-| Notices arrive (at-least-once) | The same notice can appear twice. Writing to a pane is no proof the model saw it. Only for the supported types and channels (the Codex desktop app is outside v1) |
+| Notices arrive (at-least-once) | The same notice can appear twice. Writing to a pane is no proof the model saw it. Only for the supported types and channels, including Codex desktop app queue delivery using its recorded thread and profile (verified on macOS) |
 | A notice does not mark anything read | — |
 | Text written to a pane never acts as terminal control or key input | This is kept at the level of form only. It cannot stop a subject from posing as an instruction inside the tag, or a model from following it. The tag does not prove the sender |
 | An external tool is never started twice for the same message | Right after an upgrade, while untraceable runs from the older version remain, it may run in parallel with another message to the same member (no upper bound on that period is promised). Messages that arrived before the switch are not run |
