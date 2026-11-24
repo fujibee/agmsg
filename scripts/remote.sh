@@ -884,10 +884,11 @@ _remote_registration_in_journal() {
           AND json_extract(e, '\$.remote_team_id') = '$(_agmsg_sqlesc "$team_id")') > 0
       AND (SELECT count(*) FROM remote) > 0
       AND NOT EXISTS (
-        SELECT 1 FROM remote
-         WHERE mid IS NULL OR mid NOT IN (
-           SELECT json_extract(e, '\$.member_id') FROM events
-            WHERE json_extract(e, '\$.type') = 'member_joined'));" 2>/dev/null)" || return 1
+        SELECT 1 FROM remote r
+         WHERE r.mid IS NULL OR NOT EXISTS (
+           SELECT 1 FROM events
+            WHERE json_extract(e, '\$.type') = 'member_joined'
+              AND json_extract(e, '\$.member_id') = r.mid));" 2>/dev/null)" || return 1
   [ "${verdict%$'\r'}" = 1 ]
 }
 

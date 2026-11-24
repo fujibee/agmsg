@@ -876,6 +876,24 @@ _journal_for_registration() {
   grep -Fq "roster is not this team's" <<<"$output"
 }
 
+@test "connect: a join entry with no member id does not vouch for an unknown server member (#2030)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id instance journal updated
+  team_id="$(jq -r '.team_id' "$cfg")"
+  instance="$(curl -sS -H 'Agmsg-Protocol-Version: 1' -H "Agmsg-Team-ID: $team_id" "$ENDPOINT/v1/capabilities" | jq -r '.server_instance_id')"
+  journal="$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+  # The sync is recorded, but the only join lacks a member id: in SQL a NULL in
+  # a NOT IN list makes the test unknown, which once let every member through.
+  printf '{"type":"roster_synced","server_seq":"1","server_instance_id":"%s","remote_team_id":"%s"}\n{"type":"member_joined","name":"x"}\n' "$instance" "$team_id" > "$journal"
+  updated="$(sqlite_mem "SELECT json_set(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.newcomer', json_object('member_id', '018f3f7e-9999-7000-8000-00000000beef'));")"
+  printf '%s' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -ne 0 ]
+  grep -Fq "roster is not this team's" <<<"$output"
+}
+
 @test "connect: the capability path never reaches the terminal" {
   # A hosted endpoint is `https://host/t/<token>` and that token IS the
   # capability -- read it off a terminal, a screen share or a pasted log and you
