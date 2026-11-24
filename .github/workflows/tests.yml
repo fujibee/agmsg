@@ -63,6 +63,11 @@ name: tests
 # itself.
 
 on:
+  # The full suite, daily on main at 12:00 UTC (04:00 PST / 05:00 PDT), as
+  # well as on the release pull request. A red daily run opens or updates an
+  # issue (the notify-daily-red job at the end).
+  schedule:
+    - cron: '0 12 * * *'
   push:
     branches: [main, 'integration/**']
   pull_request:
@@ -218,6 +223,9 @@ jobs:
       sync_changed: ${{ steps.detect.outputs.sync_changed }}
       contracts_needed: ${{ steps.detect.outputs.contracts_needed }}
       skill_only: ${{ steps.detect.outputs.skill_only }}
+      # true on the release pull request and the daily run: everything runs,
+      # macOS shards included.
+      full: ${{ steps.detect.outputs.full }}
       reuse_run: ${{ steps.reuse.outputs.reuse_run }}
       # Comma-separated tests/*.bats files this run does not need to run (empty:
       # run everything). From the diff on a pull_request, from the pull
@@ -233,15 +241,36 @@ jobs:
           ACTION: ${{ github.event.action }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" != "pull_request" ]; then
-            echo "Event is '$EVENT' (not pull_request) — running the full suite."
+          # Where the full suite runs: once, on the release pull request.
+          # A push (main, integration) runs only the fast checks; an ordinary
+          # pull request runs the fast checks plus the tests its changed files
+          # reach. A red full run on the release pull request is traced back
+          # to the pull request that caused it and fixed there.
+          if [ "$EVENT" = "schedule" ]; then
+            echo "Daily run — running the full suite."
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "app_changed=true" >> "$GITHUB_OUTPUT"
             echo "server_changed=true" >> "$GITHUB_OUTPUT"
             echo "sync_changed=true" >> "$GITHUB_OUTPUT"
             echo "contracts_needed=true" >> "$GITHUB_OUTPUT"
+            echo "skill_only=false" >> "$GITHUB_OUTPUT"
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "Event is '$EVENT' (not pull_request) — the full suite runs on the release pull request and daily, not here; skipping it."
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "app_changed=false" >> "$GITHUB_OUTPUT"
+            echo "server_changed=false" >> "$GITHUB_OUTPUT"
+            echo "sync_changed=false" >> "$GITHUB_OUTPUT"
+            echo "contracts_needed=false" >> "$GITHUB_OUTPUT"
+            echo "skill_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$ACTION" = "closed" ]; then
@@ -267,7 +296,94 @@ jobs:
             echo "contracts_needed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The release pull request: what cut-release.sh opens, a
+          # release/<tag> branch or a "release: <version>" title (a release
+          # cut from an integration branch keeps that branch's name). It runs
+          # everything, with no per-file selection or incremental base.
+          case "$PR_HEAD_REF" in release/*) is_release=true ;; *) is_release=false ;; esac
+          case "$PR_TITLE" in "release: "*) is_release=true ;; esac
+          if [ "$is_release" = true ]; then
+            echo "Release pull request ($PR_HEAD_REF) — running the full suite."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "app_changed=true" >> "$GITHUB_OUTPUT"
+            echo "server_changed=true" >> "$GITHUB_OUTPUT"
+            echo "sync_changed=true" >> "$GITHUB_OUTPUT"
+            echo "contracts_needed=true" >> "$GITHUB_OUTPUT"
+            echo "skill_only=false" >> "$GITHUB_OUTPUT"
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "bats_skip=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          # Incremental run on a new push to an open pull request: only what
+          # changed since the last head of this pull request whose whole run
+          # was green. Every other job reports green with its steps skipped,
+          # as for a docs-only diff. The first push (opened, reopened) and
+          # pushes to main run as before.
+          #
+          # The base: the newest successful run of this workflow for this
+          # pull request's branch (same repository only; a fork always runs
+          # in full) whose head is an ancestor of the new head. The changed
+          # files are that head..new head, plus old base..new base when main
+          # moved in between (the old base comes from the pr-base record that
+          # run uploaded). Any failure to find or read either -- API error, no
+          # such run, a head not in this history, a missing or malformed
+          # record -- keeps the full diff above, and says so.
+          if [ "${ACTION:-}" = synchronize ]; then
+            inc_reason=""
+            inc_changed=""
+            if [ "${PR_HEAD_REPO_ID:-}" != "${GITHUB_REPOSITORY_ID:-}" ]; then
+              inc_reason="pull request from another repository"
+            elif ! runs="$(curl -fsS --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/tests.yml/runs?event=pull_request&status=success&per_page=50&branch=$(jq -rn --arg b "$PR_HEAD_REF" '$b|@uri')")"; then
+              inc_reason="could not list earlier runs"
+            else
+              green_sha="" green_run=""
+              while read -r sha run_id; do
+                case "$sha" in *[!0-9a-f]*|'') continue ;; esac
+                case "$run_id" in *[!0-9]*|'') continue ;; esac
+                if git merge-base --is-ancestor "$sha" "$HEAD_SHA" 2>/dev/null; then
+                  green_sha="$sha" green_run="$run_id"
+                  break
+                fi
+              done < <(printf '%s' "$runs" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" --arg cur "$HEAD_SHA" \
+                '[.workflow_runs[]? | select(.head_repository.id == $repo and .head_sha != $cur and .conclusion == "success")]
+                 | sort_by(.created_at) | reverse | .[] | "\(.head_sha) \(.id)"' 2>/dev/null || true)
+              if [ -z "$green_sha" ]; then
+                inc_reason="no earlier all-green head of this pull request in this history"
+              else
+                old_base=""
+                if art="$(curl -fsS --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
+                      -H "Accept: application/vnd.github+json" \
+                      "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$green_run/artifacts?name=pr-base")" \
+                   && aid="$(printf '%s' "$art" | jq -r '[.artifacts[]? | select(.expired == false)][0].id // empty')" \
+                   && [ -n "$aid" ] \
+                   && curl -fsSL --max-time 60 -H "Authorization: Bearer $GH_TOKEN" \
+                      "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$aid/zip" -o "$RUNNER_TEMP/pr-base.zip" \
+                   && old_base="$(unzip -p "$RUNNER_TEMP/pr-base.zip" base.txt)"; then
+                  old_base="$(printf '%s' "$old_base" | tr -d '[:space:]')"
+                fi
+                case "$old_base" in
+                  ''|*[!0-9a-f]*) inc_reason="run $green_run has no readable pr-base record" ;;
+                  *)
+                    if [ "${#old_base}" != 40 ] || ! git cat-file -e "$old_base^{commit}" 2>/dev/null; then
+                      inc_reason="base $old_base recorded by run $green_run is not in this history"
+                    elif ! inc_changed="$( { git diff --name-only "$green_sha" "$HEAD_SHA" \
+                          && { [ "$old_base" = "$BASE_SHA" ] || git diff --name-only "$old_base" "$BASE_SHA"; }; } | LC_ALL=C sort -u)"; then
+                      inc_reason="could not diff against run $green_run"
+                    fi
+                    ;;
+                esac
+              fi
+            fi
+            if [ -z "$inc_reason" ]; then
+              echo "Incremental run: changes since head $green_sha (run $green_run, all green), base $old_base -> $BASE_SHA."
+              changed="$inc_changed"
+            else
+              echo "Incremental run not possible ($inc_reason); using the whole pull request diff."
+            fi
+          fi
           echo "Changed files:"
           echo "$changed"
           docs_only=true
@@ -365,7 +481,9 @@ jobs:
               # is never read), and a control (a deliberate `exit 42` appended
               # to cut-release.sh) reddened three of them.
               VERSION|package.json|.claude-plugin/plugin.json|cliff.toml) ;;
-              *) docs_only=false; contracts_needed=true ;;
+              # Only the contract jobs' own inputs (the sync/storage/server arms
+              # above) run them on a pull request; the daily run covers the rest.
+              *) docs_only=false ;;
             esac
           done <<< "$changed"
           # The skill test set: every bats file that names the skill text, a
@@ -404,6 +522,7 @@ jobs:
           echo "sync_changed=$sync_changed" >> "$GITHUB_OUTPUT"
           echo "contracts_needed=$contracts_needed" >> "$GITHUB_OUTPUT"
           echo "skill_only=$skill_only" >> "$GITHUB_OUTPUT"
+          echo "full=false" >> "$GITHUB_OUTPUT"
 
           # Test files whose inputs the diff does not touch. The table of
           # inputs is traced, not guessed (select-bats.mjs explains the
@@ -429,6 +548,23 @@ jobs:
             fi
           fi
           echo "bats_skip=$bats_skip" >> "$GITHUB_OUTPUT"
+
+      # This run's base, for the next push's incremental run (above).
+      - name: Record this run's base
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr-base"
+          printf '%s\n' "$BASE_SHA" > "$RUNNER_TEMP/pr-base/base.txt"
+      - name: Upload this run's base
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-base
+          path: ${{ runner.temp }}/pr-base/base.txt
+          retention-days: 14
+          overwrite: true
 
       # Whole-tree reuse, push only. A pull_request run tests GitHub's merge
       # ref: the PR head merged into the base as it was at that moment. When
@@ -593,6 +729,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Whether this shard runs the suite: not on a docs-only diff, and the
+      # macOS shards only on a full run (release pull request, daily).
+      - name: Decide whether this shard runs
+        id: gate
+        env:
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          FULL: ${{ needs.changes.outputs.full }}
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          run=true
+          if [ "$DOCS_ONLY" = true ]; then
+            run=false
+          elif [ "$MATRIX_OS" = macos-latest ] && [ "$FULL" != true ]; then
+            run=false
+            echo "macOS shard on an ordinary pull request: skipped; macOS runs on the release pull request and daily."
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
         run: |
@@ -608,7 +762,7 @@ jobs:
           echo "::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN — this shard ran 0 test files"
 
       - name: Compute this shard's test files
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         env:
           SHARD: ${{ matrix.shard }}
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
@@ -639,7 +793,7 @@ jobs:
       # remove work from a file the record positively says passed.
       - name: Plan the rerun from the earlier attempt
         id: plan
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -672,7 +826,7 @@ jobs:
           exit 0
 
       - name: Ensure sqlite3 is available (Linux)
-        if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
+        if: runner.os == 'Linux' && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
       # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
@@ -680,14 +834,14 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
+        if: (steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
+        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
         run: |
           bash --version | head -1
           sqlite3 --version
@@ -700,7 +854,7 @@ jobs:
       # measuring. It closes fds 3 and 4 for the same reason, and gives itself a
       # hard lifetime so it cannot outlive the job it is watching.
       - name: Start hang sampler
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
+        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
         continue-on-error: true
         run: |
           set +e
@@ -738,7 +892,7 @@ jobs:
           echo "sampler pid $!"
 
       - name: Run bats suite (this shard)
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         env:
           SHARD: ${{ matrix.shard }}
           AGMSG_BATS_RESULTS: ${{ runner.temp }}/bats-results.tsv
@@ -785,7 +939,7 @@ jobs:
       # pipelines for the same reason: it closes the pipe early and SIGPIPEs
       # whatever was writing.
       - name: Hang forensics
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         run: |
           set +e
@@ -819,7 +973,7 @@ jobs:
           exit 0
 
       - name: Upload hang samples
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -832,7 +986,7 @@ jobs:
       # attempt number is in the name because a rerun cannot re-upload a name an
       # earlier attempt of the same run already used.
       - name: Upload bats results (for a rerun)
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -842,7 +996,7 @@ jobs:
           retention-days: 7
 
       - name: Upload bats timings
-        if: always() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -1185,8 +1339,9 @@ jobs:
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Diff is documentation-only; skipping the Windows bats legs."
 
-      # Whether this leg runs: not on a docs-only diff, and on a skill-only
-      # diff only when one of its target files is in the skill test set.
+      # Whether this leg runs: not on a docs-only diff, and when files are
+      # skipped for this diff (skill set or per-file selection), only when one
+      # of its target files is selected.
       - name: Decide whether this leg runs
         id: leg
         env:
@@ -1198,12 +1353,12 @@ jobs:
           run=true
           if [ "$DOCS_ONLY" = true ]; then
             run=false
-          elif [ "$SKILL_ONLY" = true ]; then
+          elif [ -n "$BATS_SKIP" ]; then
             run=false
             for t in $TARGET; do
               case ",$BATS_SKIP," in *",$t,"*) ;; *) run=true ;; esac
             done
-            [ "$run" = true ] || echo "Skill-only diff: none of $TARGET is in the skill test set; skipping this leg."
+            [ "$run" = true ] || echo "None of $TARGET is selected for this diff; skipping this leg."
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
@@ -1676,3 +1831,31 @@ jobs:
       # "we check the shapes" and "nobody configured anything".
       - name: Check the shapes we publish (unshaped names are checked before push)
         run: AGMSG_PRIVATE_NAMES=none node scripts/check-private-names.mjs
+
+  # A red daily full run opens an issue, or comments on the open one, so it
+  # is seen without anyone watching the Actions tab. Pull request and push
+  # runs report on themselves as before.
+  notify-daily-red:
+    name: daily full run result
+    needs: [changes, bats-shard, bats, age-v1-contract, storage-jsonl, bats-windows, app-check, server-check, app-test-windows, enforced-assertions, errexit-status-reads, unguarded-env-reads, private-names]
+    if: ${{ always() && github.event_name == 'schedule' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the daily-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Daily full CI run failed"
+          body="The daily full run on main failed: $RUN_URL (commit $GITHUB_SHA). Find the pull request that caused it and fix it there; close this issue when the daily run is green again."
+          num="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$num" ]; then
+            gh issue comment "$num" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

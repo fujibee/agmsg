@@ -17,7 +17,7 @@ WORKFLOW="$ROOT/.github/workflows/tests.yml"
 _detect_script() {
   local script="$BATS_TEST_TMPDIR/detect.sh" start end
   start=$(grep -n 'changed=\$(git diff --name-only' "$WORKFLOW" | head -1 | cut -d: -f1)
-  end=$(grep -n '^      # Whole-tree reuse, push only' "$WORKFLOW" | head -1 | cut -d: -f1)
+  end=$(grep -n "^      # This run's base, for the next push" "$WORKFLOW" | head -1 | cut -d: -f1)
   [ -n "$start" ] && [ -n "$end" ] && [ "$end" -gt "$start" ]
   { echo 'set -euo pipefail'
     sed -n "${start},$((end - 1))p" "$WORKFLOW" \
@@ -84,6 +84,9 @@ EOF2
   _detect SKILL.md scripts/daemon.sh
   [ "$(_out skill_only)" = false ]
   [ "$(_out docs_only)" = false ]
+  # The contract jobs run on a pull request only for their own inputs.
+  [ "$(_out contracts_needed)" = false ]
+  _detect SKILL.md scripts/lib/storage.sh
   [ "$(_out contracts_needed)" = true ]
 }
 
@@ -125,11 +128,15 @@ _leg() {
   _out run
 }
 
-@test "ci-skill-set: a Windows leg runs on a skill-only diff only when a target is in the set" {
+@test "ci-skill-set: a Windows leg runs only when one of its targets is selected" {
   [ "$(_leg false true 'tests/test_a.bats,tests/test_b.bats' 'tests/test_install.bats')" = true ]
   [ "$(_leg false true 'tests/test_install.bats,tests/test_b.bats' 'tests/test_install.bats')" = false ]
   [ "$(_leg false true 'tests/test_codex_monitor.bats' 'tests/test_codex_monitor.bats tests/test_codex_bridge_launcher.bats')" = true ]
   [ "$(_leg false true 'tests/test_codex_monitor.bats,tests/test_codex_bridge_launcher.bats' 'tests/test_codex_monitor.bats tests/test_codex_bridge_launcher.bats')" = false ]
   [ "$(_leg true false '' 'tests/test_install.bats')" = false ]
-  [ "$(_leg false false 'tests/test_install.bats' 'tests/test_install.bats')" = true ]
+  # Per-file selection skips files too: the same membership rule applies.
+  [ "$(_leg false false 'tests/test_install.bats' 'tests/test_install.bats')" = false ]
+  [ "$(_leg false false 'tests/test_a.bats' 'tests/test_install.bats')" = true ]
+  # Nothing skipped (a full run): every leg runs.
+  [ "$(_leg false false '' 'tests/test_install.bats')" = true ]
 }
