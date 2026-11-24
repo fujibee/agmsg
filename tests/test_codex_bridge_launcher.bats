@@ -246,8 +246,30 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
 
-  grep -q -- "--workspace-root $AGMSG_STORAGE_PATH" "$CAPTURE"
+  # The root is handed over as its physical path (a symlinked tmp dir included).
+  grep -q -- "--workspace-root $(cd -P "$AGMSG_STORAGE_PATH" && pwd -P) " "$CAPTURE"
   ! grep -q -- "--workspace-root $TEST_SKILL_DIR/db" "$CAPTURE"
+}
+
+# Codex 0.171 refuses a writable root with a symlink component, and the seat's
+# shell with it (#2013). db/, teams/ and run/ are links into the state root.
+@test "launcher: workspace roots name the directories the state links point to (#2013)" {
+  local state="$TEST_SKILL_DIR/state"
+  put_record team alice rec-thread-1 "$PROJ" codex
+  mkdir -p "$state"
+  local part
+  for part in db teams run; do
+    mv "$SKILL_DIR/$part" "$state/$part"
+    ln -s "$state/$part" "$SKILL_DIR/$part"
+  done
+  run_launcher
+
+  local real
+  real="$(cd -P "$state" && pwd -P)"
+  grep -q -- "--workspace-root $real/db " "$CAPTURE"
+  grep -q -- "--workspace-root $real/teams " "$CAPTURE"
+  grep -q -- "--workspace-root $real/run " "$CAPTURE"
+  [ -z "$(grep -F -e "--workspace-root $SKILL_DIR/db " -e "--workspace-root $SKILL_DIR/teams " -e "--workspace-root $SKILL_DIR/run " "$CAPTURE")" ]
 }
 
 @test "launcher: leaves a role without a recorded live thread unsubscribed (#150)" {
