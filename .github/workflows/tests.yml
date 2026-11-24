@@ -375,17 +375,26 @@ jobs:
           # skipped (the partial-tree record in the reuse step).
           skill_only=false
           skill_set=""
+          # Set when the skill set cannot be trusted: the whole suite runs, with
+          # no per-file selection either.
+          force_all=false
           if [ "$docs_only" = true ] && [ "$skill_touched" = true ]; then
-            skill_set="$(grep -lE 'SKILL\.md|template\.md|skill-render|render-plugin-skill|README(\.ja)?\.md' tests/*.bats | LC_ALL=C sort || true)"
-            if [ -n "$skill_set" ]; then
-              docs_only=false
+            docs_only=false
+            skill_rc=0
+            skill_set="$(grep -lE 'SKILL\.md|template\.md|skill-render|render-plugin-skill|README(\.ja)?\.md' tests/*.bats)" || skill_rc=$?
+            if [ "$skill_rc" = 0 ] && [ -n "$skill_set" ]; then
+              skill_set="$(printf '%s\n' "$skill_set" | LC_ALL=C sort)"
               skill_only=true
               echo "Skill/doc files only: running the skill test set ($(printf '%s\n' "$skill_set" | grep -c .) files):"
               printf '%s\n' "$skill_set"
             else
-              # Nothing reads them by name: an empty set would mean no check
-              # at all, so run the whole suite instead.
-              docs_only=false; contracts_needed=true
+              # No match, or grep failed part way (exit 2 can come with a
+              # partial list): an incomplete set would skip tests that read
+              # these files, so run everything.
+              echo "Skill test set could not be derived (grep exit $skill_rc); running the whole suite."
+              skill_set=""
+              force_all=true
+              contracts_needed=true
             fi
           fi
           echo "Result: docs_only=$docs_only app_changed=$app_changed server_changed=$server_changed sync_changed=$sync_changed contracts_needed=$contracts_needed"
@@ -403,7 +412,9 @@ jobs:
           # the whole suite. Pushes (main, integration) never get here, so
           # they keep running everything.
           bats_skip=""
-          if [ "$skill_only" = true ]; then
+          if [ "$force_all" = true ]; then
+            echo "bats files skipped: 0 (whole suite)"
+          elif [ "$skill_only" = true ]; then
             bats_skip="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort \
               | grep -vxF -f <(printf '%s\n' "$skill_set") | paste -sd, - || true)"
             echo "bats files skipped: $(printf '%s' "$bats_skip" | tr ',' '\n' | grep -c . || true)"
