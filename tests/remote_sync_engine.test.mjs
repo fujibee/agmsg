@@ -6100,7 +6100,15 @@ test("reprocess reports the first failing candidate in order, even if a later on
   assert.deepEqual(fixture.applied, []);
 });
 
-test("reprocess evaluates again what was started ahead of a key rotation", async () => {
+test("reprocess evaluates again what was started ahead of a key rotation", async (t) => {
+  const previousJobs = process.env.AGMSG_AGE_DECRYPT_JOBS;
+  t.after(() => {
+    if (previousJobs === undefined) delete process.env.AGMSG_AGE_DECRYPT_JOBS;
+    else process.env.AGMSG_AGE_DECRYPT_JOBS = previousJobs;
+  });
+  // A four-candidate lookahead starts both later evaluations before the rotation.
+  process.env.AGMSG_AGE_DECRYPT_JOBS = "2";
+
   const calls = {};
   const fixture = reprocessFixture(4, async (_c, _caps, message) => {
     calls[message.server_seq] = (calls[message.server_seq] ?? 0) + 1;
