@@ -749,6 +749,76 @@ EOF
   [ -z "$(ls "$TEST_SKILL_DIR/run/"agmsgd-*.xml 2>/dev/null || true)" ]
 }
 
+# A Windows install whose owner row was left "ready" by an executor that died
+# with the machine (no clean end recorded), and whose task does not run: the
+# launcher stand-in does nothing, as Task Scheduler does for an "Interactive
+# only" task when no one is signed in (#2024).
+_stale_ready_windows_install() {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  local gitroot="$TEST_SKILL_DIR/fake-windows/GitRoot"
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log" AGMSGD_FAKE_GIT_ROOT="$gitroot"
+  mkdir -p "$gitroot/bin"
+  : > "$gitroot/bin/bash.exe"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_SKILL_DIR/fake-windows/noop-launcher.sh"
+  cat > "$TEST_SKILL_DIR/fake-windows/tasklist" <<'EOF2'
+#!/usr/bin/env bash
+case "${AGMSGD_FAKE_SESSIONS:-none}" in
+  none) printf 'INFO: No tasks are running which match the specified criteria.\r\n' ;;
+  ssh) printf '"explorer.exe","4100","Services","0","61,220 K"\r\n' ;;
+  rdp) printf '"explorer.exe","3260","RDP-Tcp#0","2","98,004 K"\r\n' ;;
+  fail) exit 1 ;;
+  quoted) printf '"unrecognised quoted output"\r\n' ;;
+  empty) ;;
+  info) printf 'INFO: output is not a tasklist no-match response\r\n' ;;
+  mixed) printf '"explorer.exe","4100","Services","0","61,220 K"\r\nsomething else\r\n' ;;
+esac
+EOF2
+  chmod +x "$TEST_SKILL_DIR/fake-windows/noop-launcher.sh" "$TEST_SKILL_DIR/fake-windows/tasklist"
+  export PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" \
+    AGMSGD_TASKLIST="$TEST_SKILL_DIR/fake-windows/tasklist" AGMSGD_FAKE_TASK_XML="$TEST_SKILL_DIR/fake-windows/captured.xml" \
+    AGMSGD_FAKE_TASK_MARKER="$TEST_SKILL_DIR/fake-windows/registered" AGMSGD_TEST_LAUNCHER="$TEST_SKILL_DIR/fake-windows/noop-launcher.sh"
+  # enable registers the task and then waits for a start that never comes.
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ -f "$AGMSGD_FAKE_TASK_MARKER" ] || { echo "$output"; false; }
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired = 'on';
+    UPDATE daemon_owner SET gen = 22, state = 'ready', executor_pid = 999999, executor_started_at = '2026-10-30T21:14:21.602Z',
+      executor_boot_id = '1793083314', socket = '$TEST_SKILL_DIR/run/no-such.sock', version = 'test', started_at = '2026-10-30T21:14:21.602Z',
+      last_end_reason = NULL, last_end_at = NULL;"
+}
+
+@test "daemon.sh start: an owner row left ready from before a restart is not reported as running (#2024)" {
+  _stale_ready_windows_install
+  AGMSGD_FAKE_SESSIONS=ssh _run_with_deadline 30 bash "$DAEMON" start
+  [ "$status" -ne 0 ]
+  refute grep -Fq "daemon start: running" <<<"$output"
+  grep -Fq "did not become ready in time" <<<"$output"
+  grep -Fq "no one is signed in now" <<<"$output"
+}
+
+@test "daemon.sh: the no-sign-in note appears only when no desktop session of the user exists (#2024)" {
+  _stale_ready_windows_install
+  AGMSGD_FAKE_SESSIONS=none run bash "$DAEMON" status
+  [ "$status" -ne 0 ]
+  grep -Fq "no one is signed in now" <<<"$output"
+  AGMSGD_FAKE_SESSIONS=ssh run bash "$DAEMON" status
+  grep -Fq "no one is signed in now" <<<"$output"
+  # Signed in over Remote Desktop: the task can run, so no note.
+  AGMSGD_FAKE_SESSIONS=rdp run bash "$DAEMON" status
+  [ "$status" -ne 0 ]
+  refute grep -Fq "signed in" <<<"$output"
+  # tasklist failed: nothing is claimed.
+  AGMSGD_FAKE_SESSIONS=fail run bash "$DAEMON" status
+  refute grep -Fq "signed in" <<<"$output"
+  # Output it does not recognise: nothing is claimed either.
+  local mode
+  for mode in quoted empty mixed info; do
+    AGMSGD_FAKE_SESSIONS="$mode" run bash "$DAEMON" status
+    refute grep -Fq "signed in" <<<"$output"
+  done
+}
+
 # A wrapper named `sqlite3`, placed ahead of the real one on PATH, that
 # behaves exactly like the real binary except every line of its stdout gets a
 # synthetic \r appended right before the \n -- simulating the \r\n Windows'
