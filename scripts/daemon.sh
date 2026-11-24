@@ -47,6 +47,7 @@ _path_hint() {
 AGMSGD_LAUNCHCTL="${AGMSGD_LAUNCHCTL:-launchctl}"
 AGMSGD_SYSTEMCTL="${AGMSGD_SYSTEMCTL:-systemctl}"
 AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
+AGMSGD_TASKLIST="${AGMSGD_TASKLIST:-tasklist}"
 # Empty selects the absolute native whoami.exe under the Windows system root.
 AGMSGD_WHOAMI="${AGMSGD_WHOAMI:-}"
 
@@ -497,6 +498,25 @@ _schtasks() {
   MSYS2_ARG_CONV_EXCL='*' "$AGMSGD_SCHTASKS" "$@"
 }
 
+# The task is registered "Interactive only": Task Scheduler runs it only while
+# this user is signed in to Windows, at the console or over Remote Desktop. A
+# machine used only over SSH has no such session, so the task never runs and
+# `schtasks /Run` still reports SUCCESS. Say so when that is the case (#2024).
+# A signed-in desktop has an explorer.exe of this user in a session other than
+# 0 (SSH and services run in session 0). One tasklist call; prints nothing when
+# it cannot tell.
+_windows_no_logon_note() {
+  local rows
+  rows="$(MSYS2_ARG_CONV_EXCL='*' "$AGMSGD_TASKLIST" /FI "IMAGENAME eq explorer.exe" /FI "USERNAME eq ${USERNAME:-}" /FO CSV /NH 2>/dev/null)" || return 0
+  rows="${rows//$'\r'/}"
+  # CSV columns: "Image","PID","Session Name","Session#","Mem Usage"
+  if printf '%s\n' "$rows" | awk -F'","' 'NF >= 4 && $4 != "0" { found = 1 } END { exit found ? 0 : 1 }'; then
+    return 0
+  fi
+  case "$rows" in *'"'*) ;; *INFO:*) ;; *) return 0 ;; esac
+  echo "agmsg daemon: agmsgd's scheduled task runs only while you are signed in to Windows, and no one is signed in now (this machine is used only over SSH), so Task Scheduler does not start it. Sign in at the console or over Remote Desktop and it starts within a minute."
+}
+
 # Paths go into the task XML as text; a "&" in a user name would otherwise
 # make the task impossible to create.
 _xml_escape() {
@@ -726,10 +746,16 @@ _resolve_codex() {
 _wait_for_ready() {
   local target_op_gen="$1" since="${2:-}" waited=0
   while [ "$waited" -lt 100 ]; do
-    local state op_gen
-    state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    local state op_gen owner_row started_at
+    owner_row="$(agmsg_sqlite "$INSTALL_DB" "SELECT state || '|' || COALESCE(started_at, '') FROM daemon_owner;" 2>/dev/null || true)"
+    state="${owner_row%%|*}"
+    started_at="${owner_row#*|}"
     op_gen="$(agmsg_sqlite "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null || true)"
-    if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ]; then
+    # op_gen is the intent this start itself just wrote, so it always matches.
+    # What ties a ready owner to this start is that it claimed ownership after
+    # the start began: a row left ready by an executor that died with the
+    # machine (no clean end is recorded) is older than that (#2024).
+    if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ] && { [ -z "$since" ] || [[ ! "$started_at" < "$since" ]]; }; then
       return 0
     fi
     if [ -n "$since" ] && [ "$state" != "ready" ] && [ "$(agmsg_sqlite "$INSTALL_DB" "SELECT count(*) FROM daemon_start_attempts WHERE at >= '$since' AND reason = 'intent changed since the launcher read it';" 2>/dev/null || echo 0)" != 0 ]; then
@@ -899,6 +925,11 @@ cmd_start() {
     fi
     ready_rc=0
     _wait_for_ready "$new_op_gen" "$since" || ready_rc=$?
+    # Ready in the record is not yet running: the executor must be alive and
+    # answer, the same check the "already running" answer above uses.
+    if [ "$ready_rc" = 0 ] && [ -n "$running_node" ] && ! "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
+      ready_rc=1
+    fi
     # A launcher that read the intent just before this run bumped it declined;
     # the intent is final now, so one more start settles it.
     if [ "$ready_rc" = 2 ] && [ "$attempt" = 1 ]; then
@@ -918,6 +949,7 @@ cmd_start() {
     if [ "$(_os)" = windows ] && _service_registered; then
       echo "agmsg daemon start: the scheduled task $(_schtasks_name) was created and started, but agmsgd never reported ready. Task Scheduler's own record of the run follows; 'agmsg daemon disable' removes the task." >&2
       _schtasks /Query /TN "$(_schtasks_name)" /V /FO LIST 2>&1 | grep -E 'Status|Last Run Time|Last Result|Task To Run' >&2 || true
+      _windows_no_logon_note >&2
     fi
     agmsg_daemon_warn_if_stopped always
     _path_hint status >&2
@@ -1016,6 +1048,9 @@ cmd_status() {
         "$node_path" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" --all || status_rc=$?
       else
         "$node_path" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" || status_rc=$?
+      fi
+      if [ "$status_rc" != 0 ] && [ "$(_os)" = windows ] && _service_registered; then
+        _windows_no_logon_note
       fi
       agmsg_daemon_seat_report status
     fi
