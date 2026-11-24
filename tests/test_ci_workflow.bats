@@ -60,7 +60,7 @@
   grep -Fq '::notice title=bats::docs-only diff — the bats suite did not run on any shard' "$workflow"
   grep -Fq '"## bats: docs-only, suite skipped"' "$workflow"
   grep -Fq '"## bats: suite ran"' "$workflow"
-  grep -Fq 'The shard partition covers $count test files' "$workflow"
+  grep -Fq '"$count test files ran on $ran, and every shard that ran passed."' "$workflow"
   # 4. And on the shard itself, so the checks tab shows it per job.
   grep -Fq '::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files' "$workflow"
   # 5. #1057 (measured): `gh run rerun --failed` only re-executes the shards
@@ -168,105 +168,24 @@
   [ "$output" -eq 0 ]
 }
 
-# The push-only whole-tree reuse lookup from the `changes` job -- the real
-# lines, cut out of the workflow -- run against a fake curl and git. Prints
-# what it wrote to GITHUB_OUTPUT as reuse_run, and leaves the URL curl was
-# asked for in $BATS_TEST_TMPDIR/reuse/curl-args.
-_reuse_lookup() {   # <curl stdout> [curl exit status]
+
+
+
+
+@test "CI: pushes run only the fast checks; nothing looks up or records a passed tree" {
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
-  local dir="$BATS_TEST_TMPDIR/reuse" start run_line end
-  mkdir -p "$dir/bin"
-  start=$(grep -n '^      - id: reuse$' "$workflow" | cut -d: -f1)
-  [ -n "$start" ]
-  run_line=$(awk -v s="$start" 'NR > s && /^        run: \|$/ { print NR; exit }' "$workflow")
-  end=$(grep -n 'echo "reuse_run=$run" >> "$GITHUB_OUTPUT"' "$workflow" | cut -d: -f1)
-  [ -n "$run_line" ] && [ -n "$end" ] && [ "$end" -gt "$run_line" ]
-  sed -n "$((run_line + 1)),${end}p" "$workflow" | sed 's/^          //' > "$dir/lookup.sh"
-  printf '%s' "$1" > "$dir/curl-out"
-  cat > "$dir/bin/curl" <<CURL
-#!/usr/bin/env bash
-printf '%s\n' "\$*" > "$dir/curl-args"
-cat "$dir/curl-out"
-exit ${2:-0}
-CURL
-  cat > "$dir/bin/git" <<'GIT'
-#!/usr/bin/env bash
-[ "$1 $2" = "rev-parse HEAD^{tree}" ] && { echo 4b825dc642cb6eb9a060e54bf8d69288fbee4904; exit 0; }
-exit 1
-GIT
-  chmod +x "$dir/bin/curl" "$dir/bin/git"
-  : > "$dir/out"
-  GITHUB_OUTPUT="$dir/out" GITHUB_API_URL=https://api.example GITHUB_REPOSITORY=owner/repo \
-    GITHUB_REPOSITORY_ID=42 GH_TOKEN=token PATH="$dir/bin:$PATH" \
-    bash "$dir/lookup.sh" > "$dir/log" 2>&1
-  sed -n 's/^reuse_run=//p' "$dir/out"
+  # The full suite runs on the release pull request and daily; a push has no
+  # tree to reuse, so the old lookup and records are gone, not left idle.
+  [ "$(grep -cF '      - id: reuse' "$workflow" || true)" = 0 ]
+  [ "$(grep -cF 'green-tree' "$workflow" || true)" = 0 ]
+  [ "$(grep -cF 'partial-tree' "$workflow" || true)" = 0 ]
+  [ "$(grep -cF 'needs.changes.outputs.reuse_run' "$workflow" || true)" = 0 ]
 }
 
-@test "CI: a push reuses a tree only when this repository's own run passed it" {
-  command -v jq >/dev/null || skip "jq not installed"
-  local own='{"expired":false,"workflow_run":{"id":4242,"head_repository_id":42}}'
-  local fork='{"expired":false,"workflow_run":{"id":777,"head_repository_id":7}}'
-  local old='{"expired":true,"workflow_run":{"id":555,"head_repository_id":42}}'
-
-  [ "$(_reuse_lookup "{\"artifacts\":[$own]}")" = "4242" ]
-  # The lookup asked for exactly this tree's record.
-  grep -Fq 'actions/artifacts?name=green-tree-4b825dc642cb6eb9a060e54bf8d69288fbee4904&per_page=20' "$BATS_TEST_TMPDIR/reuse/curl-args"
-  # A fork's run cannot vouch for main, even listed first.
-  [ "$(_reuse_lookup "{\"artifacts\":[$fork]}")" = "" ]
-  # (assigned first: bash 3.2 brace-expands "[$fork,$own]" inside a nested
-  # quoted substitution)
-  local both="{\"artifacts\":[$fork,$own]}"
-  [ "$(_reuse_lookup "$both")" = "4242" ]
-  # An expired record, no record, a failed or malformed answer, or an id that
-  # is not a number: run the suite.
-  [ "$(_reuse_lookup "{\"artifacts\":[$old]}")" = "" ]
-  [ "$(_reuse_lookup '{"total_count":0,"artifacts":[]}')" = "" ]
-  [ "$(_reuse_lookup '{"artifacts":[]}' 22)" = "" ]
-  [ "$(_reuse_lookup 'not json')" = "" ]
-  [ "$(_reuse_lookup '{"artifacts":[{"expired":false,"workflow_run":{"id":"4242; touch x","head_repository_id":42}}]}')" = "" ]
-  # It always writes the output, so the shards never read an unset value.
-  grep -qx 'reuse_run=' "$BATS_TEST_TMPDIR/reuse/out"
-}
-
-@test "CI: only a pull_request run whose suite ran and passed records its tree, and a reused push says so" {
+@test "CI: the macOS storage contract runs whenever its inputs change, even when the shard skips its suite" {
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
-  # The lookup is push-only; recording is pull_request-only and skipped for a
-  # docs-only diff (nothing ran). The record sits in the aggregate job, after
-  # the step that fails unless every shard passed.
-  grep -Fq "      - id: reuse" "$workflow"
-  [ "$(grep -A1 '^      - id: reuse$' "$workflow" | tail -1)" = "        if: github.event_name == 'push'" ]
-  [ "$(grep -A2 '^      - name: Record this tree as passed$' "$workflow" | tail -1)" = "        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'" ]
-  # The artifact is named green-tree-<tree>, or partial-tree-<tree> when the
-  # run skipped files; the step records which in its `name` output.
-  grep -Fq 'name: ${{ steps.green.outputs.name }}' "$workflow"
-  grep -Fq 'echo "name=green-tree-$tree"' "$workflow"
-  grep -Fq 'echo "name=partial-tree-$tree"' "$workflow"
-  # Every heavy shard step skips on a reused tree, the same set the docs-only
-  # skip gates; nothing heavy is left gated on docs_only alone.
-  [ "$(grep -c "needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''" "$workflow")" -eq 12 ]
-  # And the run says which green it is, on the shard and on the aggregate.
-  grep -Fq "format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run)" "$workflow"
-  grep -Fq '"## bats: tree already passed, suite skipped"' "$workflow"
-  grep -Fq '::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN' "$workflow"
-}
-
-@test "CI: a diff that skips every file is a result, and a partial-tree record is only trusted when it is this tree's own" {
-  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
-  # grep -c exits 1 on a count of 0; under set -e that must not fail the verify step.
-  grep -Fq "count=\"\$(printf '%s\\n' \"\$expected\" | grep -c . || true)\"" "$workflow"
-  # The record must name this tree, carry one run id, one sha, one skipped line,
-  # and only tests/<name>.bats files that exist; anything else runs everything.
-  grep -Fq '"$(sed -n '"'"'s/^tree //p'"'"' "$m")" = "$tree"' "$workflow"
-  grep -Fq "'^sha [0-9a-f]\\{40\\}\$'" "$workflow"
-  grep -Fq 'tests/*.bats) [ -f "$f" ] || todo="" ;;' "$workflow"
-}
-
-@test "CI: the macOS storage contract runs on a reused tree, as its own job did" {
-  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
-  # A tree recorded green by a PR run that skipped the contract is pushed with
-  # contracts_needed=true; the reuse must not skip it. The step is gated on
-  # contracts_needed alone, and bats is installed for it even when the suite is
-  # skipped.
+  # The step is gated on contracts_needed alone, not on the shard's gate, and
+  # bats is installed for it even when the suite is skipped.
   grep -Fq "if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()" "$workflow"
   grep -Fq "|| (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')" "$workflow"
 }

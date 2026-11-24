@@ -408,9 +408,9 @@ EOF
     agmsg_close_inherited_fds
     nohup "${bridge_run[@]}" \
       --project "$PROJECT" \
-      --workspace-root "$storage_dir" \
-      --workspace-root "$SKILL_DIR/teams" \
-      --workspace-root "$SKILL_DIR/run" \
+      --workspace-root "$(agmsg_real_dir "$storage_dir")" \
+      --workspace-root "$(agmsg_real_dir "$SKILL_DIR/teams")" \
+      --workspace-root "$(agmsg_real_dir "$SKILL_DIR/run")" \
       --type "$TYPE" \
       "${bridge_pairs[@]}" \
       --thread "$thread_id" \

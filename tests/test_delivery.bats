@@ -2885,6 +2885,48 @@ JSON
   [ "$count" -eq 1 ]
 }
 
+@test "antigravity turn rules start with always_on trigger frontmatter" {
+  run bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local header
+  header="$(head -n 5 "$TEST_PROJECT/.agent/rules/agmsg.md")"
+  [ "$header" = $'---\ntrigger: always_on\n---\n\n# agmsg Integration Rule' ]
+  # Other rule-file consumers retain their own formats.
+  bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
+  [ "$(head -n 1 "$TEST_PROJECT/.agent/rules/agmsg.md")" = '# agmsg Integration Rule' ]
+}
+
+@test "antigravity monitor migration accepts the legacy turn rule without frontmatter" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  local file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  sed '1,4d' "$file" > "$TEST_PROJECT/legacy-rule"
+  cp "$TEST_PROJECT/legacy-rule" "$file"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$file"
+}
+
+@test "antigravity monitor migration accepts the manually prepended trigger workaround" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  local file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  sed '1,4d' "$file" > "$TEST_PROJECT/legacy-rule"
+  { printf '%s\n' '---' 'trigger: always_on' '---' ''; cat "$TEST_PROJECT/legacy-rule"; } > "$file"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$file"
+}
+
+@test "antigravity monitor migration preserves custom rules with trigger frontmatter" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  local file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  printf '\nCustom project guidance.\n' >> "$file"
+  cp "$file" "$TEST_PROJECT/custom-rule"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  grep -qF 'existing rule file is not in agmsg format' <<<"$output"
+  cmp "$file" "$TEST_PROJECT/custom-rule"
+}
+
 @test "antigravity supports off mode: removes rule file" {
   bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
@@ -2996,6 +3038,40 @@ EOF
   grep -q -- "--thread thread-123" "$log"
   grep -q -- "--app-server unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" "$log"
   grep -q -- "--inline-inbox" "$log"
+}
+
+# Codex 0.171 refuses a writable root with a symlink component (#2013).
+@test "session-start.sh for codex passes workspace roots as physical paths (#2013)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-123 "$TEST_PROJECT" codex
+  local fake="$TEST_SKILL_DIR/fake-codex-bridge"
+  local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$AGMSG_TEST_LOG"\n' >"$fake"
+  chmod +x "$fake"
+  mkdir -p "$TEST_SKILL_DIR/real-store"
+  ln -s "$TEST_SKILL_DIR/real-store" "$TEST_SKILL_DIR/store-link"
+  mv "$TEST_SKILL_DIR/teams" "$TEST_SKILL_DIR/teams-real"
+  ln -s "$TEST_SKILL_DIR/teams-real" "$TEST_SKILL_DIR/teams"
+
+  AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/store-link" \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
+  AGMSG_CODEX_BRIDGE_CMD="$fake" \
+  AGMSG_TEST_LOG="$log" \
+  CODEX_THREAD_ID="thread-123" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  for _ in {1..20}; do
+    [ -f "$log" ] && break
+    sleep 0.1
+  done
+
+  local real
+  real="$(cd -P "$TEST_SKILL_DIR" && pwd -P)"
+  [ -f "$log" ]
+  grep -q -- "--workspace-root $real/real-store " "$log"
+  grep -q -- "--workspace-root $real/teams-real " "$log"
+  [ -z "$(grep -F -e "store-link" -e "--workspace-root $TEST_SKILL_DIR/teams " "$log")" ]
 }
 
 @test "session-start.sh for codex writes the bridge request from a seat record alone (#1056)" {
