@@ -856,6 +856,42 @@ _remote_write_binding() {
 # instance id written over ours, silently re-anchoring the binding. Empty is
 # for the path that has nothing to compare -- a POST whose response was lost
 # leaves no recorded id, and there the first fetch IS the anchor.
+# True when this team's roster journal shows the registration at
+# <server_instance>/<team_id> is this team's own: at least one roster sync
+# recorded against exactly that pair, and every member_id in <members_file>
+# (the server's /v1/members answer) joined this team at some point. A missing,
+# unreadable or empty journal is false.
+_remote_registration_in_journal() {
+  local team_dir="$1" server_instance="$2" team_id="$3" members_file="$4" \
+    journal journal_sql members_sql verdict
+  journal="$team_dir/roster.jsonl"
+  [ -s "$journal" ] && [ -n "$server_instance" ] || return 1
+  journal_sql="$(agmsg_sql_readfile_path "$journal")"
+  members_sql="$(agmsg_sql_readfile_path "$members_file")"
+  verdict="$(agmsg_sqlite_mem "
+    WITH j(doc) AS (
+      SELECT '[' || replace(rtrim(CAST(readfile('$journal_sql') AS TEXT), char(10)), char(10), ',') || ']'
+    ), events AS (
+      SELECT value AS e FROM j, json_each(j.doc)
+    ), remote AS (
+      SELECT json_extract(value, '\$.member_id') AS mid
+        FROM json_each(json_extract(CAST(readfile('$members_sql') AS TEXT), '\$.members'))
+    )
+    SELECT
+      (SELECT count(*) FROM events
+        WHERE json_extract(e, '\$.type') = 'roster_synced'
+          AND json_extract(e, '\$.server_instance_id') = '$(_agmsg_sqlesc "$server_instance")'
+          AND json_extract(e, '\$.remote_team_id') = '$(_agmsg_sqlesc "$team_id")') > 0
+      AND (SELECT count(*) FROM remote) > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM remote r
+         WHERE r.mid IS NULL OR NOT EXISTS (
+           SELECT 1 FROM events
+            WHERE json_extract(e, '\$.type') = 'member_joined'
+              AND json_extract(e, '\$.member_id') = r.mid));" 2>/dev/null)" || return 1
+  [ "${verdict%$'\r'}" = 1 ]
+}
+
 _remote_adopt_registration() {
   local team="$1" cfg="$2" endpoint="$3" team_id="$4" binding_cipher="$5" \
     expected_server_instance="${6:-}" expected_binding_revision="${7:-}"
@@ -913,6 +949,20 @@ _remote_adopt_registration() {
     "SELECT coalesce(group_concat(mid, ','), '') FROM
        (SELECT json_extract(value, '\$.member_id') AS mid
           FROM json_each(json_extract('$members_escaped', '\$.members')) ORDER BY mid);")"
+  # The server's member list is the roster the team was REGISTERED with (plus
+  # members registered later through the server); joins and leaves after that
+  # travel in the encrypted roster journal and never reach this list. So once a
+  # team's roster has changed, the two lists differ for the team's own
+  # registration too, and an exact match alone would refuse it forever.
+  # When they differ, the local journal decides: the registration is this
+  # team's when the journal records roster syncs against this very server
+  # instance and team id, and every member the server lists joined this team
+  # at some point. A registration made by someone else has neither (#2030).
+  if [ "$local_ids" != "$remote_ids" ] \
+    && _remote_registration_in_journal "$(dirname "$cfg")" "$fetched_server_instance" "$team_id" "$members_file"; then
+    echo "agmsg: the server's member list for team '$team' is an earlier state of this team's roster (this team's roster journal records syncs to this registration and every listed member); adopting it." >&2
+    local_ids="$remote_ids"
+  fi
   if [ "$local_ids" != "$remote_ids" ]; then
     echo "agmsg: '$(_remote_endpoint_display "$endpoint")' already has team_id $team_id, but its roster is not this team's. Refusing to adopt it. This is a real conflict, not a half-finished connect — resolve it before connecting this team here." >&2
     rm -f "$caps_file" "$members_file"; trap - EXIT INT TERM
