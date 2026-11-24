@@ -8,7 +8,7 @@ import { openInstallDb } from '../scripts/daemon/db.mjs';
 import { createControlServer } from '../scripts/daemon/control.mjs';
 import { controlSocketPath } from '../scripts/daemon/owner.mjs';
 import { classify } from '../scripts/daemon/status.mjs';
-import { readHeartbeat, writeHeartbeat, clearHeartbeat, heartbeatPath, observeLiveness, checkStartLiveness } from '../scripts/daemon/heartbeat.mjs';
+import { readHeartbeat, writeHeartbeat, clearHeartbeat, heartbeatPath, observeLiveness, checkStartLiveness, executorProvedDead, pidNamespace, pidGone } from '../scripts/daemon/heartbeat.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'agmsgd-heartbeat-'));
@@ -126,5 +126,63 @@ test('the CLI really waits five seconds and sees a heartbeat refreshed during th
     assert.equal(code, 0);
     assert.equal(output.trim(), 'running:heartbeat');
     assert.ok(performance.now() - begin >= 4900);
+  } finally { db.close(); }
+});
+
+// A pid that existed a moment ago and is gone now: what a killed executor leaves.
+async function exitedPid() {
+  const child = spawn(process.execPath, ['-e', '']);
+  await new Promise(resolve => child.on('exit', resolve));
+  return child.pid;
+}
+
+test('executorProvedDead trusts "no such process" only from the executor\'s own pid view', () => {
+  const owner = { executor_pid: 4242 };
+  const gone = () => true, here = () => false;
+  assert.equal(executorProvedDead({}, {}, { plat: 'darwin', gone }), false);
+  assert.equal(executorProvedDead({ executor_pid: 1 }, {}, { plat: 'darwin', gone }), false);
+  assert.equal(executorProvedDead(owner, {}, { plat: 'darwin', gone }), true);
+  assert.equal(executorProvedDead(owner, {}, { plat: 'win32', gone }), true);
+  assert.equal(executorProvedDead(owner, {}, { plat: 'darwin', gone: here }), false);
+  // Linux: a sandbox has its own pid namespace and sees no executor at all.
+  assert.equal(executorProvedDead(owner, {}, { plat: 'linux', ownNs: 'pid:[1]', gone }), false);
+  assert.equal(executorProvedDead(owner, { pid_ns: 'pid:[1]' }, { plat: 'linux', ownNs: 'pid:[2]', gone }), false);
+  assert.equal(executorProvedDead(owner, { pid_ns: 'pid:[1]' }, { plat: 'linux', ownNs: null, gone }), false);
+  assert.equal(executorProvedDead(owner, { pid_ns: 'pid:[1]' }, { plat: 'linux', ownNs: 'pid:[1]', gone }), true);
+  assert.equal(pidNamespace('darwin'), null);
+  assert.equal(pidNamespace('linux', () => 'pid:[7]'), 'pid:[7]');
+  assert.equal(pidNamespace('linux', () => { throw new Error('no /proc'); }), null);
+  assert.equal(pidGone(process.pid), false);
+});
+
+test('a fresh heartbeat left by a killed executor does not report running, and start does not wait', async () => {
+  const { root, db } = fixture();
+  try {
+    const pid = await exitedPid();
+    const ns = pidNamespace();
+    put(root, ns ? { pid_ns: ns } : {});
+    const record = { installId: 'heartbeat-test', owner: { state: 'ready', gen: 2, executor_pid: pid, executor_boot_id: null } };
+    const result = await observeLiveness(root, record, { now: () => now, query: async () => null });
+    assert.equal(result.running, false);
+    assert.equal(result.heartbeat.state, 'contradicted');
+    const started = await checkStartLiveness(root, {
+      read: () => record,
+      observe: (r, data) => observeLiveness(r, data, { now: () => now, query: async () => null }),
+      wait: () => assert.fail('must not wait'),
+    });
+    assert.equal(started.running, false);
+    // The same heartbeat with a live executor still proves running.
+    record.owner.executor_pid = process.pid;
+    assert.equal((await observeLiveness(root, record, { now: () => now, query: async () => null })).source, 'heartbeat');
+  } finally { db.close(); }
+});
+
+test('the heartbeat records the writer\'s pid namespace on Linux only', () => {
+  const { root, db } = fixture();
+  try {
+    assert.equal(writeHeartbeat(db, root, { gen: 2, expectedOpGen: 3 }, 1, now), true);
+    const written = JSON.parse(readFileSync(heartbeatPath(root), 'utf8'));
+    if (process.platform === 'linux') assert.equal(written.pid_ns, pidNamespace());
+    else assert.equal('pid_ns' in written, false);
   } finally { db.close(); }
 });

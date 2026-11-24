@@ -1,7 +1,9 @@
 // Positive daemon liveness across caller sandboxes. Socket replies take
-// precedence; a recent owner-authored heartbeat also proves it is running.
-import { readFileSync, writeFileSync, renameSync, rmSync, existsSync, realpathSync } from 'node:fs';
+// precedence; a recent owner-authored heartbeat also proves it is running,
+// unless this caller shares the executor's pid view and finds its pid gone.
+import { readFileSync, writeFileSync, renameSync, rmSync, existsSync, realpathSync, readlinkSync } from 'node:fs';
 import { createConnection } from 'node:net';
+import { platform } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openInstallDb, withImmediateTransaction } from './db.mjs';
@@ -10,6 +12,33 @@ import { PROTOCOL_VERSION } from './control.mjs';
 export const HEARTBEAT_MAX_AGE_MS = 20_000;
 export const HEARTBEAT_RECHECK_MS = 5_000;
 export const heartbeatPath = root => join(root, 'run', 'agmsgd-heartbeat.json');
+
+// Linux only: the pid namespace this process sees. A sandboxed caller (Codex's
+// Linux sandbox) gets its own, so it cannot see the executor's pid at all.
+// macOS and Windows have no pid namespaces; null there.
+export function pidNamespace(plat = platform(), readlink = readlinkSync) {
+  if (plat !== 'linux') return null;
+  try { return readlink('/proc/self/ns/pid'); } catch { return null; }
+}
+
+// "No such process" for this pid (ESRCH). EPERM means it exists; anything
+// else cannot tell. The boot id is not consulted: a fresh heartbeat already
+// belongs to this boot, and an unreadable boot id must not read as dead.
+export function pidGone(pid) {
+  try { process.kill(pid, 0); return false; } catch (error) { return error?.code === 'ESRCH'; }
+}
+
+// True only when the caller's "no such process" is trustworthy: the same pid
+// view as the executor that wrote the heartbeat (any caller on macOS/Windows;
+// on Linux, the namespace the heartbeat recorded). A heartbeat without a
+// namespace on Linux, a missing pid, or a "cannot tell" leaves the heartbeat
+// in charge.
+export function executorProvedDead(owner, record, { plat = platform(), ownNs = pidNamespace(plat), gone = pidGone } = {}) {
+  const pid = Number(owner?.executor_pid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  if (plat === 'linux' && (!record?.pid_ns || record.pid_ns !== ownNs)) return false;
+  return gone(pid) === true;
+}
 
 export function readHeartbeat(root, { installId, gen }, now = Date.now()) {
   let record;
@@ -36,7 +65,8 @@ export function writeHeartbeat(db, root, { gen, expectedOpGen }, sequence, now =
     if (!owner) return false;
     const path = heartbeatPath(root);
     const temporary = `${path}.${gen}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ install_id: owner.install_id, gen, sequence, at: new Date(now).toISOString() }) + '\n', { mode: 0o600 });
+    const pidNs = pidNamespace();
+    writeFileSync(temporary, JSON.stringify({ install_id: owner.install_id, gen, sequence, at: new Date(now).toISOString(), ...(pidNs ? { pid_ns: pidNs } : {}) }) + '\n', { mode: 0o600 });
     renameSync(temporary, path);
     return true;
   });
@@ -79,7 +109,7 @@ export function queryDaemon(socketPath, type, timeoutMs = 2000) {
   });
 }
 
-export async function observeLiveness(root, { owner, installId }, { now = Date.now, query = queryDaemon } = {}) {
+export async function observeLiveness(root, { owner, installId }, { now = Date.now, query = queryDaemon, provedDead = executorProvedDead } = {}) {
   if (owner?.state !== 'ready') {
     const heartbeat = readHeartbeat(root, { installId, gen: owner?.gen }, now());
     return { running: false, heartbeat: heartbeat.state === 'fresh' ? { state: 'invalid', reason: 'owner is not ready' } : heartbeat };
@@ -87,6 +117,10 @@ export async function observeLiveness(root, { owner, installId }, { now = Date.n
   const response = owner.socket ? await query(owner.socket, 'status') : null;
   if (response?.gen === owner.gen) return { running: true, source: 'socket', heartbeat: null };
   const heartbeat = readHeartbeat(root, { installId, gen: owner.gen }, now());
+  if (heartbeat.state === 'fresh' && provedDead(owner, heartbeat.record)) {
+    // The heartbeat file outlives a killed executor by up to HEARTBEAT_MAX_AGE_MS.
+    return { running: false, source: null, heartbeat: { state: 'contradicted', reason: 'the recorded executor is not running' } };
+  }
   return { running: heartbeat.state === 'fresh', source: heartbeat.state === 'fresh' ? 'heartbeat' : null, heartbeat };
 }
 
@@ -102,7 +136,7 @@ export async function checkStartLiveness(root, {
   wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
 } = {}) {
   let result = await observe(root, read(root));
-  if (result.running || result.heartbeat.state === 'missing') return result;
+  if (result.running || result.heartbeat.state === 'missing' || result.heartbeat.state === 'contradicted') return result;
   // An existing but stale/invalid file gets exactly one five-second recheck.
   // Re-read ownership too: another caller may have started a new generation.
   await wait(HEARTBEAT_RECHECK_MS);

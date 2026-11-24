@@ -2,10 +2,9 @@
 
 load test_helper
 
-@test "start and status trust a recent heartbeat across an invisible PID without changing any state" {
-  _seed_install_db
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=999999, executor_boot_id='not-readable-here';"
-  node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({install_id:"daemon-sh-test", gen:4, sequence:2, at:new Date().toISOString()}))' "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json"
+# The trusted-heartbeat checks, shared by the two shapes below: start and
+# status believe a fresh heartbeat and change nothing.
+_assert_heartbeat_trusted() {
   local before heartbeat
   before="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" '.dump')"
   heartbeat="$(cat "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json")"
@@ -24,6 +23,47 @@ load test_helper
   [ "$output" = ready ]
   [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = 7 ]
+}
+
+_write_heartbeat() {   # [pid_ns]
+  node -e 'const r={install_id:"daemon-sh-test", gen:4, sequence:2, at:new Date().toISOString()}; if (process.argv[2]) r.pid_ns=process.argv[2]; require("node:fs").writeFileSync(process.argv[1], JSON.stringify(r))' "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json" "${1:-}"
+}
+
+@test "start and status trust a recent heartbeat across an invisible PID without changing any state" {
+  # Codex's Linux sandbox: its own pid namespace, so the executor's pid answers
+  # "no such process" there. A heartbeat from another (or no recorded)
+  # namespace cannot be contradicted by that.
+  [ "$(uname -s)" = Linux ] || skip "pid namespaces are Linux-only"
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=999999, executor_boot_id='not-readable-here';"
+  _write_heartbeat 'pid:[4026531836-not-this-one]'
+  _assert_heartbeat_trusted
+  _write_heartbeat
+  _assert_heartbeat_trusted
+}
+
+@test "start and status trust a recent heartbeat from a live executor whose boot id cannot be read" {
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=$$, executor_boot_id='not-readable-here';"
+  _write_heartbeat "$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+  _assert_heartbeat_trusted
+}
+
+@test "status does not call a killed executor running while its heartbeat is still fresh" {
+  # The heartbeat outlives a killed executor by up to 20 seconds. From the
+  # executor's own pid view (any caller on macOS/Windows, the recorded
+  # namespace on Linux), "no such process" overrides it.
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=999999, executor_boot_id='not-readable-here';"
+  refute kill -0 999999 2>/dev/null
+  _write_heartbeat "$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+  run bash "$DAEMON" status
+  refute grep -Fq 'recent heartbeat' <<<"$output"
+  grep -Fq 'agmsgd is stopped' <<<"$output"
+  run node --disable-warning=ExperimentalWarning "$SCRIPTS/daemon/heartbeat.mjs" "$TEST_SKILL_DIR"
+  [ "$output" = not_running ]
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
+  refute grep -Fxq ready <<<"$output"
 }
 
 @test "stop removes its heartbeat even when intent is already off" {
