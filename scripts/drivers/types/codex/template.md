@@ -10,6 +10,8 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
+  **Codex desktop app (verified on macOS):** use agmsgd for notices, including idle conversations. The app uses `~/.codex`; `actas` records its thread and profile for Codex queue delivery. Monitor (legacy), its app-server bridge, and the shell shim apply only to the terminal CLI. Do not offer or recommend them to app users. In the delivery choices below, omit `monitor (legacy)` for the app; if native delivery is unavailable, report why and use a manual inbox check. Preserve an existing explicit delivery choice unless the user requests a change. The app shell has networking disabled: local send/inbox work, but remote sync and network operations cannot run from it.
+
   5. **REQUIRED — Respect the existing delivery choice.** Decided 11-02, following #1810: a running agmsgd is the default; only an explicit delivery switch overrides it. Ask about delivery only on a human-initiated first join, and only when there is a real choice. Never ask on `actas`, `spawn`, or rejoin of an existing seat, even if `join.sh` must restore its registration. First run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery status --type __AGENT_TYPE__ --project "$(pwd)"`. If its `this project:` line says a mode was `chosen — agmsgd does not deliver here`, preserve that explicit choice, say "Keeping this project's explicitly chosen delivery mode; agmsgd does not deliver here", and continue without asking or running `delivery agmsgd`. Otherwise run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon offer __AGENT_TYPE__`; it only reads and prints one line:
      - `agmsgd=available`: only on a human-initiated first join, ask the user to pick one, in this order:
        1. `agmsgd` — notices delivered directly by a background service (recommended). Choosing it registers a background service that starts at login; `agmsg daemon disable` stops and removes it. Empty input means this one.
@@ -30,8 +32,8 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
 <!-- agmsg:slot actas -->
 If argument starts with "actas" followed by an agent name:
 1. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" __AGENT_TYPE__`. If `<name>` is not listed, join with `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> __AGENT_TYPE__ "$(pwd)"`.
-2. Record this Codex thread and its effective profile directory so a later spawn can resume it and route notices to the right profile: `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name>`. Both arguments are required; `<team>` is the team `<name>` belongs to (from step 1). Without them nothing is recorded and the monitor cannot deliver to this thread.
-3. Use the role as the active FROM; monitor delivery is routed only to its recorded thread.
+2. Record this Codex thread and its effective profile directory so a later spawn can resume it and route notices to the right profile: `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name>`. Both arguments are required; `<team>` is the team `<name>` belongs to (from step 1). Without them nothing is recorded and notices cannot be routed to this thread.
+3. Use the role as the active FROM; delivery is routed to its recorded thread. In the desktop app, run `$__SKILL_NAME__ actas <name>` again in every new chat: it replaces the old destination, delivery moves to this chat, and the old chat stops receiving. Without `actas`, delivery continues to the old chat.
 <!-- /agmsg:slot actas -->
 
 <!-- agmsg:slot drop -->

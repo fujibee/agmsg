@@ -169,6 +169,25 @@ agmsgdが有効なまま止まると、次の通常のagmsgスクリプト操作
 
 ブリッジ通知に戻すには `agmsg daemon disable` を実行し、ブリッジが無いと一覧されたCodexセッションを再起動する（例: `codex resume`、続けて `$agmsg actas <name>`）。再起動までは新しい通知を受け取らない。既存のブリッジのセッションは再起動不要で、以降のCodex起動にはブリッジが付く。Codexのキューがすでに受け付けた通知は取り消されず、もう一度表示されることがある。Claude Codeの席は次のSessionStartでMonitorに戻り、それまで開いているClaude Codeセッションは通知を受け取らない。既存のセッションで通知を戻すには、再開してSessionStartでMonitorを張り直す。`stop` は常駐サービスを外さずにデーモンを止め、`disable` はそのサービスの登録も解除する。
 
+### デスクトップアプリ
+
+Claudeデスクトップアプリの **Codeタブ**にあるClaude Codeと、**Codexデスクトップアプリ（ChatGPT.app）**のCodexは、agmsgチームに参加できる。macOS、agmsg 1.8.2、ログイン時に起動するagmsgdで確認済み。ターミナル2席とアプリ2席の間で、アプリが関わる全10方向の送受信が成功し、アイドル中のアプリの会話にも送信後1–5秒で通知が届いた。
+
+Claude CodeのCodeタブでは **Local** セッションを選び、プロジェクトのフォルダを選択する。Cloudセッションはこのマシンのinstallに届かない。フォルダを選ばないと一時的なscratch workspaceが使われるため、長く使う席ではフォルダを選ぶ。Codexアプリではプロジェクトを開く。アプリは `~/.codex` を使う。シェルはネットワーク無効のsandbox内で動くため、ローカルの `send` と `inbox` は使えるが、remote syncなどのネットワーク操作はそのシェルからは動かない。
+
+agmsgをインストールしたら、アプリの会話で既存のチームの名前を引き継ぐ:
+
+```text
+/agmsg actas <name>     # Claude CodeのCodeタブ
+$agmsg actas <name>     # Codexアプリ
+```
+
+新しい名前なら、先に `/agmsg` または `$agmsg` でチームのセットアップに従う。アプリの通知には **agmsgd** を使う。Claude Codeにはセッションのcross-session socket、Codexには `actas` が記録したthreadとprofileを使うCodex queue経由で届き、アイドル中の会話にも届く。Codexのmonitor（legacy）ブリッジとシェルshimはターミナルCLI用で、Codexアプリ用ではない。Claude CodeのMonitorは直接配送が使えない場合の代替として残る。
+
+**新しいチャットを開いたら、そのチャットで `actas <name>` をもう一度実行する。** 配送は新しいチャットに移り、古いチャットへの配送は止まる。実行しない場合は古いチャットに届き続ける。アプリの引き継ぎはheldで拒否せず、記録した配送先を置き換える。Claude Codeアプリのチャットのプロセスが終了すると、再度 `actas` するまで通知は届かない。溜まったメッセージは保持され、引き継ぎ後に届く。
+
+アプリ席には操作対象のターミナルペインがなく、`peek`、`poke`、`spawn`、`arrange` は非対応。`team` のidentity、CLI session、reachは `n/a` と表示する。デスクトップアプリの動作確認済み環境は **macOS**。
+
 ## 初回実行
 
 エージェント（Claude Code、Codexなど）でプロジェクトを開き、次を実行する:
@@ -198,7 +217,7 @@ $agmsg              # Codex, Gemini CLI, Antigravity
 /agmsg drop biz-analyst    # このプロジェクトからロールを削除
 ```
 
-`actas <name>` は**セッション間で排他的**だ — 送受信の両方を `<name>` に切り替え、ロックを取得してピアセッションが同じ名前を購読するのを防ぎ、別セッションが既にそのロックを保持している場合は拒否する。`drop` はロックを解放する。ロックが固まってしまった場合は、保持しているセッションからロールをdropするか、そのセッションを終了すること。
+ターミナル席では `actas <name>` は**セッション間で排他的**だ — 送受信の両方を `<name>` に切り替え、ロックを取得してピアセッションが同じ名前を購読するのを防ぎ、別セッションが既にそのロックを保持している場合は拒否する。`drop` はロックを解放する。ロックが固まってしまった場合は、保持しているセッションからロールをdropするか、そのセッションを終了すること。
 
 排他性モデル、リカバリ、生存確認/PID再利用、Codexの注意点など詳細な仕組みは [docs/actas.md](docs/actas.md) を参照。
 
