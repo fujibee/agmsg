@@ -815,6 +815,67 @@ _capability_endpoint() {
   [[ "$output" == *"real conflict"* ]]
 }
 
+# The server's member list stays at the roster the team registered with; later
+# joins and leaves travel in the roster journal. A team whose roster changed
+# after connecting must still be able to adopt its own registration (#2030).
+_journal_for_registration() {
+  local team_id="$1" server_instance="$2" journal="$TEST_SKILL_DIR/teams/testteam/roster.jsonl" mid
+  : > "$journal"
+  printf '{"type":"roster_synced","server_seq":"1","server_instance_id":"%s","remote_team_id":"%s"}\n' "$server_instance" "$team_id" >> "$journal"
+  for mid in $(curl -sS -H 'Agmsg-Protocol-Version: 1' -H "Agmsg-Team-ID: $team_id" "$ENDPOINT/v1/members" | jq -r '.members[].member_id'); do
+    printf '{"type":"member_joined","member_id":"%s","name":"x"}\n' "$mid" >> "$journal"
+  done
+}
+
+@test "connect: adopts its own registration after the roster changed, when the journal shows it synced there (#2030)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id instance updated
+  team_id="$(jq -r '.team_id' "$cfg")"
+  instance="$(curl -sS -H 'Agmsg-Protocol-Version: 1' -H "Agmsg-Team-ID: $team_id" "$ENDPOINT/v1/capabilities" | jq -r '.server_instance_id')"
+  [ -n "$instance" ] && [ "$instance" != null ]
+  _journal_for_registration "$team_id" "$instance"
+  # A member joined after connecting: the server's list no longer matches.
+  updated="$(sqlite_mem "SELECT json_set(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.newcomer', json_object('member_id', '018f3f7e-9999-7000-8000-00000000beef'));")"
+  printf '%s' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  grep -Fq "is an earlier state of this team's roster" <<<"$output"
+}
+
+@test "connect: a journal that synced to another server instance does not unlock adoption (#2030)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id updated
+  team_id="$(jq -r '.team_id' "$cfg")"
+  _journal_for_registration "$team_id" "00000000-0000-7000-8000-000000000000"
+  updated="$(sqlite_mem "SELECT json_set(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.newcomer', json_object('member_id', '018f3f7e-9999-7000-8000-00000000beef'));")"
+  printf '%s' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -ne 0 ]
+  grep -Fq "roster is not this team's" <<<"$output"
+}
+
+@test "connect: a server member this team never had still refuses adoption (#2030)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id instance journal
+  team_id="$(jq -r '.team_id' "$cfg")"
+  instance="$(curl -sS -H 'Agmsg-Protocol-Version: 1' -H "Agmsg-Team-ID: $team_id" "$ENDPOINT/v1/capabilities" | jq -r '.server_instance_id')"
+  journal="$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+  # Synced to this registration, but no member the server lists ever joined here.
+  printf '{"type":"roster_synced","server_seq":"1","server_instance_id":"%s","remote_team_id":"%s"}\n' "$instance" "$team_id" > "$journal"
+  local updated
+  updated="$(sqlite_mem "SELECT json_set(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.newcomer', json_object('member_id', '018f3f7e-9999-7000-8000-00000000beef'));")"
+  printf '%s' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -ne 0 ]
+  grep -Fq "roster is not this team's" <<<"$output"
+}
+
 @test "connect: the capability path never reaches the terminal" {
   # A hosted endpoint is `https://host/t/<token>` and that token IS the
   # capability -- read it off a terminal, a screen share or a pasted log and you
