@@ -311,6 +311,10 @@ agmsg_cli_session_observed() {   # <type> <title> <pane>
       esac
       ;;
     screen:*)
+      # A host with no pane (the desktop apps) reports the title as n/a; there is
+      # no screen to read, so say n/a the way a `title` source does instead of
+      # trying to peek and calling the refusal an unreadable screen.
+      case "$title" in n/a:*) printf '%s\n' "$title"; return 0 ;; esac
       prefix="${src#screen:}"
       screen="$(terminal_peek "$pane" 2>/dev/null)" || rc=$?
       [ "$rc" -eq 0 ] || { printf 'unknown:screen_unreadable\n'; return 0; }

@@ -764,3 +764,43 @@ EOF
   [ "$output" = "unknown adapter probe timed out for poke" ]
   refute grep -qF 'no adapter for' <<<"$output"
 }
+
+# --- desktop app seats: one wording for both hosts ------------------------------
+#
+# A desktop conversation has no pane. claude-code's name is read from the title
+# (n/a on a pane-less host); codex's is read from the screen, which used to try a
+# peek, get the app's refusal and print unknown:screen_unreadable, so a codex-app
+# seat read identity=unverified next to a claude-desktop seat's n/a.
+_desktop_identity() {   # <terminal> <type>
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/type-registry.sh"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/$1/ops.sh"
+  agmsg_team_identity_loaded app4 seat "$2" "$1" some-id
+}
+
+@test "desktop seats: codex-app and claude-desktop read the same n/a identity and cli_session" {
+  run _desktop_identity codex-app codex
+  [ "$status" -eq 0 ]
+  codex_row="$output"
+  run _desktop_identity claude-desktop claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = "$codex_row" ]
+  IFS=$'\t' read -r _a _b _c _d _e _f _g pane_cell key_cell session_cell consistency <<<"$output"
+  [ "$session_cell" = n/a:no_addressable_pane ]
+  [ "$consistency" = n/a ]
+}
+
+@test "desktop seats: codex-app cli_session is n/a, never screen_unreadable" {
+  run _desktop_identity codex-app codex
+  [ "$status" -eq 0 ]
+  if grep -q 'screen_unreadable' <<<"$output"; then return 1; fi
+  grep -q 'n/a:no_addressable_pane' <<<"$output"
+  [ "$(awk -F'\t' '{print $NF}' <<<"$output")" = n/a ]
+}
+
+@test "desktop seats: the JSON cli_session of a codex-app seat is status n/a" {
+  run agmsg_team_identity_json n/a:no_addressable_pane team-seat n/a:no_addressable_pane
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$output','\$.status');")" = n/a ]
+}

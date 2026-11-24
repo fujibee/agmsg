@@ -98,6 +98,39 @@ while IFS= read -r team; do
         claimed="${claimed:+$claimed$'\n'}$team"
         continue
       fi
+      # A desktop app conversation has no pane and the old chat usually stays
+      # open, so a NEW chat for the role takes it over (decided 2026-11-23);
+      # the old chat simply stops being the owner. Decided per terminal driver
+      # by its manifest (actas_takeover=1), so terminal seats keep the refusal.
+      if declare -F agmsg_terminal_resolve_placement >/dev/null 2>&1; then
+        _tk_term="$(agmsg_terminal_resolve_placement "$SESSION_ID" 2>/dev/null || true)"
+        if [ -n "$_tk_term" ] && [ "$(agmsg_terminal_get "$_tk_term" actas_takeover 0)" = 1 ]; then
+          handoff=$(actas_lock_takeover "$team" "$NAME" "$SESSION_ID" 2>/dev/null || true)
+          if [ "$handoff" = "ok" ]; then
+            claimed="${claimed:+$claimed$'\n'}$team"
+            continue
+          fi
+          # A driver that takes over must not report "the old chat holds it" when
+          # the takeover itself failed: say why, as an unverified claim, so the
+          # cause (a write, a rename, the reclaim mutex) is visible. Partial
+          # claims are still rolled back first.
+          case "$handoff" in
+            held:*) : ;;   # the ordinary claim itself found another holder
+            *)
+              case "$handoff" in
+                unknown:*) _why="${handoff#unknown:}" ;;
+                *)         _why="takeover_unrecognized" ;;
+              esac
+              while IFS= read -r c_team; do
+                [ -z "$c_team" ] && continue
+                actas_lock_release "$c_team" "$NAME" "$SESSION_ID" 2>/dev/null || true
+              done <<< "$claimed"
+              printf 'status=unverified team=%s reason=%s\n' "$team" "$_why"
+              exit 1
+              ;;
+          esac
+        fi
+      fi
       # Roll back any partial claims so the user can retry cleanly.
       while IFS= read -r c_team; do
         [ -z "$c_team" ] && continue

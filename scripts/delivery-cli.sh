@@ -143,7 +143,9 @@ case "$ACTION" in
       echo "agmsgd delivers to this project. This session moves to it when it restarts or runs actas; no Monitor is armed for it."
     else
       echo "This session keeps its current delivery until it restarts or runs actas; agmsgd can take over once it confirms this session's destination."
-      bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
+      # Same as the two types above: the hooks are installed for the session that
+      # moves over later, but monitor mode's setup text is not printed for agmsgd.
+      bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT" >/dev/null
     fi
     _record_choice agmsgd
     _codex_shim_sync
