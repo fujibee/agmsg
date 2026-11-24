@@ -133,4 +133,3 @@ _leg() {
   [ "$(_leg true false '' 'tests/test_install.bats')" = false ]
   [ "$(_leg false false 'tests/test_install.bats' 'tests/test_install.bats')" = true ]
 }
-
