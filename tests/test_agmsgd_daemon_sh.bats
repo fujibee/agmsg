@@ -733,6 +733,7 @@ case "${AGMSGD_FAKE_SESSIONS:-none}" in
   fail) exit 1 ;;
   quoted) printf '"unrecognised quoted output"\r\n' ;;
   empty) ;;
+  info) printf 'INFO: output is not a tasklist no-match response\r\n' ;;
   mixed) printf '"explorer.exe","4100","Services","0","61,220 K"\r\nsomething else\r\n' ;;
 esac
 EOF2
@@ -774,7 +775,7 @@ EOF2
   refute grep -Fq "signed in" <<<"$output"
   # Output it does not recognise: nothing is claimed either.
   local mode
-  for mode in quoted empty mixed; do
+  for mode in quoted empty mixed info; do
     AGMSGD_FAKE_SESSIONS="$mode" run bash "$DAEMON" status
     refute grep -Fq "signed in" <<<"$output"
   done

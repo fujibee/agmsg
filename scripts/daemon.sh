@@ -511,7 +511,7 @@ _windows_no_logon_note() {
   rows="${rows//$'\r'/}"
   # Decide from recognised output only. A desktop session (an explorer.exe row
   # with Session# other than 0) means signed in. Rows all in session 0, or the
-  # no-match INFO line alone, mean no one is signed in. Anything else -- an
+  # no-match INFO line alone (English tasklist), mean no one is signed in. Anything else -- an
   # unrecognised line, or no output -- says nothing.
   printf '%s\n' "$rows" | awk '
     /^[[:space:]]*$/ { next }
@@ -520,7 +520,7 @@ _windows_no_logon_note() {
       if (f[4] != "0") desktop = 1
       next
     }
-    /^INFO: / { info++; next }
+    /^INFO: No tasks are running which match the specified criteria\.[[:space:]]*$/ { info++; next }
     { other = 1 }
     END { exit (other || desktop || (rows == 0 && info != 1) || (rows > 0 && info > 0)) ? 1 : 0 }
   ' || return 0
