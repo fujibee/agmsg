@@ -354,6 +354,8 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   echo "DIAG(#1176) pre-reconnect: sync engine log tail:"
   { tail -n 20 "$TEST_SKILL_DIR/run/remote-sync.testteam.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
 
+  local log="$TEST_SKILL_DIR/run/remote-sync.testteam.log" before
+  before="$(wc -l < "$log" 2>/dev/null || echo 0)"
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   echo "DIAG(#1176) reconnect: status=$status output=$output"
   [ "$status" -eq 0 ]
@@ -363,6 +365,36 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   # The binding moved to the server answering now.
   [ "$(_binding_field testteam server_instance_id)" != "$anchored" ]
   [ -n "$(_binding_field testteam server_instance_id)" ]
+  # And sync runs against it: the engine restarts on the new instance and a
+  # cycle succeeds there, starting from that instance's own cursor.
+  local waited=0
+  until tail -n +"$((before + 1))" "$log" | grep -q '"event":"read-state.applied"'; do
+    [ "$waited" -lt 150 ] || break
+    sleep 0.2; waited=$((waited + 1))
+  done
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  grep -Fq "engine running" <<<"$output"
+  grep -Fq "last successful sync" <<<"$output"
+  # The roster went to the new instance: pushed and acknowledged there, from
+  # that instance's first sequence.
+  tail -n +"$((before + 1))" "$log" | grep -q '"event":"push.ack","acks":\[{"id":"[^"]*","server_seq":"1"'
+}
+
+@test "connect: an encrypted team is not re-attached to a rebuilt server, and nothing is written (#2035, #2037)" {
+  skip_if_no_age
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam
+  [ "$status" -eq 0 ]
+  local anchored
+  anchored="$(_binding_field testteam server_instance_id)"
+  run curl -sS "$ENDPOINT/_test/rotate-server-id"
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam
+  [ "$status" -ne 0 ]
+  grep -Fq "cannot be re-attached to a new server instance yet" <<<"$output"
+  grep -Fq "issues/2037" <<<"$output"
+  grep -Fq "remote.sh connect --endpoint <the same endpoint> --e2ee 'testteam'" <<<"$output"
+  [ "$(_binding_field testteam server_instance_id)" = "$anchored" ]
 }
 
 @test "connect: a repeat run cannot restate the registered cipher profile" {
@@ -925,6 +957,20 @@ _drop_local_member() {
   [ "$status" -eq 0 ]
   grep -Fq "0 on the server that left this team; 1 on the server with no record here" <<<"$output"
   grep -Fq "no member of team 'testteam' is on the server's list for this team id" <<<"$output"
+  grep -Fq "remote.sh disconnect 'testteam'" <<<"$output"
+}
+
+@test "connect: an unreadable roster journal is named, and the drift and the stop command are still printed (#2035)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
+  _drop_local_member alice
+  printf '{not json\n' > "$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  grep -Fq "(0 in both; 1 only here, joined after the registration; 1 on the server and not here)" <<<"$output"
+  grep -Fq "roster journal ($TEST_SKILL_DIR/teams/testteam/roster.jsonl) could not be read" <<<"$output"
   grep -Fq "remote.sh disconnect 'testteam'" <<<"$output"
 }
 

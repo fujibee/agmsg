@@ -900,17 +900,24 @@ _remote_registration_in_journal() {
 # member id: members here that the server does not list (joined after the
 # registration), server members this team's roster journal records as having
 # left, and server members with no record here at all. Names are not compared:
-# a rename keeps the id. Prints nothing it cannot read; never fails.
+# a rename keeps the id. An unreadable journal is named and the comparison is
+# still printed; if even that cannot be made, one line says so. Never fails.
 _remote_roster_drift_report() {
   local team="$1" team_dir="$2" cfg="$3" members_file="$4" cipher="$5" \
-    journal journal_doc cfg_sql members_sql counts local_only left unknown shared
+    journal journal_doc="'[]'" journal_ok=1 cfg_sql members_sql counts \
+    local_only left unknown shared
   journal="$team_dir/roster.jsonl"
   cfg_sql="$(agmsg_sql_readfile_path "$cfg")"
   members_sql="$(agmsg_sql_readfile_path "$members_file")"
-  if [ -s "$journal" ]; then
+  # The journal only sorts server-only members into "left" and "no record";
+  # the comparison itself stands on the config and the server's list. An
+  # unreadable journal is said, and the comparison is still printed.
+  if [ -e "$journal" ]; then
     journal_doc="(SELECT '[' || replace(rtrim(CAST(readfile('$(agmsg_sql_readfile_path "$journal")') AS TEXT), char(10)), char(10), ',') || ']')"
-  else
-    journal_doc="'[]'"
+    [ -r "$journal" ] && [ "$(agmsg_sqlite_mem "SELECT json_valid($journal_doc);" 2>/dev/null)" = 1 ] || {
+      journal_ok=0
+      journal_doc="'[]'"
+    }
   fi
   counts="$(agmsg_sqlite_mem "
     WITH events AS (
@@ -931,10 +938,18 @@ _remote_roster_drift_report() {
          AND EXISTS (SELECT 1 FROM left_ids l WHERE l.mid IS t.mid)),
       (SELECT count(*) FROM there t WHERE NOT EXISTS (SELECT 1 FROM here h WHERE h.mid IS t.mid)
          AND NOT EXISTS (SELECT 1 FROM left_ids l WHERE l.mid IS t.mid)),
-      (SELECT count(*) FROM there t WHERE EXISTS (SELECT 1 FROM here h WHERE h.mid IS t.mid));" 2>/dev/null)" || return 0
+      (SELECT count(*) FROM there t WHERE EXISTS (SELECT 1 FROM here h WHERE h.mid IS t.mid));" 2>/dev/null)" || counts=""
   IFS='|' read -r local_only left unknown shared <<<"${counts%$'\r'}"
-  case "$local_only$left$unknown$shared" in ''|*[!0-9]*) return 0 ;; esac
-  echo "agmsg: team '$team': the server's member list differs from this team's roster ($shared in both; $local_only only here, joined after the registration; $left on the server that left this team; $unknown on the server with no record here). Connecting anyway: the sync engine pushes this team's roster changes and pulls the server's. The member ids decide who is who; a rename keeps its id."
+  case "$local_only$left$unknown$shared" in
+    ''|*[!0-9]*)
+      echo "agmsg: team '$team': the server's member list differs from this team's roster, and the two could not be compared in detail. Connecting anyway: the sync engine pushes this team's roster changes and pulls the server's."
+      return 0 ;;
+  esac
+  if [ "$journal_ok" -eq 1 ]; then
+    echo "agmsg: team '$team': the server's member list differs from this team's roster ($shared in both; $local_only only here, joined after the registration; $left on the server that left this team; $unknown on the server with no record here). Connecting anyway: the sync engine pushes this team's roster changes and pulls the server's. The member ids decide who is who; a rename keeps its id."
+  else
+    echo "agmsg: team '$team': the server's member list differs from this team's roster ($shared in both; $local_only only here, joined after the registration; $unknown on the server and not here). This team's roster journal ($journal) could not be read, so members that left cannot be told apart from ones with no record. Connecting anyway: the sync engine pushes this team's roster changes and pulls the server's. The member ids decide who is who; a rename keeps its id."
+  fi
   if [ "$shared" -eq 0 ] && [ "$cipher" = none ]; then
     echo "agmsg: no member of team '$team' is on the server's list for this team id. If this is a different team that happens to have the same id, stop syncing with: remote.sh disconnect $(agmsg_shq "$team")"
   fi
@@ -973,7 +988,17 @@ _remote_adopt_registration() {
     # it. connect says so and continues (#2035). set-endpoint keeps the
     # refusal: it moves a live binding's address and promises the identity
     # stays the same.
-    if [ "$on_instance_change" = report ]; then
+    #
+    # An encrypted team is not re-attached: its age-v1 key history is
+    # anchored to the instance it was set up against, and the setup on the
+    # new instance fails ("age epoch snapshot is invalid") after the binding
+    # would already have moved, leaving no engine. Measured the same through
+    # disconnect + connect (#2037). Refused before anything is written.
+    if [ "$on_instance_change" = report ] && [ "$binding_cipher" = age-v1 ]; then
+      echo "agmsg: '$(_remote_endpoint_display "$endpoint")' now answers as server instance $fetched_server_instance, but team '$team' was bound to $expected_server_instance. The server was probably rebuilt. This encrypted team cannot be re-attached to a new server instance yet: its key history is tied to the old one, and setting it up again there fails. Nothing was changed; the binding still names $expected_server_instance. There is no command for this yet (https://github.com/fujibee/agmsg/issues/2037). Check the address points at the server this team was set up on; if it does, run remote.sh connect --endpoint <the same endpoint> --e2ee $(agmsg_shq "$team") again once it answers as $expected_server_instance." >&2
+      rm -f "$caps_file" "$members_file"; trap - EXIT INT TERM
+      return 1
+    elif [ "$on_instance_change" = report ]; then
       echo "agmsg: '$(_remote_endpoint_display "$endpoint")' now answers as server instance $fetched_server_instance, but team '$team' was bound to $expected_server_instance. The server was probably rebuilt. Re-attaching to it; this team's roster and message history will be uploaded to it again." >&2
     else
       echo "agmsg: '$(_remote_endpoint_display "$endpoint")' is now server instance $fetched_server_instance, but team '$team' is bound to $expected_server_instance. Refusing to re-anchor the binding to a different server. If the server really was replaced, re-attach to it with: remote.sh disconnect $(agmsg_shq "$team"), then remote.sh connect --endpoint <the new endpoint> $(agmsg_shq "$team")" >&2
