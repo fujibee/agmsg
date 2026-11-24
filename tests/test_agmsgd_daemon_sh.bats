@@ -731,6 +731,9 @@ case "${AGMSGD_FAKE_SESSIONS:-none}" in
   ssh) printf '"explorer.exe","4100","Services","0","61,220 K"\r\n' ;;
   rdp) printf '"explorer.exe","3260","RDP-Tcp#0","2","98,004 K"\r\n' ;;
   fail) exit 1 ;;
+  quoted) printf '"unrecognised quoted output"\r\n' ;;
+  empty) ;;
+  mixed) printf '"explorer.exe","4100","Services","0","61,220 K"\r\nsomething else\r\n' ;;
 esac
 EOF2
   chmod +x "$TEST_SKILL_DIR/fake-windows/noop-launcher.sh" "$TEST_SKILL_DIR/fake-windows/tasklist"
@@ -769,6 +772,12 @@ EOF2
   # tasklist failed: nothing is claimed.
   AGMSGD_FAKE_SESSIONS=fail run bash "$DAEMON" status
   refute grep -Fq "signed in" <<<"$output"
+  # Output it does not recognise: nothing is claimed either.
+  local mode
+  for mode in quoted empty mixed; do
+    AGMSGD_FAKE_SESSIONS="$mode" run bash "$DAEMON" status
+    refute grep -Fq "signed in" <<<"$output"
+  done
 }
 
 # A wrapper named `sqlite3`, placed ahead of the real one on PATH, that

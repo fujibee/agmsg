@@ -509,11 +509,21 @@ _windows_no_logon_note() {
   local rows
   rows="$(MSYS2_ARG_CONV_EXCL='*' "$AGMSGD_TASKLIST" /FI "IMAGENAME eq explorer.exe" /FI "USERNAME eq ${USERNAME:-}" /FO CSV /NH 2>/dev/null)" || return 0
   rows="${rows//$'\r'/}"
-  # CSV columns: "Image","PID","Session Name","Session#","Mem Usage"
-  if printf '%s\n' "$rows" | awk -F'","' 'NF >= 4 && $4 != "0" { found = 1 } END { exit found ? 0 : 1 }'; then
-    return 0
-  fi
-  case "$rows" in *'"'*) ;; *INFO:*) ;; *) return 0 ;; esac
+  # Decide from recognised output only. A desktop session (an explorer.exe row
+  # with Session# other than 0) means signed in. Rows all in session 0, or the
+  # no-match INFO line alone, mean no one is signed in. Anything else -- an
+  # unrecognised line, or no output -- says nothing.
+  printf '%s\n' "$rows" | awk '
+    /^[[:space:]]*$/ { next }
+    /^"explorer\.exe","[0-9]+","[^"]*","[0-9]+",/ {
+      split($0, f, "\",\""); rows++
+      if (f[4] != "0") desktop = 1
+      next
+    }
+    /^INFO: / { info++; next }
+    { other = 1 }
+    END { exit (other || desktop || (rows == 0 && info != 1) || (rows > 0 && info > 0)) ? 1 : 0 }
+  ' || return 0
   echo "agmsg daemon: agmsgd's scheduled task runs only while you are signed in to Windows, and no one is signed in now (this machine is used only over SSH), so Task Scheduler does not start it. Sign in at the console or over Remote Desktop and it starts within a minute."
 }
 
