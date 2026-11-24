@@ -79,7 +79,7 @@ _detect() {
   LOG="$BATS_TEST_TMPDIR/log"
   : > "$OUT"
   (cd "$REPO" && env PATH="$FAKE:$PATH" EVENT="$event" ACTION="$action" BASE_SHA="$A2" HEAD_SHA="$C" \
-    PR_HEAD_REF=fix/x PR_HEAD_REPO_ID=1 GITHUB_REPOSITORY_ID=1 PR_TITLE="Fix x" GH_TOKEN=t \
+    PR_HEAD_REF=fix/x PR_NUMBER=7 PR_HEAD_REPO_ID=1 GITHUB_REPOSITORY_ID=1 PR_TITLE="Fix x" GH_TOKEN=t \
     GITHUB_API_URL=https://api.invalid GITHUB_REPOSITORY=o/r GITHUB_OUTPUT="$OUT" RUNNER_TEMP="$BATS_TEST_TMPDIR" \
     "$@" bash "$script") > "$LOG" 2>&1
 }
@@ -91,7 +91,7 @@ _changed() { sed -n '/^Changed files:$/,/^Result: /p' "$LOG" | sed '1d;$d' | gre
 
 _runs() {
   FAKE_RUNS="$BATS_TEST_TMPDIR/runs.json"
-  printf '{"workflow_runs":[{"head_sha":"%s","id":11,"conclusion":"success","created_at":"2026-01-01T00:00:00Z","head_repository":{"id":1}}]}' "$1" > "$FAKE_RUNS"
+  printf '{"workflow_runs":[{"head_sha":"%s","id":11,"conclusion":"success","created_at":"2026-01-01T00:00:00Z","head_repository":{"id":1},"pull_requests":[{"number":7}]}]}' "$1" > "$FAKE_RUNS"
 }
 
 _base_record() {
@@ -157,6 +157,11 @@ _base_record() {
   _detect pull_request synchronize FAKE_RUNS="$FAKE_RUNS" FAKE_ART="$FAKE_ART" FAKE_ZIP="$FAKE_ZIP"
   grep -qF "Incremental run not possible" "$LOG"
   [ "$(_changed)" = "$full" ]
+  # A green run of another pull request on the same branch name.
+  _base_record "$A2"
+  _detect pull_request synchronize PR_NUMBER=8 FAKE_RUNS="$FAKE_RUNS" FAKE_ART="$FAKE_ART" FAKE_ZIP="$FAKE_ZIP"
+  grep -qF "no earlier all-green head" "$LOG"
+  [ "$(_changed)" = "$full" ]
   # A pull request from another repository.
   _base_record "$A2"
   _detect pull_request synchronize PR_HEAD_REPO_ID=2 FAKE_RUNS="$FAKE_RUNS" FAKE_ART="$FAKE_ART" FAKE_ZIP="$FAKE_ZIP"
@@ -204,4 +209,18 @@ _gate() {
   [ "$(_gate false false macos-latest)" = false ]
   [ "$(_gate false true macos-latest)" = true ]
   [ "$(_gate true true ubuntu-latest)" = false ]
+  # An empty or unexpected "full" (the changes job broke) runs macOS: fail open.
+  [ "$(_gate false '' macos-latest)" = true ]
+}
+
+@test "ci-incremental: skipped macOS and Windows jobs report from ubuntu, and anything unexpected keeps the real runner" {
+  local shard win
+  shard="$(grep -A4 '^  bats-shard:' "$WORKFLOW" >/dev/null; awk '/^  bats-shard:/{f=1} f && /^    runs-on:/{print; exit}' "$WORKFLOW")"
+  win="$(awk '/^  bats-windows:/{f=1} f && /^    runs-on:/{print; exit}' "$WORKFLOW")"
+  # The skip goes to ubuntu only on explicit values.
+  grep -Fq "needs.changes.outputs.full == 'false'" <<<"$shard"
+  grep -Fq "needs.changes.outputs.docs_only == 'true'" <<<"$shard"
+  grep -Fq "|| matrix.os }}" <<<"$shard"
+  grep -Fq "contains(needs.changes.outputs.windows_idle_legs, format('|{0}|', matrix.leg))" <<<"$win"
+  grep -Fq "|| 'windows-latest' }}" <<<"$win"
 }

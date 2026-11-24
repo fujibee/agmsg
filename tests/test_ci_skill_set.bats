@@ -140,3 +140,27 @@ _leg() {
   # Nothing skipped (a full run): every leg runs.
   [ "$(_leg false false '' 'tests/test_install.bats')" = true ]
 }
+
+@test "ci-skill-set: the Windows legs with nothing to run are named for the ubuntu runner" {
+  _detect SKILL.md docs/x.md
+  local idle
+  idle="$(_out windows_idle_legs)"
+  # In the skill set: install helpers (test_install) and the hook wrapper
+  # (test_delivery). Not in it: the runtime and driver-input legs.
+  refute grep -Fq '|install helpers|' <<<"$idle"
+  refute grep -Fq '|codex hook wrapper (#1015)|' <<<"$idle"
+  grep -Fq '|windows runtime (#567)|' <<<"$idle"
+  grep -Fq '|driver input (#817)|' <<<"$idle"
+  _detect docs/x.md
+  [ "$(_out windows_idle_legs)" = '|install helpers|windows runtime (#567)|codex hook wrapper (#1015)|driver input (#817)|' ]
+}
+
+@test "ci-skill-set: the detect step's leg list matches the bats-windows matrix" {
+  local from_detect from_matrix
+  from_detect="$(awk "/windows_legs='/{f=1} f{print} f && /'\$/{exit}" "$WORKFLOW" \
+    | sed "s/.*windows_legs='//; s/'\$//; s/^ *//" | LC_ALL=C sort)"
+  from_matrix="$(awk '/^  bats-windows:/{f=1} f && /^    steps:/{exit} f' "$WORKFLOW" \
+    | awk '/^          - leg: /{sub(/^          - leg: /,""); leg=$0} /^            target: /{sub(/^            target: /,""); print leg "=" $0}' | LC_ALL=C sort)"
+  [ -n "$from_matrix" ]
+  [ "$from_detect" = "$from_matrix" ]
+}

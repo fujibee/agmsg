@@ -204,15 +204,14 @@ env:
   WINDOWS_SQLITE_SHA256: 'f46ee2475de4cbe287e6e5f7d43c838796b14e7379cd216bdbb28d391429f9fc'
 
 jobs:
-  # Cheap gate: is this PR's diff entirely documentation? The gate is scoped to
-  # pull_request by event name, so EVERY push runs the full suite
-  # (docs_only=false) — main because it must stay fully verified, an integration
-  # branch because its tip is what gets dogfooded and a docs-only merge still
-  # changes that tip.
+  # Cheap gate: decides what this run runs. A push runs only the fast checks;
+  # the release pull request and the daily run on main run everything; an
+  # ordinary pull request runs what its changed files reach (see the detect
+  # step below).
   changes:
     name: detect docs-only
     runs-on: ubuntu-latest
-    # Read access to the Actions API for the whole-tree reuse lookup below.
+    # Read access to the Actions API for the incremental-run lookup below.
     permissions:
       contents: read
       actions: read
@@ -226,11 +225,12 @@ jobs:
       # true on the release pull request and the daily run: everything runs,
       # macOS shards included.
       full: ${{ steps.detect.outputs.full }}
-      reuse_run: ${{ steps.reuse.outputs.reuse_run }}
+      # "|leg|leg|" — the Windows legs with nothing to run; they report from an
+      # ubuntu runner instead of waiting for a Windows one.
+      windows_idle_legs: ${{ steps.detect.outputs.windows_idle_legs }}
       # Comma-separated tests/*.bats files this run does not need to run (empty:
-      # run everything). From the diff on a pull_request, from the pull
-      # request's own record on a push (see the reuse step).
-      bats_skip: ${{ steps.reuse.outputs.bats_skip || steps.detect.outputs.bats_skip }}
+      # run everything). From the pull request's diff; empty on a full run.
+      bats_skip: ${{ steps.detect.outputs.bats_skip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -244,6 +244,7 @@ jobs:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -322,8 +323,8 @@ jobs:
           # pushes to main run as before.
           #
           # The base: the newest successful run of this workflow for this
-          # pull request's branch (same repository only; a fork always runs
-          # in full) whose head is an ancestor of the new head. The changed
+          # pull request (its branch and number; same repository only, a fork
+          # always uses the whole diff) whose head is an ancestor of the new head. The changed
           # files are that head..new head, plus old base..new base when main
           # moved in between (the old base comes from the pr-base record that
           # run uploaded). Any failure to find or read either -- API error, no
@@ -347,8 +348,9 @@ jobs:
                   green_sha="$sha" green_run="$run_id"
                   break
                 fi
-              done < <(printf '%s' "$runs" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" --arg cur "$HEAD_SHA" \
-                '[.workflow_runs[]? | select(.head_repository.id == $repo and .head_sha != $cur and .conclusion == "success")]
+              done < <(printf '%s' "$runs" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" --arg cur "$HEAD_SHA" --argjson pr "${PR_NUMBER:-0}" \
+                '[.workflow_runs[]? | select(.head_repository.id == $repo and .head_sha != $cur and .conclusion == "success"
+                   and any(.pull_requests[]?; .number == $pr))]
                  | sort_by(.created_at) | reverse | .[] | "\(.head_sha) \(.id)"' 2>/dev/null || true)
               if [ -z "$green_sha" ]; then
                 inc_reason="no earlier all-green head of this pull request in this history"
@@ -489,8 +491,8 @@ jobs:
           # The skill test set: every bats file that names the skill text, a
           # template, the skill renderer or a README. Derived by grep each run,
           # so a test that starts reading one of them joins the set without a
-          # change here. A push to main still runs every file the pull request
-          # skipped (the partial-tree record in the reuse step).
+          # change here. The release pull request and the daily run still run
+          # every file this skips.
           skill_only=false
           skill_set=""
           # Set when the skill set cannot be trusted: the whole suite runs, with
@@ -549,6 +551,29 @@ jobs:
           fi
           echo "bats_skip=$bats_skip" >> "$GITHUB_OUTPUT"
 
+          # The Windows legs with nothing to run: a docs-only diff, or every
+          # target file skipped. The legs and targets are bats-windows' matrix
+          # below (tests/test_ci_skill_set.bats checks the two agree).
+          windows_legs='install helpers=tests/test_install.bats
+          windows runtime (#567)=tests/test_codex_monitor.bats tests/test_codex_bridge_launcher.bats
+          codex hook wrapper (#1015)=tests/test_delivery.bats
+          driver input (#817)=tests/test_remote_sync_driver_input.bats'
+          idle="|"
+          while IFS='=' read -r leg targets; do
+            leg="${leg#"${leg%%[![:space:]]*}"}"
+            leg_runs=true
+            if [ "$docs_only" = true ]; then
+              leg_runs=false
+            elif [ -n "$bats_skip" ]; then
+              leg_runs=false
+              for t in $targets; do
+                case ",$bats_skip," in *",$t,"*) ;; *) leg_runs=true ;; esac
+              done
+            fi
+            [ "$leg_runs" = true ] || idle="$idle$leg|"
+          done <<< "$windows_legs"
+          echo "windows_idle_legs=$idle" >> "$GITHUB_OUTPUT"
+
       # This run's base, for the next push's incremental run (above).
       - name: Record this run's base
         if: github.event_name == 'pull_request' && github.event.action != 'closed'
@@ -566,95 +591,6 @@ jobs:
           retention-days: 14
           overwrite: true
 
-      # Whole-tree reuse, push only. A pull_request run tests GitHub's merge
-      # ref: the PR head merged into the base as it was at that moment. When
-      # the base has not moved by the time the PR is squashed in, the push
-      # run's tree is byte-identical to a tree that already passed every bats
-      # shard -- in the week after v1.7.0, 12 of the 31 push runs that ran the
-      # suite were exactly that. The pull_request run records each such tree
-      # as an artifact named green-tree-<tree hash> (see the end of the `bats`
-      # job); here the push run looks the name up and, on a hit, its shards
-      # skip the suite the way a docs-only diff does, saying which run passed
-      # it. Only artifacts from this repository's own branches count (a run
-      # from a fork cannot vouch for main), and any failure to look -- API
-      # error, malformed answer, expired record, no match -- runs the suite.
-      # The other jobs (age-v1, storage-jsonl, Windows, app, server) still run.
-      - id: reuse
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -uo pipefail
-          tree="$(git rev-parse 'HEAD^{tree}')"
-          run=""
-          if resp="$(curl -fsS --max-time 20 \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts?name=green-tree-$tree&per_page=20")"; then
-            run="$(printf '%s' "$resp" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" \
-              '[.artifacts[]? | select(.expired == false and .workflow_run.head_repository_id == $repo)][0].workflow_run.id // empty' \
-              2>/dev/null || true)"
-          fi
-          case "$run" in ''|*[!0-9]*) run="" ;; esac
-          if [ -n "$run" ]; then
-            echo "Tree $tree already passed every bats shard in run $run; the suite will not run again."
-          else
-            echo "Tree $tree has no passing pull_request run on record; running the suite."
-          fi
-          echo "reuse_run=$run" >> "$GITHUB_OUTPUT"
-
-          # A pull_request run that skipped files records its tree under
-          # partial-tree-<tree hash>, with the files it did not run. On the
-          # same tree a push then runs exactly those and nothing else: every
-          # other file already passed on this byte-identical tree. Any trouble
-          # looking, downloading or reading it leaves bats_skip empty, which
-          # runs everything.
-          bats_skip=""
-          if [ -z "$run" ]; then
-            pid=""
-            if resp="$(curl -fsS --max-time 20 \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts?name=partial-tree-$tree&per_page=20")"; then
-              pid="$(printf '%s' "$resp" | jq -r --argjson repo "$GITHUB_REPOSITORY_ID" \
-                '[.artifacts[]? | select(.expired == false and .workflow_run.head_repository_id == $repo)][0].id // empty' \
-                2>/dev/null || true)"
-            fi
-            case "$pid" in ''|*[!0-9]*) pid="" ;; esac
-            if [ -n "$pid" ] \
-               && curl -fsSL --max-time 60 -H "Authorization: Bearer $GH_TOKEN" \
-                    "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$pid/zip" -o "$RUNNER_TEMP/partial.zip" \
-               && unzip -p "$RUNNER_TEMP/partial.zip" green-tree.txt > "$RUNNER_TEMP/partial.txt"; then
-              # The record must be this tree's own and well formed, and every
-              # file it names must exist here as tests/<name>.bats; otherwise
-              # it is not trusted and everything runs.
-              todo=""
-              m="$RUNNER_TEMP/partial.txt"
-              if [ "$(grep -c '^tree ' "$m" || true)" = 1 ] && [ "$(sed -n 's/^tree //p' "$m")" = "$tree" ] \
-                 && [ "$(grep -c '^run [0-9][0-9]*$' "$m" || true)" = 1 ] \
-                 && [ "$(grep -c '^sha [0-9a-f]\{40\}$' "$m" || true)" = 1 ] \
-                 && [ "$(grep -c '^skipped ' "$m" || true)" = 1 ]; then
-                todo="$(sed -n 's/^skipped //p' "$m")"
-                case "$todo" in
-                  ''|*[!A-Za-z0-9_./,-]*) todo="" ;;
-                esac
-                for f in $(printf '%s' "$todo" | tr ',' ' '); do
-                  case "$f" in
-                    tests/*/*|tests/../*) todo="" ;;
-                    tests/*.bats) [ -f "$f" ] || todo="" ;;
-                    *) todo="" ;;
-                  esac
-                done
-              fi
-              if [ -n "$todo" ]; then
-                bats_skip="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort \
-                  | grep -vxF -f <(printf '%s' "$todo" | tr ',' '\n') | paste -sd, - || true)"
-                echo "Tree $tree passed a pull_request run that skipped $(printf '%s' "$todo" | tr ',' '\n' | grep -c .) file(s); running only those."
-              fi
-            fi
-          fi
-          echo "bats_skip=$bats_skip" >> "$GITHUB_OUTPUT"
-
   bats-shard:
     # The docs-only skip below reports this check green without running the
     # suite -- correctly, so the required aggregate can be satisfied -- but a
@@ -663,7 +599,7 @@ jobs:
     # the required contexts are `bats` (the aggregate) and the Windows install
     # leg, and neither is renamed, so branch protection sees exactly what it
     # saw. `needs` is one of the contexts a job name may read.
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.total }})${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}${{ needs.changes.outputs.reuse_run != '' && format(' — tree passed in run {0}, suite skipped', needs.changes.outputs.reuse_run) || '' }}
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.total }})${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -674,7 +610,10 @@ jobs:
     # skip at the JOB level (not just their steps) rather than each still
     # claiming a runner to run a no-op checkout+skip.
     if: ${{ !cancelled() && github.event.action != 'closed' }}
-    runs-on: ${{ matrix.os }}
+    # A macOS shard with nothing to run (an ordinary pull request, or a
+    # docs-only diff) reports from an ubuntu runner instead of waiting for a
+    # macOS one. Shard 5 stays on macOS when the jsonl contract runs there.
+    runs-on: ${{ (matrix.os == 'macos-latest' && (needs.changes.outputs.docs_only == 'true' || needs.changes.outputs.full == 'false') && !(matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')) && 'ubuntu-latest' || matrix.os }}
     # `actions: read` lets a rerun find the earlier attempt's results record (below).
     permissions:
       contents: read
@@ -741,7 +680,7 @@ jobs:
           run=true
           if [ "$DOCS_ONLY" = true ]; then
             run=false
-          elif [ "$MATRIX_OS" = macos-latest ] && [ "$FULL" != true ]; then
+          elif [ "$MATRIX_OS" = macos-latest ] && [ "$FULL" = false ]; then
             run=false
             echo "macOS shard on an ordinary pull request: skipped; macOS runs on the release pull request and daily."
           fi
@@ -753,16 +692,8 @@ jobs:
           echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
           echo "::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files; its green satisfies the required check and measures nothing (#798)"
 
-      - name: Tree already passed — skipping suite
-        if: needs.changes.outputs.reuse_run != ''
-        env:
-          REUSE_RUN: ${{ needs.changes.outputs.reuse_run }}
-        run: |
-          echo "This tree already passed every bats shard in run $REUSE_RUN; skipping the suite."
-          echo "::notice title=bats shard skipped::this tree passed every shard in run $REUSE_RUN — this shard ran 0 test files"
-
       - name: Compute this shard's test files
-        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: steps.gate.outputs.run == 'true'
         env:
           SHARD: ${{ matrix.shard }}
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
@@ -793,7 +724,7 @@ jobs:
       # remove work from a file the record positively says passed.
       - name: Plan the rerun from the earlier attempt
         id: plan
-        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: steps.gate.outputs.run == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -826,7 +757,7 @@ jobs:
           exit 0
 
       - name: Ensure sqlite3 is available (Linux)
-        if: runner.os == 'Linux' && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
+        if: runner.os == 'Linux' && steps.gate.outputs.run == 'true' && steps.plan.outputs.all_skip != 'true'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
       # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
@@ -834,14 +765,14 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
-        if: (steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
+        if: (steps.gate.outputs.run == 'true' && steps.plan.outputs.all_skip != 'true') || (matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false')
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
-        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
+        if: steps.gate.outputs.run == 'true' && steps.plan.outputs.all_skip != 'true'
         run: |
           bash --version | head -1
           sqlite3 --version
@@ -854,7 +785,7 @@ jobs:
       # measuring. It closes fds 3 and 4 for the same reason, and gives itself a
       # hard lifetime so it cannot outlive the job it is watching.
       - name: Start hang sampler
-        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == '' && steps.plan.outputs.all_skip != 'true'
+        if: steps.gate.outputs.run == 'true' && steps.plan.outputs.all_skip != 'true'
         continue-on-error: true
         run: |
           set +e
@@ -892,7 +823,7 @@ jobs:
           echo "sampler pid $!"
 
       - name: Run bats suite (this shard)
-        if: steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: steps.gate.outputs.run == 'true'
         env:
           SHARD: ${{ matrix.shard }}
           AGMSG_BATS_RESULTS: ${{ runner.temp }}/bats-results.tsv
@@ -916,11 +847,10 @@ jobs:
       # The jsonl storage contract on macOS (BSD userlands), formerly its own
       # job. Runs after the shard's files so a failure there is reported on its
       # own step, and only on shard 5 so it runs once. Gated exactly as the job
-      # it replaced was: on contracts_needed alone, NOT on a reused tree, because
-      # a tree recorded green by a pull_request run that skipped this contract
-      # (contracts_needed=false) is pushed with contracts_needed=true, and the
-      # bats result it reuses never covered this contract. bats itself is
-      # installed for this step even when the suite is skipped (below).
+      # it replaced was: on contracts_needed alone, not on the shard's own gate,
+      # so a pull request that touches the contract's inputs runs it even though
+      # the macOS shard skips its suite. bats itself is installed for this step
+      # even when the suite is skipped (below).
       - name: Storage contract against the jsonl driver (macOS)
         if: matrix.os == 'macos-latest' && matrix.shard == 5 && needs.changes.outputs.contracts_needed != 'false' && !cancelled()
         env:
@@ -939,7 +869,7 @@ jobs:
       # pipelines for the same reason: it closes the pipe early and SIGPIPEs
       # whatever was writing.
       - name: Hang forensics
-        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
         run: |
           set +e
@@ -973,7 +903,7 @@ jobs:
           exit 0
 
       - name: Upload hang samples
-        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -986,7 +916,7 @@ jobs:
       # attempt number is in the name because a rerun cannot re-upload a name an
       # earlier attempt of the same run already used.
       - name: Upload bats results (for a rerun)
-        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -996,7 +926,7 @@ jobs:
           retention-days: 7
 
       - name: Upload bats timings
-        if: always() && steps.gate.outputs.run == 'true' && needs.changes.outputs.reuse_run == ''
+        if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -1038,16 +968,8 @@ jobs:
           echo "::notice title=bats::docs-only diff — the bats suite did not run on any shard; this green satisfies the required check and measures nothing (#798)"
           printf '%s\n' "## bats: docs-only, suite skipped" "" "The diff was documentation-only, so no shard ran the bats suite. This green satisfies the required check; it is not evidence that the suite passes (#798)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Tree already passed — no suite run to verify
-        if: needs.changes.outputs.reuse_run != ''
-        env:
-          REUSE_RUN: ${{ needs.changes.outputs.reuse_run }}
-        run: |
-          echo "::notice title=bats::this tree already passed every bats shard in run $REUSE_RUN; the suite did not run again"
-          printf '%s\n' "## bats: tree already passed, suite skipped" "" "This push's tree is byte-identical to one that passed every bats shard in run $REUSE_RUN, so no shard ran the suite again." >> "$GITHUB_STEP_SUMMARY"
-
       - name: Verify the shard partition covers the whole suite
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.reuse_run == ''
+        if: needs.changes.outputs.docs_only != 'true'
         # Recomputes the partition instead of collecting each shard's own
         # record of what it ran (a bats-manifest-* artifact, downloaded and
         # unioned here). That depended on every shard from THIS run having
@@ -1065,6 +987,7 @@ jobs:
           AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
           # Linux total, macOS total: the `total` values of the bats-shard matrix.
           SHARD_TOTALS: '10 6'
+          FULL: ${{ needs.changes.outputs.full }}
         run: |
           set -euo pipefail
           expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
@@ -1088,44 +1011,15 @@ jobs:
           # grep -c exits 1 on a count of 0, which a diff that skips every file
           # legitimately produces; that is a result, not a failure.
           count="$(printf '%s\n' "$expected" | grep -c . || true)"
+          # What ran: macOS shards run only on a full run (release pull request,
+          # daily); an ordinary pull request runs the ubuntu shards alone.
+          if [ "$FULL" = true ]; then ran="the ubuntu (10) and macOS (6) shards"; else ran="the ubuntu shards only (macOS runs on the release pull request and daily)"; fi
           if [ -n "$AGMSG_BATS_SKIP" ]; then
             skipped="$(printf '%s' "$AGMSG_BATS_SKIP" | tr ',' '\n' | grep -c . || true)"
-            printf '%s\n' "## bats: suite ran, $skipped file(s) skipped" "" "The shard partition covers $count test files across $SHARD_TOTALS shards (per OS), and every shard passed. $skipped more file(s) were not run because nothing they read was changed by this diff (inputs traced per file, see .github/scripts/select-bats.mjs); a push of this exact tree runs those." >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "## bats: suite ran, $skipped file(s) skipped" "" "$count test files ran on $ran, and every shard that ran passed. $skipped more file(s) were not run because nothing they read was changed by this diff; the release pull request and the daily run cover them." >> "$GITHUB_STEP_SUMMARY"
           else
-            printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTALS shards (per OS), and every shard passed." >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "## bats: suite ran" "" "$count test files ran on $ran, and every shard that ran passed." >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      # Record a tree whose suite ran and passed, for the push that may follow
-      # (the reuse step in `changes`). A pull_request run checks out the merge
-      # ref, so this is the exact tree a squash merge produces when the base has
-      # not moved in between. Steps above fail when a shard did not pass, and
-      # the condition keeps docs-only runs (nothing ran) from recording.
-      - name: Record this tree as passed
-        id: green
-        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
-        env:
-          AGMSG_BATS_SKIP: ${{ needs.changes.outputs.bats_skip }}
-        run: |
-          tree="$(git rev-parse 'HEAD^{tree}')"
-          printf 'tree %s\nrun %s\nsha %s\n' "$tree" "$GITHUB_RUN_ID" "$GITHUB_SHA" > green-tree.txt
-          # A run that skipped files did not pass the whole suite: record it
-          # under another name, with the files left to run, so a push of this
-          # tree runs those and not everything (see the reuse step).
-          if [ -n "$AGMSG_BATS_SKIP" ]; then
-            printf 'skipped %s\n' "$AGMSG_BATS_SKIP" >> green-tree.txt
-            echo "name=partial-tree-$tree" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=green-tree-$tree" >> "$GITHUB_OUTPUT"
-          fi
-          echo "tree=$tree" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the passed-tree record
-        if: steps.green.outputs.tree != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.green.outputs.name }}
-          path: green-tree.txt
-          retention-days: 14
 
   # The age-v1 vectors are shared normative fixtures. Exercise them with the
   # pinned standard age implementation instead of accepting only mock crypto
@@ -1208,7 +1102,7 @@ jobs:
     name: storage contract (jsonl, ${{ matrix.os }})
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.contracts_needed == 'false') && 'ubuntu-latest' || matrix.os }}
     timeout-minutes: 10
     strategy:
       # Both userlands — the jsonl driver shells out to jq/sed/sort/cksum/paste,
@@ -1268,7 +1162,10 @@ jobs:
     name: bats (windows-latest, ${{ matrix.leg }})
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' }}
-    runs-on: windows-latest
+    # A leg with nothing to run reports its (required) check from an ubuntu
+    # runner, so a skip never waits for a Windows runner. Its steps skip there
+    # as before; anything unexpected in the outputs keeps it on Windows.
+    runs-on: ${{ (needs.changes.outputs.docs_only == 'true' || contains(needs.changes.outputs.windows_idle_legs, format('|{0}|', matrix.leg))) && 'ubuntu-latest' || 'windows-latest' }}
     # Bound the job so an unexpected hang can't pin a runner. The focused leg is
     # fast and green today; this is just a safety net.
     timeout-minutes: 12
@@ -1503,7 +1400,8 @@ jobs:
     # macOS: Tauri's crates (wry etc.) compile against system frameworks that
     # are already on the runner — ubuntu would need the webkit2gtk/gtk dev
     # stack installed first. Also matches the release build environment.
-    runs-on: macos-latest
+    # Skipped (app_changed=false): report from ubuntu, not a macOS runner.
+    runs-on: ${{ needs.changes.outputs.app_changed == 'false' && 'ubuntu-latest' || 'macos-latest' }}
     timeout-minutes: 20
     defaults:
       run:
@@ -1708,7 +1606,8 @@ jobs:
     name: app test (windows-latest)
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' }}
-    runs-on: windows-latest
+    # Skipped (app_changed=false): report from ubuntu, not a Windows runner.
+    runs-on: ${{ needs.changes.outputs.app_changed == 'false' && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 25
     defaults:
       run:
