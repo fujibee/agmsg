@@ -5,6 +5,8 @@
 _AGMSG_DAEMON_STATE_SH=1
 # Where the Linux boot id is read from; a test points it at a file it can remove.
 _AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
+# The kernel release is injectable so WSL's clock-evidence path is testable.
+_AGMSG_OS_RELEASE_FILE=/proc/sys/kernel/osrelease
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
@@ -29,7 +31,7 @@ _agmsg_daemon_node_verdict() {   # <pid> <boot-id>
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
-  local row state pid boot recorded_start current_boot process_start started_epoch boot_epoch start_unreliable=""
+  local row state pid boot recorded_start current_boot process_start started_epoch boot_epoch start_unreliable="" node_path positive
   [ -f "$_AGMSG_DAEMON_ROOT/run/install.db" ] || return 0
   # One sqlite invocation, read-only, bounded when another writer is busy. A
   # start refusal only explains the present state when it is newer than both the
@@ -40,13 +42,21 @@ agmsg_daemon_read_state() {
       COALESCE(o.executor_boot_id,'-'), COALESCE(o.executor_started_at,'-'),
       replace(replace(replace(COALESCE(
         (SELECT reason FROM daemon_start_attempts WHERE at > MAX(COALESCE(o.last_end_at,''), COALESCE(o.started_at,'')) ORDER BY at DESC, rowid DESC LIMIT 1),
-        o.last_end_reason, 'executor unavailable'),char(9),' '),char(10),' '),char(13),' ')
-    FROM daemon_owner o CROSS JOIN daemon_intent i;
+        o.last_end_reason, 'executor unavailable'),char(9),' '),char(10),' '),char(13),' '), COALESCE(m.node_path,'-')
+    FROM daemon_owner o CROSS JOIN daemon_intent i CROSS JOIN meta m;
   " 2>/dev/null)" || return 0
   [ -n "$row" ] || return 0
-  IFS=$'\t' read -r AGMSGD_DESIRED state pid boot recorded_start AGMSGD_REASON <<< "$row"
+  IFS=$'\t' read -r AGMSGD_DESIRED state pid boot recorded_start AGMSGD_REASON node_path <<< "$row"
   AGMSGD_HEALTH=stopped
   [ "$state" = ready ] || { AGMSGD_REASON="$state: $AGMSGD_REASON"; return 0; }
+  # Ask the owner first. A sandbox's PID view cannot contradict a control
+  # response or a recent heartbeat from the recorded owner.
+  if [ -x "$node_path" ] && [ -f "$_AGMSG_DAEMON_ROOT/scripts/daemon/heartbeat.mjs" ]; then
+    positive="$("$node_path" --disable-warning=ExperimentalWarning "$_AGMSG_DAEMON_ROOT/scripts/daemon/heartbeat.mjs" "$_AGMSG_DAEMON_ROOT" 2>/dev/null)" || positive=""
+    case "$positive" in
+      running:*) AGMSGD_HEALTH=ready; AGMSGD_REASON=""; return 0 ;;
+    esac
+  fi
   case "$pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
   case "$(uname -s)" in
     Darwin)
@@ -74,7 +84,7 @@ agmsg_daemon_read_state() {
       # A stepped clock also moves that start time, by as much as the step, so
       # there it cannot say a pid was reused after the owner's claim.
       local osrelease=""
-      read -r osrelease 2>/dev/null < /proc/sys/kernel/osrelease || true
+      read -r osrelease 2>/dev/null < "$_AGMSG_OS_RELEASE_FILE" || true
       case "$osrelease" in
         *[Mm]icrosoft*) start_unreliable=1 ;;
       esac
@@ -174,7 +184,16 @@ agmsg_daemon_read_state() {
   case "$process_state" in
     *Z*|*T*) AGMSGD_REASON="executor exited or suspended ($AGMSGD_REASON)"; return 0 ;;
     # ps unreadable: the daemon's own judgement stands where it was taken.
-    '') [ -n "$node_alive" ] || { AGMSGD_REASON="executor exited or suspended ($AGMSGD_REASON)"; return 0; } ;;
+    '')
+      if [ -z "$node_alive" ]; then
+        case "$(_agmsg_pid_signal_presence "$pid")" in
+          gone) AGMSGD_REASON="executor exited or suspended ($AGMSGD_REASON)"; return 0 ;;
+          *)
+            AGMSGD_HEALTH=unchecked
+            AGMSGD_REASON="the executor's process state cannot be read from here"
+            return 0 ;;
+        esac
+      fi ;;
   esac
   AGMSGD_HEALTH=ready
   AGMSGD_REASON=""

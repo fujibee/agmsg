@@ -831,22 +831,22 @@ cmd_start() {
     '') ;;
     *) _usage; return 2 ;;
   esac
-  _ensure_install_db_schema
-  # Before the "already running" answer below: a running agmsgd picks the
-  # record up at its next start (the update path restarts it).
-  [ "$(_os)" = windows ] || _record_tool_path
-  local state
-  state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
-  local running_node
+  _require_install_db
+  local running_node observed=""
   running_node="$(_resolve_node 2>/dev/null || true)"
-  if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
-    echo "agmsg daemon start: already running"
-    _tool_path_restart_hint
-    _agmsg_down_notice_clear_if_present agmsgd
-    agmsg_daemon_seat_report start
-    _path_hint status
-    return 0
+  if [ -n "$running_node" ]; then
+    observed="$("$running_node" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/heartbeat.mjs" "$SKILL_DIR" --start)" || observed=""
   fi
+  case "$observed" in
+    running:*)
+      echo "agmsg daemon start: already running (${observed#running:}); nothing was changed"
+      _path_hint status
+      return 0 ;;
+  esac
+  _ensure_install_db_schema
+  # Record tool paths only when actually starting. A live no-op above must
+  # not change the configuration a future daemon would read.
+  [ "$(_os)" = windows ] || _record_tool_path
 
   # A install that was never enabled (enable refuses without a service
   # manager) has no Node recorded, and the launcher cannot start without
@@ -958,10 +958,12 @@ cmd_stop() {
   local desired
   desired="$(agmsg_sqlite "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
   if [ "$desired" != "on" ]; then
+    rm -f -- "$SKILL_DIR/run/agmsgd-heartbeat.json" || echo "agmsg daemon stop: could not remove the heartbeat file" >&2
     echo "agmsg daemon stop: already stopped"
     return 0
   fi
   agmsg_sqlite "$INSTALL_DB" "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'stop', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  rm -f -- "$SKILL_DIR/run/agmsgd-heartbeat.json" || echo "agmsg daemon stop: could not remove the heartbeat file" >&2
   local socket
   socket="$(agmsg_sqlite "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
   _request_stop_over_socket "$socket"
