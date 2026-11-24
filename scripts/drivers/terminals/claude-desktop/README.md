@@ -53,7 +53,8 @@ caller must never read this as `gone` and delete the placement record on it.
 
 ## Monitor / delivery
 
-Unchanged by this driver. Receiving agmsg messages in the desktop app's Code
-tab goes through the same delivery every other Claude Code seat uses: agmsgd
-(no Monitor involved) when it is enabled and has confirmed this seat's
-destination, otherwise the Monitor (legacy) stream.
+In the Claude desktop app's Code tab, an enabled and running agmsgd delivers through the Local session's cross-session socket, including while the conversation is idle. No Monitor is needed for that native channel; Monitor (legacy) remains an alternative when direct delivery is unavailable. On macOS with agmsg 1.8.2, notices arrived 1–5 seconds after sending.
+
+Use a Local session and select the project folder for a lasting seat. Cloud sessions cannot reach this machine's install; without a selected folder, the app uses a scratch workspace. Run `/agmsg actas <name>` in each new chat to move delivery there; otherwise notices continue to the old chat. Handoff replaces the destination rather than failing as held. When a chat's process ends, delivery stops until another `actas`; queued messages remain and arrive afterwards.
+
+Desktop delivery is verified on macOS. Identity, CLI session, and reach in team status are `n/a`, as in the Codex app; this is not an unverified pane identity.

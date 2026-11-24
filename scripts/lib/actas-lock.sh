@@ -802,6 +802,57 @@ actas_lock_reclaim_same_process() {   # <team> <agent> <new-owner>
   agmsg_lock_claim_at "$lock_path" "$new_owner"
 }
 
+# A desktop app conversation takes the role over from another one (decided
+# 2026-11-23): a desktop seat has no pane, and "the old chat is still open" is
+# the normal state when someone starts a new chat for the same role, so the new
+# chat wins instead of being told the role is held. Only a terminal driver whose
+# manifest says actas_takeover=1 may call this (actas-claim.sh checks); terminal
+# seats keep the held refusal.
+#
+# Same move as the same-process handoff above: the new owner is written beside
+# the lock and `mv`d over it in one rename, so the path is never absent, under
+# the same reclaim mutex. Unlike that one it does not require the old owner to be
+# the same pid, and it still leaves an unreadable or empty lock alone (those are
+# "wait", not "take"). Output/exit codes as actas_lock_claim.
+actas_lock_takeover() {   # <team> <agent> <new-owner>
+  local team="$1" agent="$2" new_owner="$3" lock_path mutex mres rd result="unknown:not_taken" rc=1
+  lock_path="$(actas_lock_path "$team" "$agent")" || { echo "unknown:lock_ambiguous"; return 1; }
+  mutex="$(_agmsg_lock_mutex_path "$lock_path")"
+  mres="$(_agmsg_lock_mutex_take "$mutex" "$new_owner")"
+  case "$mres" in
+    ok) ;;
+    held:*)    printf 'unknown:takeover_contended\n'; return 1 ;;
+    unknown:*) printf 'unknown:takeover_mutex:%s\n' "${mres#unknown:}"; return 1 ;;
+    *)         printf 'unknown:takeover_mutex_unclassified\n'; return 1 ;;
+  esac
+  rd="$(_actas_lock_read_path "$lock_path")"
+  if [ "${rd%%$'\t'*}" = "ok" ] && [ -n "${rd#*$'\t'}" ]; then
+    local dir tmp w
+    dir="${lock_path%/*}"
+    if tmp="$(mktemp "$dir/.actas-takeover.XXXXXX" 2>/dev/null)"; then
+      if printf '%s\n' "$new_owner" > "$tmp" 2>/dev/null; then
+        w="$(_actas_lock_read_path "$tmp")"
+        if [ "${w%%$'\t'*}" = "ok" ] && [ "${w#*$'\t'}" = "$new_owner" ]; then
+          if mv "$tmp" "$lock_path" 2>/dev/null; then result="ok"; rc=0
+          else result="unknown:takeover_rename_failed"; fi
+        else
+          result="unknown:takeover_write_unverified"
+        fi
+      else
+        result="unknown:takeover_write_failed"
+      fi
+      rm -f "$tmp" 2>/dev/null
+    else
+      result="unknown:takeover_write_failed"
+    fi
+  fi
+  agmsg_lock_release_at "$mutex" "$new_owner"
+  if [ "$rc" -eq 0 ]; then echo ok; return 0; fi
+  if [ "$result" != "unknown:not_taken" ]; then printf '%s\n' "$result"; return 1; fi
+  # Nothing readable to take over: the ordinary claim decides and reports.
+  agmsg_lock_claim_at "$lock_path" "$new_owner"
+}
+
 # Where the reclaim mutex for a lock lives: beside it, one file.
 _agmsg_lock_mutex_path() {   # <lock-path>
   printf '%s.reclaim' "$1"

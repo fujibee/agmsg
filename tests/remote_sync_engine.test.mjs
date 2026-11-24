@@ -6100,7 +6100,16 @@ test("reprocess reports the first failing candidate in order, even if a later on
   assert.deepEqual(fixture.applied, []);
 });
 
-test("reprocess evaluates again what was started ahead of a key rotation", async () => {
+test("reprocess evaluates again what was started ahead of a key rotation", async (t) => {
+  // The look-ahead is twice the decrypt concurrency, which follows the host's
+  // cores; a 3-core runner looks one message less ahead and the counts below
+  // would not hold. Pin it so every candidate is started ahead of the rotation.
+  const previousJobs = process.env.AGMSG_AGE_DECRYPT_JOBS;
+  process.env.AGMSG_AGE_DECRYPT_JOBS = "2";
+  t.after(() => {
+    if (previousJobs === undefined) delete process.env.AGMSG_AGE_DECRYPT_JOBS;
+    else process.env.AGMSG_AGE_DECRYPT_JOBS = previousJobs;
+  });
   const calls = {};
   const fixture = reprocessFixture(4, async (_c, _caps, message) => {
     calls[message.server_seq] = (calls[message.server_seq] ?? 0) + 1;

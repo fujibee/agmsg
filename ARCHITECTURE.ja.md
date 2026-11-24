@@ -25,6 +25,8 @@ agmsg は4つの直交する軸を中心に構築されており、各軸には�
 
 **terminal は設定ではなく検出される** — セッションは、自分がどの terminal ドライバーの下で動いているかを（どれにも一致しなければ最後の手段である `plain` に落ちて）、指示されるのではなく自分で判断する。それ以外は同じ種類のドライバーであり、固定されたプロトコル（`terminal_*` 関数。[`docs/spec/driver-interface.md`](docs/spec/driver-interface.md) §6 参照）の背後で `herdr`、`tmux`、`orca`、通常の OS ターミナルが交換可能であり、他の3軸と同じ discovery/trust プロトコルを共有する。他の軸と違って、メンバーは terminal の機能が一切なくても機能する — `plain` は「アドレス指定できるペインなし」に縮退するだけで、メッセージングは続く。terminal が加えるのは、他のメンバーのペインを探し、読み、入力する能力だけである。
 
+デスクトップ席はペインではなくagentタイプごとのネイティブchannelで受信する。Claude Codeはセッションのsocket、Codexは記録したthreadとprofileを使うCodex queue経由で届く（macOSで確認済み）。
+
 ## ドライバー (driver) と プラグイン (plugin)
 
 - **driver（ドライバー）** はアーキテクチャ上の単位である。バンドルされた実装もユーザーがインストールしたものも、どちらもドライバーである。

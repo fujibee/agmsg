@@ -25,6 +25,8 @@ The three configuration axes are independent: any storage driver can be paired w
 
 **terminal is detected, not configured** — a session determines which terminal driver it is running under (or falls back to `plain`, the driver of last resort, if none matches) rather than being told. It is otherwise the same kind of driver: a fixed protocol (`terminal_*` functions, see [`docs/spec/driver-interface.md`](docs/spec/driver-interface.md) §6) behind which `herdr`, `tmux`, `orca`, and a plain OS terminal are interchangeable, and it shares the same discovery/trust protocol as the other three. Unlike them, a member can function with no terminal capability at all — `plain` degrades to "no addressable pane," and messaging keeps working; terminal only adds the ability to locate, read, or type into another member's pane.
 
+Desktop seats receive through the agent type's native channel rather than a pane: Claude Code uses its session socket, and Codex uses its recorded thread and profile through the Codex queue (verified on macOS).
+
 ## Driver vs plugin
 
 - **driver** is the architectural unit. Both bundled implementations and user-installed ones are drivers.

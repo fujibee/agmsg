@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-11-24
+
+### Added
+- Desktop apps: Claude Code in the Claude desktop app's Code tab (Local sessions) and Codex in the Codex desktop app join a team as seats. agmsgd delivers to them even while the conversation is idle: Claude Code through the session's cross-session socket, Codex through the Codex queue with the thread and profile recorded by actas. Verified on macOS (#2016, #2025)
+
+### Changed
+- actas: in a desktop app, running actas in a new chat takes the role over and delivery moves to that chat; without it, delivery stays with the old chat. A terminal seat still refuses a role held by another live session (#2016)
+
+### Fixed
+- delivery: `agmsg delivery agmsgd` for Codex and the other types prints only the agmsgd result, not the monitor-mode setup and shim advice (#2016)
+- team: a Codex desktop app seat shows identity, CLI session and reach as n/a, the same as a Claude Code desktop seat (#2016)
+- remote: unlock reprocessing decrypts a few messages at once and reads a page's local ids in one call (#2022)
+- input-box: a labeled Claude Code top rule is paired with the full-width bottom rule (#2005)
+- scripts: grep -q input is read without a pipe, so a skipped match cannot change a result (#2011)
+- tests: AGMSG_HOME and AGMSG_INSTALL_HOME are cleared, and a test that changes the real state directory fails (#2008)
+- CI: a rerun runs only the tests the earlier attempt did not pass (#2010)
+
+[1.9.0]: https://github.com/fujibee/agmsg/compare/v1.8.2...v1.9.0
+
 ## [1.8.2] - 2026-11-21
 
 ### Fixed

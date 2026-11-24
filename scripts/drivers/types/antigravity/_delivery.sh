@@ -61,8 +61,12 @@ EOF
     # not, but also proving nothing about the actual pre-#1248 text.
     [ -n "${LEGACY_PRE1248_NOTES_PATH:-}" ] || return 1
     local expected_pre1248="${expected/drivers\/terminals\/<terminal>\/README.md/$LEGACY_PRE1248_NOTES_PATH}"
+    # Accept the current turn rule and the manually applied trigger workaround,
+    # while retaining exact matching for both historical generated bodies.
+    local frontmatter=$'---\ntrigger: always_on\n---\n\n'
     actual="$(cat "$file")"
-    if [ "$actual" != "$expected" ] && [ "$actual" != "$expected_pre1248" ]; then
+    if [ "$actual" != "$expected" ] && [ "$actual" != "$expected_pre1248" ] &&
+       [ "$actual" != "$frontmatter$expected" ] && [ "$actual" != "$frontmatter$expected_pre1248" ]; then
       echo 'existing rule file is not in agmsg format' >&2; return 1
     fi
   fi

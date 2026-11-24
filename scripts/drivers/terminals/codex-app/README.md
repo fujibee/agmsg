@@ -8,4 +8,10 @@ The placement ID is the caller-supplied thread ID, falling back to `CODEX_THREAD
 
 Peek, poke, spawn, despawn, arrange, and name return `unsupported` (13) with a reason naming the Codex desktop app. Pane-state reports `unknown` / 13, never `gone`; there is no pane whose disappearance could justify deleting the conversation record. Activity, label, key, and title observations are `n/a:no_addressable_pane`.
 
-This driver does not change delivery or wake idle desktop conversations.
+## Delivery
+
+With agmsgd enabled and running, notices arrive through the Codex queue using the thread and `codex_home` recorded by `actas`. The Codex app uses `~/.codex`. Delivery reaches idle desktop conversations; on macOS with agmsg 1.8.2, notices arrived 1–5 seconds after sending. The terminal driver supplies placement information; the agent type supplies the native delivery channel.
+
+Run `$agmsg actas <name>` in each new chat to move delivery there. Until then it continues to the old chat. The new destination replaces the old record rather than failing as held. Monitor (legacy) and the shell shim apply to the terminal CLI, not this app.
+
+The app shell has networking disabled by its sandbox. Local `send` and `inbox` work; remote sync and other network operations cannot run from that shell. Desktop delivery is verified on macOS. Identity, CLI session, and reach in team status are `n/a` because there is no addressable pane.
