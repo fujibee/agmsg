@@ -3254,6 +3254,37 @@ export async function rosterSequencesFor(config, dependencies = {}) {
   return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
 }
 
+// The member ids in this team's local roster, and the ids its roster journal
+// records as having left. Null when either cannot be read, so the caller
+// falls back to names rather than guessing.
+export async function localMemberIds(config, dependencies = {}) {
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const rosterFile = dependencies.rosterFile ?? rosterFileFor(config.local_team);
+  if (!rosterFile) return null;
+  try {
+    const value = JSON.parse(await readFileCall(rosterFile, "utf8"));
+    if (!value?.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) return null;
+    const ids = new Set();
+    for (const agent of Object.values(value.agents)) {
+      if (typeof agent?.member_id !== "string" || !agent.member_id) return null;
+      ids.add(agent.member_id);
+    }
+    const left = new Set();
+    let text = "";
+    try { text = await readFileCall(join(dirname(rosterFile), "roster.jsonl"), "utf8"); }
+    catch (error) { if (error?.code !== "ENOENT") return null; }
+    for (const line of text.split(/\r?\n/u)) {
+      if (!line) continue;
+      let record;
+      try { record = JSON.parse(line); } catch { return null; }
+      if (record?.type === "member_left" && typeof record.member_id === "string") left.add(record.member_id);
+    }
+    return { ids, left };
+  } catch {
+    return null;
+  }
+}
+
 export async function readStateCycle(config, limit, dependencies = {}) {
   const driverCall = dependencies.driverCall ?? driver;
   const requestCall = dependencies.requestCall ?? request;
@@ -3290,8 +3321,17 @@ export async function readStateCycle(config, limit, dependencies = {}) {
   // is a wait, not a fault, and the names are what make it actionable -- an
   // agent about to pick its own name needs to know which ones are taken, which
   // is the whole reason `docs/remote-setup.md` step 4 exists.
+  //
+  // Compared by member id when the local ids can be read (#2035): the server's
+  // list stays at the roster the team registered with, so a seat renamed since
+  // keeps its id under a new name here, and a seat that left is still listed
+  // there. Neither is a member this machine is waiting for. Names are the
+  // fallback when the ids cannot be read.
+  const known = await (dependencies.localMemberIdsCall ?? localMemberIds)(config);
   const unmaterialised = members
-    .filter((member) => !localAgents.includes(member.name))
+    .filter((member) => known
+      ? !known.ids.has(member.member_id) && !known.left.has(member.member_id)
+      : !localAgents.includes(member.name))
     .map((member) => member.name);
   if (unmaterialised.length > 0) {
     await eventCall("roster.incomplete", {

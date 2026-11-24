@@ -50,6 +50,7 @@ import {
   pullBootstrap,
   parseStrictJsonl,
   readStateCycle,
+  localMemberIds,
   rosterSequencesFor,
   readStateUpdateBatches,
   reprocessCycle,
@@ -1744,6 +1745,51 @@ test("read-state stays quiet once the roster has caught up", async () => {
   await readStateCycle(config, 100, readStateHarness(threeMembers,
     [...threeMembers.map((member) => member.name), "masa-mini"], extra));
   assert.deepEqual(extra.filter(([name]) => name === "roster.incomplete"), []);
+});
+
+test("read-state compares members by id: a renamed or departed seat is not missing (#2035)", async () => {
+  const events = [];
+  const harness = readStateHarness(threeMembers, ["masa-renamed"], events);
+  // masa-claude is "masa-renamed" here now (same id); masa-codex left; masa-grok is unknown.
+  harness.localMemberIdsCall = async () => ({
+    ids: new Set([threeMembers[0].member_id]),
+    left: new Set([threeMembers[1].member_id]),
+  });
+  await readStateCycle(config, 100, harness);
+  const incomplete = events.filter(([name]) => name === "roster.incomplete");
+  assert.equal(incomplete.length, 1);
+  assert.deepEqual(incomplete[0][1], { server_members: 3, local_members: 1, missing: ["masa-grok"] });
+
+  const quiet = [];
+  const caughtUp = readStateHarness(threeMembers, ["masa-renamed"], quiet);
+  caughtUp.localMemberIdsCall = async () => ({
+    ids: new Set([threeMembers[0].member_id, threeMembers[2].member_id]),
+    left: new Set([threeMembers[1].member_id]),
+  });
+  await readStateCycle(config, 100, caughtUp);
+  assert.deepEqual(quiet.filter(([name]) => name === "roster.incomplete"), []);
+});
+
+test("localMemberIds reads the roster's ids and the journal's departures, and gives up on anything unreadable", async () => {
+  const files = {
+    "/t/config.json": JSON.stringify({ agents: { alpha: { member_id: "id-1" }, beta: { member_id: "id-2" } } }),
+    "/t/roster.jsonl": '{"type":"member_joined","member_id":"id-3"}\n{"type":"member_left","member_id":"id-3"}\n',
+  };
+  const readFileCall = async (path) => {
+    if (path in files) return files[path];
+    throw Object.assign(new Error("missing"), { code: "ENOENT" });
+  };
+  const result = await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall });
+  assert.deepEqual([...result.ids].sort(), ["id-1", "id-2"]);
+  assert.deepEqual([...result.left], ["id-3"]);
+
+  delete files["/t/roster.jsonl"];
+  assert.deepEqual([...(await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall })).left], []);
+
+  files["/t/roster.jsonl"] = "{not json\n";
+  assert.equal(await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall }), null);
+  files["/t/config.json"] = JSON.stringify({ agents: { alpha: {} } });
+  assert.equal(await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall }), null);
 });
 
 test("read-state context refetches a concurrent retention floor", async () => {

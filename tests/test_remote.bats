@@ -316,12 +316,12 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   # the team (and losing its local history).
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" == *"adopting that registration"* ]]
+  grep -Fq "adopting that registration" <<<"$output"
   [ -n "$(_binding_field testteam server_instance_id)" ]
   [ "$(_binding_field testteam remote_team_name)" = "testteam" ]
 }
 
-@test "connect: refuses to re-anchor a binding to a different server instance" {
+@test "connect: re-attaches to a rebuilt server at the same address and says so (#2035)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   local anchored
@@ -356,21 +356,13 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   echo "DIAG(#1176) reconnect: status=$status output=$output"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Refusing to re-anchor"* ]]
-  # The binding still points at the server it was made against.
-  [ "$(_binding_field testteam server_instance_id)" = "$anchored" ]
-
-  # And the way out the refusal names has to WORK. disconnect drops the claim
-  # on the old anchor; the connect after it must get through, not land back on
-  # the same refusal. A refusal with no reachable next state is the defect this
-  # whole change exists to remove.
-  run bash "$SCRIPTS/remote.sh" disconnect testteam
   [ "$status" -eq 0 ]
-  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"Refusing to re-anchor"* ]]
+  grep -Fq "now answers as server instance" <<<"$output"
+  grep -Fq "was bound to $anchored" <<<"$output"
+  refute grep -Fq "Refusing" <<<"$output"
+  # The binding moved to the server answering now.
   [ "$(_binding_field testteam server_instance_id)" != "$anchored" ]
+  [ -n "$(_binding_field testteam server_instance_id)" ]
 }
 
 @test "connect: a repeat run cannot restate the registered cipher profile" {
@@ -525,6 +517,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   grep -Fq "is now server instance 018f3f7e-2222-7000-8000-0000000000ff" <<<"$output"
   grep -Fq "bound to $anchored" <<<"$output"
   grep -Fq "Refusing to re-anchor" <<<"$output"
+  grep -Fq "remote.sh disconnect 'testteam', then remote.sh connect --endpoint <the new endpoint> 'testteam'" <<<"$output"
   # And nothing was written: the binding still names the verified address.
   [ "$(_binding_field testteam endpoint)" = "$ENDPOINT" ]
   [ "$(_binding_field testteam server_instance_id)" = "$anchored" ]
@@ -754,7 +747,7 @@ _capability_endpoint() {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/rotate-server-id" >/dev/null
-  assert_no_capability "Refusing to re-anchor" \
+  assert_no_capability "now answers as server instance" \
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
@@ -763,7 +756,7 @@ _capability_endpoint() {
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS --get --data-urlencode "from=testteam" --data-urlencode "to=someone-elses" \
     "$ENDPOINT/_test/rename-team" >/dev/null
-  assert_no_capability "not this team's" \
+  assert_no_capability "under the name 'someone-elses'" \
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
@@ -773,7 +766,7 @@ _capability_endpoint() {
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" updated
   updated="$(sqlite_mem "SELECT json_set(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.intruder', json_object('member_id', '018f3f7e-9999-7000-8000-00000000cafe'));")"
   printf '%s' "$updated" > "$cfg"
-  assert_no_capability "roster is not this team's" \
+  assert_no_capability "differs from this team's roster" \
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
@@ -797,22 +790,23 @@ _capability_endpoint() {
   [ "$(_remote_endpoint_display 'https://host/a@b/c')" = "https://host" ]
 }
 
-@test "connect: refuses to adopt a registration whose roster is not this team's" {
+@test "connect: a member the server does not list is reported and connect continues (#2035)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
 
   # Give the local team a member the server's registration does not have. The
-  # team_id still matches, so only the roster check can tell these apart --
-  # and adopting on a name match alone would be the bug.
+  # team_id still matches, so the member ids are what
+  # say how the two lists differ, and the difference is reported, not refused.
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json"
   local updated
   updated="$(sqlite_mem "SELECT json_set(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.intruder', json_object('member_id', '018f3f7e-9999-7000-8000-00000000dead'));")"
   printf '%s' "$updated" > "$cfg"
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"roster is not this team's"* ]]
-  [[ "$output" == *"real conflict"* ]]
+  [ "$status" -eq 0 ]
+  grep -Fq "differs from this team's roster (1 in both; 1 only here, joined after the registration; 0 on the server that left this team; 0 on the server with no record here)" <<<"$output"
+  grep -Fq "adopting that registration" <<<"$output"
+  refute grep -Fq "is on the server's list" <<<"$output"
 }
 
 # The server's member list stays at the roster the team registered with; later
@@ -844,7 +838,7 @@ _journal_for_registration() {
   grep -Fq "is an earlier state of this team's roster" <<<"$output"
 }
 
-@test "connect: a journal that synced to another server instance does not unlock adoption (#2030)" {
+@test "connect: a journal that synced to another server instance is not taken as proof; the drift is reported (#2030, #2035)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id updated
@@ -854,11 +848,12 @@ _journal_for_registration() {
   printf '%s' "$updated" > "$cfg"
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
-  [ "$status" -ne 0 ]
-  grep -Fq "roster is not this team's" <<<"$output"
+  [ "$status" -eq 0 ]
+  refute grep -Fq "is an earlier state of this team's roster" <<<"$output"
+  grep -Fq "1 only here, joined after the registration" <<<"$output"
 }
 
-@test "connect: a server member this team never had still refuses adoption (#2030)" {
+@test "connect: a journal with no join for a server member is not taken as proof; the drift is reported (#2030, #2035)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id instance journal
@@ -872,11 +867,12 @@ _journal_for_registration() {
   printf '%s' "$updated" > "$cfg"
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
-  [ "$status" -ne 0 ]
-  grep -Fq "roster is not this team's" <<<"$output"
+  [ "$status" -eq 0 ]
+  refute grep -Fq "is an earlier state of this team's roster" <<<"$output"
+  grep -Fq "1 only here, joined after the registration" <<<"$output"
 }
 
-@test "connect: a join entry with no member id does not vouch for an unknown server member (#2030)" {
+@test "connect: a join entry with no member id is not taken as proof; the drift is reported (#2030, #2035)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" team_id instance journal updated
@@ -890,8 +886,71 @@ _journal_for_registration() {
   printf '%s' "$updated" > "$cfg"
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
-  [ "$status" -ne 0 ]
-  grep -Fq "roster is not this team's" <<<"$output"
+  [ "$status" -eq 0 ]
+  refute grep -Fq "is an earlier state of this team's roster" <<<"$output"
+  grep -Fq "1 only here, joined after the registration" <<<"$output"
+}
+
+# Drift is reported by member id, and connect continues (#2035).
+_drop_local_member() {
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" updated
+  updated="$(sqlite_mem "SELECT json_remove(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents.$1');")"
+  printf '%s' "$updated" > "$cfg"
+}
+
+@test "connect: a server member this team's journal records as left is reported as left (#2035)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" mid
+  mid="$(jq -r '.agents.alice.member_id' "$cfg")"
+  [ -n "$mid" ] && [ "$mid" != null ]
+  printf '{"type":"member_left","member_id":"%s","name":"alice"}\n' "$mid" > "$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
+  _drop_local_member alice
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  grep -Fq "(0 in both; 1 only here, joined after the registration; 1 on the server that left this team; 0 on the server with no record here)" <<<"$output"
+}
+
+@test "connect: a plain team that shares no member with the registration is reported with the command to stop (#2035)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
+  _drop_local_member alice
+  # No journal to vouch for the registration (lost, or a different team).
+  : > "$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  grep -Fq "0 on the server that left this team; 1 on the server with no record here" <<<"$output"
+  grep -Fq "no member of team 'testteam' is on the server's list for this team id" <<<"$output"
+  grep -Fq "remote.sh disconnect 'testteam'" <<<"$output"
+}
+
+@test "connect: a renamed member keeps its id and is not reported as drift (#2035)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" updated
+  # Same member id under a new name: the server still lists it as alice.
+  updated="$(sqlite_mem "SELECT json_set(json_remove(j, '\$.agents.alice'), '\$.agents.alicia', json_extract(j, '\$.agents.alice')) FROM (SELECT CAST(readfile('$(rf "$cfg")') AS TEXT) AS j);")"
+  printf '%s' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  refute grep -Fq "differs from this team's roster" <<<"$output"
+}
+
+@test "connect: a different team name on the registration is reported and connect continues (#2035)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  curl -sS --get --data-urlencode "from=testteam" --data-urlencode "to=other-name" \
+    "$ENDPOINT/_test/rename-team" >/dev/null
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  grep -Fq "under the name 'other-name'; this team is 'testteam'. The team id matches, so continuing." <<<"$output"
+  grep -Fq "adopting that registration" <<<"$output"
 }
 
 @test "connect: the capability path never reaches the terminal" {
@@ -1432,7 +1491,7 @@ _journal_for_registration() {
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" == *"adopting that registration"* ]]
+  grep -Fq "adopting that registration" <<<"$output"
   # No POST was attempted: the announcement that precedes it is absent, and a
   # POST here would have been refused 409.
   [[ "$output" != *"Connecting team"* ]]
