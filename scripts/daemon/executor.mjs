@@ -131,18 +131,30 @@ export function windowsProcessStart(pid, run = execFileSync) {
   }
 }
 
-// Windows hands a freed pid to the next process within about a second
-// (measured: an agmsgd node killed with taskkill /F, and one second later the
-// same pid was a bash.exe started that second). Git Bash has no boot-scoped
-// start time to compare, so a live answer for the recorded pid is checked
-// against the owner's claim instead: the executor claims ownership after it
-// starts, so a process that started after the claim is another process. True
-// only on that evidence; an unreadable start or claim time proves nothing.
-export function startedAfterClaim(pid, startedAt, startOf = windowsProcessStart) {
+function pidAnswers(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code !== "ESRCH"; }
+}
+
+// Windows hands a freed pid to the next process at once. Measured after
+// taskkill /F on agmsgd's node: the pid was gone immediately, then answered
+// again for about a quarter of a second, several times within three seconds,
+// each time a short-lived process that had picked the number up. So a live
+// answer for the recorded pid is checked against the owner's claim: the
+// executor claims ownership after it starts, so a process that started after
+// the claim is another process. A start time that cannot be read is most
+// often such a process already gone again; the pid is asked once more, and a
+// pid that no longer answers is gone. A pid that keeps answering with no
+// readable start time proves nothing (up to `tries` reads, one powershell
+// each). An unreadable claim time proves nothing either.
+export function windowsOwnerReplaced(pid, startedAt, { startOf = windowsProcessStart, answers = pidAnswers, tries = 3 } = {}) {
   const claimed = Date.parse(startedAt ?? "");
   if (!Number.isFinite(claimed)) return false;
-  const started = startOf(pid);
-  return Number.isFinite(started) && started > claimed;
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    if (!answers(pid)) return true;
+    const started = startOf(pid);
+    if (Number.isFinite(started)) return started > claimed;
+  }
+  return false;
 }
 
 export function isAlive({ pid, bootId: capturedBootId, startedAt }, { plat = platform(), current = bootId(), startOf = windowsProcessStart } = {}) {
@@ -160,7 +172,7 @@ export function isAlive({ pid, bootId: capturedBootId, startedAt }, { plat = pla
     if (error?.code !== "EPERM") return null;
   }
   // The pid exists. On Windows it may already belong to a newer process.
-  if (plat === "win32" && startedAfterClaim(pid, startedAt, startOf)) return false;
+  if (plat === "win32" && windowsOwnerReplaced(pid, startedAt, { startOf })) return false;
   // The pid exists, but an old-format record cannot say it is the same boot.
   return sameBootId === null ? null : true;
 }

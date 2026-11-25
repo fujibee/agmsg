@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openInstallDb, withImmediateTransaction } from './db.mjs';
 import { PROTOCOL_VERSION } from './control.mjs';
-import { startedAfterClaim } from './executor.mjs';
+import { windowsOwnerReplaced } from './executor.mjs';
 
 export const HEARTBEAT_MAX_AGE_MS = 20_000;
 export const HEARTBEAT_RECHECK_MS = 5_000;
@@ -34,14 +34,14 @@ export function pidGone(pid) {
 // on Linux, the namespace the heartbeat recorded). A heartbeat without a
 // namespace on Linux, a missing pid, or a "cannot tell" leaves the heartbeat
 // in charge.
-export function executorProvedDead(owner, record, { plat = platform(), ownNs = pidNamespace(plat), gone = pidGone, startedAfter = startedAfterClaim } = {}) {
+export function executorProvedDead(owner, record, { plat = platform(), ownNs = pidNamespace(plat), gone = pidGone, replaced = windowsOwnerReplaced } = {}) {
   const pid = Number(owner?.executor_pid);
   if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   if (plat === 'linux' && (!record?.pid_ns || record.pid_ns !== ownNs)) return false;
   if (gone(pid) === true) return true;
-  // Windows reuses a freed pid within about a second, so a pid that still
-  // answers may be a newer process (see startedAfterClaim).
-  return plat === 'win32' && startedAfter(pid, owner?.executor_started_at) === true;
+  // Windows hands a freed pid to the next process at once, so a pid that
+  // still answers may be another process (see windowsOwnerReplaced).
+  return plat === 'win32' && replaced(pid, owner?.executor_started_at) === true;
 }
 
 export function readHeartbeat(root, { installId, gen }, now = Date.now()) {
