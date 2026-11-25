@@ -184,7 +184,7 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
     ln -sfn "$FAKE_HOME/.agmsg/$cmd/$f" "$FAKE_HOME/.agents/skills/$cmd/$f" || return 1
   done
   for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path" \
-           ".agents/skills/$cmd/.agmsg" ".agmsg/$cmd/.owner"; do
+           ".agents/skills/$cmd/.agmsg"; do
     [ -f "$FAKE_HOME/$f" ] || continue
     # cat into the existing file keeps its mode (the launcher is 0711).
     sed "s|$esc|$FAKE_HOME|g" "$FAKE_HOME/$f" > "$BATS_TEST_TMPDIR/restore-rewrite" || return 1

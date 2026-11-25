@@ -485,16 +485,34 @@ _uninstall_one() {
   # the data they point at is removed here, by the same rules: with --keep-data
   # only the backup copies in .trash go, otherwise everything but the install
   # operation lock database.
-  local STATE_PARENT="" STATE_PARENT_REAL="" _state_part _state_target full_remove=false
-  for _state_part in db teams ext-tools .trash run; do
-    if [ -L "$SKILL_DIR/$_state_part" ]; then
-      _state_target="$(readlink "$SKILL_DIR/$_state_part")"
-      case "$_state_target" in
-        /*/"$_state_part") STATE_PARENT="${_state_target%/*}" ;;
-      esac
+  # What this install may remove is what its own record (.agmsg) says: state= is the
+  # root, skill= the install it belongs to. A copy (cp -R) carries the original's
+  # record, so its skill= is not its own directory and nothing under the state root
+  # is touched. A link is only ever unlinked; where it points is never followed.
+  local STATE_PARENT="" STATE_PARENT_REAL="" full_remove=false STATE_FOREIGN=false
+  local _m_skill _m_state
+  _m_skill="$(agmsg_state_marker_get "$SKILL_DIR" skill)"
+  _m_state="$(agmsg_state_marker_get "$SKILL_DIR" state)"
+  if [ -n "$_m_skill" ] && [ "${_m_skill%/}" != "${SKILL_DIR%/}" ] \
+     && [ "$(cd -P "$_m_skill" 2>/dev/null && pwd -P)" != "$(cd -P "$SKILL_DIR" 2>/dev/null && pwd -P)" ]; then
+    STATE_FOREIGN=true
+    echo "  ~ this install's record says it belongs to $_m_skill, not to $SKILL_DIR: the state ${_m_state:+in $_m_state }is kept (only the links in $SKILL_DIR are removed)"
+  else
+    case "$_m_state" in
+      /*) STATE_PARENT="${_m_state%/}" ;;
+      in-place|"") ;;
+    esac
+    # run/ is walked through its link below: only when the link is the one the record names.
+    if [ -L "$SKILL_DIR/run" ] && [ "$(readlink "$SKILL_DIR/run")" != "$STATE_PARENT/run" ]; then
+      STATE_FOREIGN=true
+      echo "  ~ $SKILL_DIR/run does not link into the state ${STATE_PARENT:-of this install}: that link's target is kept (only the link is removed)"
+    elif [ -n "$STATE_PARENT" ] && [ -L "$STATE_PARENT/run" ]; then
+      # The recorded root's own run is a link: it is unlinked below, never walked.
+      STATE_FOREIGN=true
+      echo "  ~ $STATE_PARENT/run is itself a link: its target is kept (only the link is removed)"
     fi
-  done
-  unset _state_part _state_target
+  fi
+  unset _m_skill _m_state
   # The Codex entries carry the resolved spelling of that path (/private/var
   # for /var on macOS); read before the directory goes.
   if [ -n "$STATE_PARENT" ]; then
@@ -535,7 +553,11 @@ _uninstall_one() {
         case "$(basename "$_entry")" in
         uninstall.sh|.install-op-uninstaller-retired.*|.install-op) continue ;;
         esac
-        if [ "$(basename "$_entry")" = "run" ]; then
+        if [ "$(basename "$_entry")" = "run" ] && [ "$STATE_FOREIGN" = true ] && [ -L "$_entry" ]; then
+          # run/ links into state that is not this install's: its contents stay
+          # (the link itself goes with the operation cleanup below).
+          continue
+        elif [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
             case "$(basename "$_run_entry")" in
@@ -551,6 +573,11 @@ _uninstall_one() {
       if [ -n "$STATE_PARENT" ]; then
         local _state_dir
         for _state_dir in db teams ext-tools .trash; do
+          if [ -L "$STATE_PARENT/$_state_dir" ]; then
+            # a link inside the recorded root: unlinked, its target is never followed
+            _uninstall_checked_rm -f "$STATE_PARENT/$_state_dir" || return 1
+            continue
+          fi
           [ -d "$STATE_PARENT/$_state_dir" ] || continue
           _uninstall_checked_rm -rf "$STATE_PARENT/$_state_dir" || return 1
         done
@@ -659,7 +686,9 @@ _uninstall_one() {
     if [ -L "$SKILL_DIR/run" ]; then
       rm -f "$SKILL_DIR/run"
     fi
-    if [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
+    if [ -n "$STATE_PARENT" ] && [ -L "$STATE_PARENT/run" ]; then
+      rm -f "$STATE_PARENT/run"
+    elif [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT/run" ]; then
       for _left in "$STATE_PARENT/run"/* "$STATE_PARENT/run"/.[!.]*; do
         [ -e "$_left" ] || continue
         case "${_left##*/}" in install-op.lock.db*) continue ;; esac
@@ -667,7 +696,7 @@ _uninstall_one() {
       done
     fi
     if [ -n "$STATE_PARENT" ] && [ -f "$STATE_PARENT/.owner" ]; then
-      rm -f "$STATE_PARENT/.owner"
+      rm -f "$STATE_PARENT/.owner"   # left by an earlier release; nothing reads it now
     fi
     rmdir "$SKILL_DIR" 2>/dev/null || true
     unset _left

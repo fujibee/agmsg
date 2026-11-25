@@ -55,20 +55,18 @@ unset AGMSG_HOME AGMSG_INSTALL_HOME
 # Guard: a test must not change the REAL state directory of the machine that started
 # bats. "Real" is the HOME and AGMSG_HOME seen when this helper is first loaded, before any
 # setup() swaps HOME, so a test that takes no fake HOME is covered too. It compares, for
-# every entry of <real base>/, the entry's name, its .owner line, whether
+# every entry of <real base>/, the entry's name, whether
 # run/install-op-incomplete.json exists and whether db/ and teams/ hold anything -- what the
 # incident of 2026-11-20 changed -- and
 # not file churn that a live agmsgd on a developer machine causes all the time. Builtins
 # only: no process is spawned, and where the directory does not exist (CI runners) it is a
 # single test.
 _agmsg_real_state_fingerprint() {
-  local base="$_AGMSG_GUARD_REAL_BASE" d line owner op
+  local base="$_AGMSG_GUARD_REAL_BASE" d line op
   [ -d "$base" ] || { printf 'absent\n'; return 0; }
   for d in "$base"/*/ "$base"/.[!.]*/; do
     [ -d "$d" ] || continue
     d="${d%/}"
-    owner=""
-    if [ -f "$d/.owner" ]; then IFS= read -r owner < "$d/.owner" || true; fi
     op=no
     if [ -e "$d/run/install-op-incomplete.json" ] || [ -L "$d/run/install-op-incomplete.json" ]; then op=yes; fi
     # Emptied, not just present: the incident left db/ and teams/ in place with nothing in them.
@@ -78,7 +76,7 @@ _agmsg_real_state_fingerprint() {
       if [ -d "$d/$part" ] && [ -n "$(compgen -G "$d/$part/*" || true)" ]; then full=yes; fi
       state="$state|$part=$full"
     done
-    printf '%s|owner=%s|op=%s%s\n' "${d##*/}" "$owner" "$op" "$state"
+    printf '%s|op=%s%s\n' "${d##*/}" "$op" "$state"
   done
 }
 

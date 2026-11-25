@@ -525,11 +525,13 @@ agmsg_install_move_state() {
     if [ -d "$skill/$part" ] && [ ! -L "$skill/$part" ]; then moved_any=true; fi
   done
   if [ "$need" = false ]; then
-    # Already linked: only record who owns the root and where it is.
+    # Already linked: nothing to move, and a link to somewhere else is left as it is
+    # (the marker, rewritten below, records the state as in-place). Say so.
     local linked
     linked="$(readlink "$skill/run" 2>/dev/null)"
-    case "$linked" in /*/run) root="${linked%/run}" ;; esac
-    agmsg_state_adopt "$skill" "$root" || true
+    if [ -n "$linked" ] && [ "$linked" != "$root/run" ]; then
+      echo "  ~ $skill/run links to $linked, not to $root: left as it is" >&2
+    fi
     AGMSG_DOWN_NOTICE_ROOT="$skill" down_notice_clear state || true
     [ ! -f "$skill/.agmsg" ] || agmsg_state_marker_write "$skill" || true
     return 0

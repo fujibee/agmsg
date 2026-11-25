@@ -10,7 +10,6 @@ setup() {
   GBASE="$BATS_TEST_TMPDIR/real-base"
   mkdir -p "$GBASE/agmsg/run" "$GBASE/agmsg/db" "$GBASE/agmsg/teams/demo"
   : > "$GBASE/agmsg/db/messages.db"
-  printf '%s\n' "/some/skill" > "$GBASE/agmsg/.owner"
   _AGMSG_GUARD_REAL_BASE="$GBASE"
 }
 
@@ -18,12 +17,6 @@ setup() {
   agmsg_guard_real_state_begin
   : > "$GBASE/agmsg/run/live-daemon-churn"
   agmsg_guard_real_state_end
-}
-
-@test "a changed owner fails" {
-  agmsg_guard_real_state_begin
-  printf '%s\n' "/tmp/tmp.X/.agents/skills/agmsg" > "$GBASE/agmsg/.owner"
-  if agmsg_guard_real_state_end 2>/dev/null; then return 1; fi
 }
 
 @test "an install operation record appearing fails" {
@@ -58,7 +51,7 @@ setup() {
   [ "$output" = "unset|unset|$BATS_TEST_TMPDIR/ambient" ]
 }
 
-@test "db/ and teams/ emptied while the entry and its owner stay fails" {
+@test "db/ and teams/ emptied while the entry stays fails" {
   agmsg_guard_real_state_begin
   command rm -r "$GBASE/agmsg/teams/demo"
   : > "$GBASE/agmsg/db/messages.db.gone"

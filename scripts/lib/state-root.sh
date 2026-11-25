@@ -80,7 +80,7 @@ _agmsg_state_refuse() {   # <name> <skill dir> <reason>
 }
 
 agmsg_state_preflight() {   # <skill dir> <state root>
-  local skill="${1%/}" root="${2%/}" name part probe owner
+  local skill="${1%/}" root="${2%/}" name part probe
   name="${skill##*/}"
   AGMSG_STATE_REASON=""
   if [ ! -d "$skill" ]; then
@@ -108,15 +108,6 @@ agmsg_state_preflight() {   # <skill dir> <state root>
   rmdir "$probe" 2>/dev/null
   if [ "$(_agmsg_state_dev "$skill")" != "$(_agmsg_state_dev "$root")" ]; then
     _agmsg_state_refuse "$name" "$skill" "$root is on another filesystem, so the move would not be a rename"; return 1
-  fi
-  # A root made for another install is never shared: a copy of an install (cp -R
-  # keeps the links) or two bases that fold to the same name end up here.
-  if [ -f "$root/.owner" ]; then
-    owner="$(<"$root/.owner")"
-    if [ -n "$owner" ] && [ "$owner" != "$skill" ] && [ -d "$owner" ]; then
-      _agmsg_state_refuse "$name" "$skill" "$root belongs to $owner"
-      return 1
-    fi
   fi
   for part in $AGMSG_STATE_PARTS; do
     # A part that is a real directory here AND already has content there would be
@@ -187,24 +178,28 @@ agmsg_state_link() {   # <skill dir> <state root>
       failed=1
     fi
   done
-  if [ "$failed" = 0 ]; then
-    printf '%s\n' "$skill" > "$root/.owner" 2>/dev/null || failed=1
-  fi
   [ "$failed" = 0 ]
 }
 
-# The install's marker (.agmsg) says where its state is, so the shim, update,
-# uninstall, the app and doctor read it instead of guessing. Scanners that only
-# test that the file exists are unaffected.
+# The install's marker (.agmsg) is the only record of who owns what: the shim,
+# update, uninstall, the app and doctor read it instead of guessing. Scanners that
+# only test that the file exists are unaffected.
 #   skill=<this install dir>   state=<root | in-place>   reason=<why in place>
-agmsg_state_marker_write() {   # <skill dir>
-  local skill="${1%/}" state="in-place" t
+# state= is computed from the state base and the install's name, never read back
+# from where run/ happens to link: it is the root only while run/ links into it.
+agmsg_state_marker_write() {   # <skill dir> [<agents dir>]
+  local skill="${1%/}" agents="${2:-${AGENTS_DIR:-${1%/*/*}}}" state="in-place" t root reason=""
+  root="$(agmsg_state_root "$skill" "$agents")"
   if [ -L "$skill/run" ]; then
     t="$(readlink "$skill/run")"
-    state="${t%/run}"
+    if [ "$t" = "$root/run" ]; then
+      state="$root"
+    else
+      reason="run links to $t, not to $root"
+    fi
   fi
   { printf 'skill=%s\nstate=%s\n' "$skill" "$state"
-    [ "$state" != "in-place" ] || printf 'reason=%s\n' "${AGMSG_STATE_REASON:-not moved}"
+    if [ "$state" = "in-place" ]; then printf 'reason=%s\n' "${reason:-${AGMSG_STATE_REASON:-not moved}}"; fi
   } > "$skill/.agmsg"
 }
 
@@ -217,44 +212,24 @@ agmsg_state_marker_get() {
   done < "${1%/}/.agmsg"
 }
 
-# An install whose parts already link to its state root (made by hand, or by an
-# earlier run of the move) but carries no .owner: record it, move nothing, stop
-# nothing. A root that names another existing install is refused, never shared.
-agmsg_state_adopt() {   # <skill dir> <state root>
-  local skill="${1%/}" root="${2%/}" owner
-  if [ -f "$root/.owner" ]; then
-    owner="$(<"$root/.owner")"
-    if [ -n "$owner" ] && [ "$owner" != "$skill" ] && [ -d "$owner" ]; then
-      _agmsg_state_refuse "${skill##*/}" "$skill" "$root belongs to $owner"
-      return 1
-    fi
-  fi
-  printf '%s\n' "$skill" > "$root/.owner"
-}
-
 # A copy made with cp -R keeps the links, so they name the ORIGINAL's state. Each
 # part linked into a root that belongs to another existing install becomes an
 # empty real directory in this one; the other install's state is not read,
 # written or removed. 0 = nothing wrong or done; 1 = could not detach.
 agmsg_state_detach_foreign() {   # <skill dir>
-  local skill="${1%/}" part target parent owner
+  local skill="${1%/}" part target owner
+  owner="$(agmsg_state_marker_get "$skill" skill)"
+  [ -n "$owner" ] && [ "${owner%/}" != "$skill" ] && [ -d "$owner" ] \
+    && [ "$(cd -P "$owner" 2>/dev/null && pwd -P)" != "$(cd -P "$skill" 2>/dev/null && pwd -P)" ] || return 0
   for part in $AGMSG_STATE_PARTS; do
     [ -L "$skill/$part" ] || continue
     target="$(readlink "$skill/$part")"
-    case "$target" in /*/"$part") parent="${target%/*}" ;; *) continue ;; esac
-    if [ -f "$parent/.owner" ]; then
-      owner="$(<"$parent/.owner")"
-    else
-      owner="$(agmsg_state_marker_get "$skill" skill)"
-    fi
-    if [ -n "$owner" ] && [ "${owner%/}" != "$skill" ] && [ -d "$owner" ] \
-       && [ "$(cd -P "$owner" 2>/dev/null && pwd -P)" != "$(cd -P "$skill" 2>/dev/null && pwd -P)" ]; then
-      command rm -f "$skill/$part" && mkdir -p "$skill/$part" || {
-        echo "  ! could not give $skill/$part its own state in place of the link into $owner (rm/mkdir failed)" >&2
-        return 1
-      }
-      echo "  ~ $skill/$part was linked into the state of $owner; this install now has its own (that state is left as it is)"
-    fi
+    case "$target" in /*/"$part") ;; *) continue ;; esac
+    command rm -f "$skill/$part" && mkdir -p "$skill/$part" || {
+      echo "  ! could not give $skill/$part its own state in place of the link into $owner (rm/mkdir failed)" >&2
+      return 1
+    }
+    echo "  ~ $skill/$part was linked into the state of $owner; this install now has its own (that state is left as it is)"
   done
   return 0
 }
