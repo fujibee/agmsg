@@ -168,6 +168,18 @@ work_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-team-list-work.XXXXXX")"
 chmod 600 "$work_file"
 trap 'rm -f "$work_file"' EXIT INT TERM
 
+# The paths below reach internal/team-list.py inside a file, not on its
+# command line. On Windows (Git Bash) MSYS converts a native binary's argv but
+# never the contents of a file it reads, so a native Python cannot open
+# /c/Users/... and every team was skipped with FileNotFoundError (#881). Write
+# the mixed C:/Users/... form instead: one cygpath call for the whole teams
+# directory, nothing off Windows, where there is no cygpath.
+teams_dir_for_py="$TEAMS_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+  teams_dir_for_py="$(cygpath -m "$TEAMS_DIR" 2>/dev/null)" || teams_dir_for_py="$TEAMS_DIR"
+  [ -n "$teams_dir_for_py" ] || teams_dir_for_py="$TEAMS_DIR"
+fi
+
 truncated=0
 if [ -d "$TEAMS_DIR" ]; then
   count=0
@@ -182,7 +194,7 @@ if [ -d "$TEAMS_DIR" ]; then
       break
     fi
     name="$(basename "$d")"
-    printf '%s\t%s\n' "$name" "$cfg" >> "$work_file"
+    printf '%s\t%s\n' "$name" "$teams_dir_for_py/$name/config.json" >> "$work_file"
   done
 fi
 
