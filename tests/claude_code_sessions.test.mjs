@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { findSessionSocket, parseStart, pidAlive } from '../scripts/daemon/channels/claude-code-sessions.mjs';
+import { findSessionSocket, parseFileTime, parseStart, pidAlive } from '../scripts/daemon/channels/claude-code-sessions.mjs';
 
 function configDir(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsg-sessions-'));
@@ -92,4 +92,43 @@ test('a pid that cannot be checked makes the session unknown, never ended', asyn
   const result = await findSessionSocket(base(dir, { alive: () => null }));
   assert.equal(result.state, 'unknown');
   assert.equal(result.reason, 'sessions_files_unreadable_or_other_shape');
+});
+
+// --- Windows (#2039): procStart is a FILETIME, the socket a named pipe ---
+
+// Values read from a live Claude Code session on Windows 11; the pipe name is shortened.
+const WIN_START = '134400309614673747';
+function windowsSessionFile(dir, pid, over = {}) {
+  writeFileSync(path.join(dir, 'sessions', `${pid}.json`), JSON.stringify({
+    pid, sessionId: 'sess-1', procStart: WIN_START, pidDomain: 'win32:host',
+    messagingSocketPath: `\\\\.\\pipe\\LOCAL\\cc-msg-${pid}`, kind: 'interactive', ...over,
+  }));
+}
+const winBase = (dir, over = {}) => ({ configDir: dir, sessionId: 'sess-1', alive: () => true, startOf: async () => WIN_START, platform: 'win32', ...over });
+
+test('parseFileTime: a Windows FILETIME is UTC epoch ms; anything else is NaN', () => {
+  assert.equal(new Date(parseFileTime(WIN_START)).toISOString(), '2026-11-24T21:56:01.467Z');
+  assert.ok(Number.isNaN(parseFileTime('Sat Oct 31 01:17:15 2026')));
+  assert.ok(Number.isNaN(parseFileTime('')));
+});
+
+test('Windows: a live process of the session gives its named pipe', async (t) => {
+  const dir = configDir(t);
+  windowsSessionFile(dir, 160704);
+  assert.deepEqual(await findSessionSocket(winBase(dir)), { state: 'found', socket: '\\\\.\\pipe\\LOCAL\\cc-msg-160704', pid: 160704 });
+});
+
+test('Windows: a reused pid (another start time) is not found and the session counts as ended', async (t) => {
+  const dir = configDir(t);
+  windowsSessionFile(dir, 160704);
+  assert.deepEqual(await findSessionSocket(winBase(dir, { startOf: async () => '134400409614673747' })), { state: 'ended' });
+});
+
+test('Windows: a start time that cannot be read, or a socket that is not a named pipe, is unknown', async (t) => {
+  const dir = configDir(t);
+  windowsSessionFile(dir, 160704);
+  assert.equal((await findSessionSocket(winBase(dir, { startOf: async () => '' }))).state, 'unknown');
+  const other = configDir(t);
+  windowsSessionFile(other, 160704, { messagingSocketPath: '/tmp/cc-socks/160704.sock' });
+  assert.equal((await findSessionSocket(winBase(other))).state, 'unknown');
 });
