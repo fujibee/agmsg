@@ -108,6 +108,13 @@ test("windowsOwnerReplaced reads a Windows FILETIME against the claim and re-ask
   reads = 0;
   assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { reads += 1; return NaN; }, answers: up }), false, "a pid that keeps answering unreadably proves nothing");
   assert.equal(reads, 3, "at most three reads");
+  // The last read can also outlast the short-lived process: the pid is asked
+  // once more after it, without a fourth read.
+  const lastGone = [true, true, true, false];
+  reads = 0;
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { reads += 1; return NaN; }, answers: () => lastGone.shift() }), true, "gone after the third unreadable start");
+  assert.equal(reads, 3);
+  assert.equal(lastGone.length, 0, "the pid is asked after the third read");
   assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { throw new Error("must not read"); }, answers: () => false }), true, "a pid already gone needs no read");
   assert.ok(Number.isNaN(windowsProcessStart(7, () => { throw new Error("no powershell"); })));
   assert.equal(windowsProcessStart(7, () => "134400309614673747\r\n"), parseFileTime("134400309614673747"));

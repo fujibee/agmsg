@@ -145,7 +145,8 @@ function pidAnswers(pid) {
 // often such a process already gone again; the pid is asked once more, and a
 // pid that no longer answers is gone. A pid that keeps answering with no
 // readable start time proves nothing (up to `tries` reads, one powershell
-// each). An unreadable claim time proves nothing either.
+// each, and the pid asked once more after the last). An unreadable claim time
+// proves nothing either.
 export function windowsOwnerReplaced(pid, startedAt, { startOf = windowsProcessStart, answers = pidAnswers, tries = 3 } = {}) {
   const claimed = Date.parse(startedAt ?? "");
   if (!Number.isFinite(claimed)) return false;
@@ -154,7 +155,7 @@ export function windowsOwnerReplaced(pid, startedAt, { startOf = windowsProcessS
     const started = startOf(pid);
     if (Number.isFinite(started)) return started > claimed;
   }
-  return false;
+  return !answers(pid);
 }
 
 export function isAlive({ pid, bootId: capturedBootId, startedAt }, { plat = platform(), current = bootId(), startOf = windowsProcessStart } = {}) {
