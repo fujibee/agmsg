@@ -23,6 +23,7 @@ import { execFile } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isNamedPipePath } from "./claude-code-queue-io.mjs";
+import { parseFileTime } from "../executor.mjs";
 
 const MAX_FILES = 500;
 const START_TOLERANCE_MS = 2_000;
@@ -59,11 +60,7 @@ function windowsStart(pid, run = execFile) {
 }
 
 // A Windows FILETIME as a decimal string -> epoch ms, or NaN.
-export function parseFileTime(text) {
-  const clean = String(text ?? "").trim();
-  if (!/^\d{15,20}$/.test(clean)) return NaN;
-  return Number((BigInt(clean) - 116444736000000000n) / 10000n);
-}
+export { parseFileTime };
 
 // "Mon Nov  2 00:34:49 2026" (UTC) -> epoch ms, or NaN when it is not that shape.
 export function parseStart(text, zone) {

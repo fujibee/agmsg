@@ -18,14 +18,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shquote.sh"
 # The daemon's own liveness judgement for a recorded executor (the one
 # `agmsg daemon status` gives), taken through the node it runs on. Prints alive,
 # dead, unknown, or unavailable when that node cannot be run from here.
-_agmsg_daemon_node_verdict() {   # <pid> <boot-id>
+_agmsg_daemon_node_verdict() {   # <pid> <boot-id> [<claimed-at>]
   local node_path verdict
   node_path="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null | LC_ALL=C tr -d '\r')" || node_path=""
   if [ -z "$node_path" ] || [ ! -x "$node_path" ] || [ ! -f "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" ]; then
     echo unavailable
     return 0
   fi
-  verdict="$("$node_path" "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" "$1" "$2" 2>/dev/null | LC_ALL=C tr -d '\r')" || verdict=""
+  verdict="$("$node_path" "$_AGMSG_DAEMON_ROOT/scripts/daemon/liveness.mjs" "$1" "$2" "${3:-}" 2>/dev/null | LC_ALL=C tr -d '\r')" || verdict=""
   case "$verdict" in alive|dead) echo "$verdict" ;; *) echo unknown ;; esac
 }
 
@@ -93,7 +93,7 @@ agmsg_daemon_read_state() {
       # Git Bash has no boot id or process start time to read. Ask the daemon's
       # own judgement (the one `agmsg daemon status` gives) through the node it
       # runs on, instead of repeating that evidence in shell.
-      case "$(_agmsg_daemon_node_verdict "$pid" "$boot")" in
+      case "$(_agmsg_daemon_node_verdict "$pid" "$boot" "$recorded_start")" in
         unavailable)
           AGMSGD_HEALTH=unchecked
           AGMSGD_REASON="the daemon's node cannot be run from here to check it" ;;
@@ -164,7 +164,7 @@ agmsg_daemon_read_state() {
         # must not contradict it. Its answer is only that the pid is there in
         # this boot, so the process-state check below still decides whether it
         # is running, and a stopped or exited process it can read still is not.
-        [ "$(_agmsg_daemon_node_verdict "$pid" "$boot")" != alive ] || node_alive=1 ;;
+        [ "$(_agmsg_daemon_node_verdict "$pid" "$boot" "$recorded_start")" != alive ] || node_alive=1 ;;
       *)
         AGMSGD_HEALTH=unchecked
         AGMSGD_REASON="the boot id or process start time cannot be read from here"

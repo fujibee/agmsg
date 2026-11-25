@@ -58,7 +58,7 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
       if (owner.executor_pid == null) {
         return { ok: false, reason: "current owner has no recorded executor; ownership cannot be checked. Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start" };
       }
-      const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
+      const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at });
       if (alive === true) return { ok: false, reason: "current owner is alive" };
       if (alive === null) {
         // Unknown is not proof of exit. Replacing this owner could leave two

@@ -144,6 +144,15 @@ test('executorProvedDead trusts "no such process" only from the executor\'s own 
   assert.equal(executorProvedDead(owner, {}, { plat: 'darwin', gone }), true);
   assert.equal(executorProvedDead(owner, {}, { plat: 'win32', gone }), true);
   assert.equal(executorProvedDead(owner, {}, { plat: 'darwin', gone: here }), false);
+  // Windows: a pid that still answers but started after the claim was reused.
+  const claimed = { ...owner, executor_started_at: '2026-11-25T11:59:20.000Z' };
+  const seen = [];
+  const after = (pid, at) => { seen.push([pid, at]); return true; };
+  assert.equal(executorProvedDead(claimed, {}, { plat: 'win32', gone: here, startedAfter: after }), true);
+  assert.deepEqual(seen, [[4242, '2026-11-25T11:59:20.000Z']]);
+  assert.equal(executorProvedDead(claimed, {}, { plat: 'win32', gone: here, startedAfter: () => false }), false);
+  assert.equal(executorProvedDead(claimed, {}, { plat: 'darwin', gone: here, startedAfter: after }), false, 'only Windows reads the start time');
+  assert.equal(seen.length, 1);
   // Linux: a sandbox has its own pid namespace and sees no executor at all.
   assert.equal(executorProvedDead(owner, {}, { plat: 'linux', ownNs: 'pid:[1]', gone }), false);
   assert.equal(executorProvedDead(owner, { pid_ns: 'pid:[1]' }, { plat: 'linux', ownNs: 'pid:[2]', gone }), false);

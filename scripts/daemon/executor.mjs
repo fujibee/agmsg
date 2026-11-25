@@ -111,7 +111,41 @@ export function currentExecutor() {
 // (confirmed dead) without even checking the pid -- this is the one case
 // where a stale boot id is itself the proof, not a reason to say "cannot
 // tell".
-export function isAlive({ pid, bootId: capturedBootId }, { plat = platform(), current = bootId() } = {}) {
+// Windows FILETIME (decimal 100 ns ticks since 1601-01-01 UTC) as epoch ms;
+// NaN for anything else.
+export function parseFileTime(text) {
+  const value = String(text ?? "").trim();
+  if (!/^\d{15,20}$/.test(value)) return NaN;
+  return Number((BigInt(value) - 116444736000000000n) / 10000n);
+}
+
+// Windows: when the process now at `pid` started, as epoch ms; NaN when it
+// cannot be read. One powershell call.
+export function windowsProcessStart(pid, run = execFileSync) {
+  try {
+    return parseFileTime(run("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `[Diagnostics.Process]::GetProcessById(${Number(pid)}).StartTime.ToFileTimeUtc()`],
+    { encoding: "utf8", timeout: 10_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+  } catch {
+    return NaN;
+  }
+}
+
+// Windows hands a freed pid to the next process within about a second
+// (measured: an agmsgd node killed with taskkill /F, and one second later the
+// same pid was a bash.exe started that second). Git Bash has no boot-scoped
+// start time to compare, so a live answer for the recorded pid is checked
+// against the owner's claim instead: the executor claims ownership after it
+// starts, so a process that started after the claim is another process. True
+// only on that evidence; an unreadable start or claim time proves nothing.
+export function startedAfterClaim(pid, startedAt, startOf = windowsProcessStart) {
+  const claimed = Date.parse(startedAt ?? "");
+  if (!Number.isFinite(claimed)) return false;
+  const started = startOf(pid);
+  return Number.isFinite(started) && started > claimed;
+}
+
+export function isAlive({ pid, bootId: capturedBootId, startedAt }, { plat = platform(), current = bootId(), startOf = windowsProcessStart } = {}) {
   const sameBootId = sameBoot(capturedBootId, plat, current);
   if (sameBootId === false) return false;
   try {
@@ -125,6 +159,8 @@ export function isAlive({ pid, bootId: capturedBootId }, { plat = platform(), cu
     // genuine "cannot tell" (e.g. a platform where signal 0 is unsupported).
     if (error?.code !== "EPERM") return null;
   }
+  // The pid exists. On Windows it may already belong to a newer process.
+  if (plat === "win32" && startedAfterClaim(pid, startedAt, startOf)) return false;
   // The pid exists, but an old-format record cannot say it is the same boot.
   return sameBootId === null ? null : true;
 }
