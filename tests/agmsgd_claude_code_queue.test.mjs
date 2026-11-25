@@ -292,7 +292,7 @@ test('Windows: a seat is no longer blocked as unsupported', async (t) => {
 });
 
 for (const reason of ['socket_error:ENOENT', 'messaging_socket_missing', 'connect_failed', 'socket_write_error:EPIPE', 'send_timeout', 'socket_error:ECONNREFUSED']) {
-  test(`send failure records its reason and retries the same socket on the next poll: ${reason}`, async (t) => {
+  test(`send failure records its reason; a non-missing failure retries the same socket on the next poll: ${reason}`, async (t) => {
     const { db, state } = channelFixture(t, 'win32');
     let calls = 0;
     const channel = createClaudeCodeQueueChannel({ ...state.options, send: async () => ++calls === 1 ? { state: 'failed', reason } : { state: 'sent' } });
@@ -300,6 +300,14 @@ for (const reason of ['socket_error:ENOENT', 'messaging_socket_missing', 'connec
     const missing = ['socket_error:ENOENT', 'messaging_socket_missing'].includes(reason);
     assert.equal(seatBrief(channel).reason, missing ? 'messaging_socket_missing' : `send_failed:${reason}`);
     assert.equal(db.prepare('SELECT state FROM beta_claude_queue').get().state, 'expired');
+    if (missing) {
+      // A pipe that answered "not there" is not dialed again each poll; the
+      // sessions file is asked for the session's live pipe instead (#2039).
+      await channel.pollOnce();
+      assert.equal(calls, 1);
+      await channel.stop();
+      return;
+    }
     await channel.pollOnce();
     assert.equal(calls, 2, 'the same path is retried without a new destination record');
     assert.deepEqual(db.prepare('SELECT state FROM beta_claude_queue ORDER BY id').all().map((row) => row.state), ['expired', 'confirmed']);
@@ -776,4 +784,67 @@ test('a cached pid that cannot be checked is unknown: the seat is degraded, not 
   const seat = f.channel.seats().seats[0];
   assert.notEqual(seat.reason, 'session_ended');
   assert.equal(seat.state, 'unaddressable');
+});
+
+// --- #2039: Windows, a named pipe that changed under a live session ---
+
+// On Windows the preflight cannot see a pipe without connecting, so a gone
+// pipe shows only as ENOENT on the send. Model that: every pipe "exists" to
+// socketAlive, and the send fails for the recorded one.
+function windowsPipeFixture(t, lookup) {
+  const calls = { sends: [], lookups: 0, args: null };
+  const { db, state } = channelFixture(t, 'win32');
+  state.socket = '\\\\.\\pipe\\LOCAL\\cc-msg-old';
+  state.record = { messaging_token: 'tok-1', claude_config_dir: '/c/Users/me/.claude' };
+  state.minutes = 0;
+  const live = '\\\\.\\pipe\\LOCAL\\cc-msg-new';
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options,
+    now: () => Date.UTC(2026, 10, 25) + state.minutes * 60_000,
+    socketAlive: () => ({ state: 'ok' }),
+    lookupSession: async (args) => { calls.lookups += 1; calls.args = args; return lookup(live); },
+    send: async (args) => {
+      calls.sends.push(args.socketPath);
+      return args.socketPath === live ? { state: 'sent' } : { state: 'failed', reason: 'socket_error:ENOENT' };
+    },
+    downSet: () => true,
+    downClear: () => true,
+  });
+  return { db, state, calls, channel, live };
+}
+
+test('Windows: after the recorded pipe answers ENOENT, the live pipe of the same session is found and used', async (t) => {
+  const { channel, calls, live } = windowsPipeFixture(t, (socket) => ({ state: 'found', socket, pid: 9 }));
+  await channel.pollOnce();
+  assert.deepEqual(calls.sends, ['\\\\.\\pipe\\LOCAL\\cc-msg-old']);
+  assert.equal(calls.lookups, 0);
+  await channel.pollOnce();
+  assert.deepEqual(calls.sends, ['\\\\.\\pipe\\LOCAL\\cc-msg-old', live]);
+  assert.deepEqual(calls.args, { configDir: 'C:/Users/me/.claude', sessionId: 'sess-1', platform: 'win32' });
+  assert.deepEqual(seatBrief(channel), { state: 'addressable', reason: 'socket_from_sessions_file' });
+  await channel.stop();
+});
+
+test('Windows: a pipe known to be gone gets no new send attempt each poll while no live pipe is found', async (t) => {
+  const { db, state, channel, calls } = windowsPipeFixture(t, () => ({ state: 'unknown', reason: 'sessions_dir_unreadable' }));
+  await channel.pollOnce();
+  for (const minutes of [0, 1, 2]) { state.minutes = minutes; state.sequence += 1; await channel.pollOnce(); }
+  assert.equal(calls.sends.length, 1);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM beta_claude_queue').get().n, 1);
+  assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'messaging_socket_missing' });
+  // A new record path is tried again at once.
+  state.socket = '\\\\.\\pipe\\LOCAL\\cc-msg-renewed';
+  await channel.pollOnce();
+  assert.equal(calls.sends.at(-1), '\\\\.\\pipe\\LOCAL\\cc-msg-renewed');
+  await channel.stop();
+});
+
+test('Windows: when the sessions file lists the same pipe name again, it is dialed again', async (t) => {
+  const { state, channel, calls } = windowsPipeFixture(t, () => ({ state: 'found', socket: '\\\\.\\pipe\\LOCAL\\cc-msg-old', pid: 9 }));
+  await channel.pollOnce();
+  state.sequence += 1;
+  await channel.pollOnce();
+  assert.deepEqual(calls.sends, ['\\\\.\\pipe\\LOCAL\\cc-msg-old', '\\\\.\\pipe\\LOCAL\\cc-msg-old']);
+  assert.equal(calls.lookups, 1);
+  await channel.stop();
 });

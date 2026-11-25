@@ -36,6 +36,7 @@ import {
   resolveTranscriptPath,
   sendClaudeCodeMessage,
   latestPermissionMode,
+  nativePath,
 } from "./claude-code-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
@@ -133,6 +134,27 @@ export function createClaudeCodeQueueChannel({
   // own path is gone; and since when the seat could not be reached.
   const found = new Map();
   const lastLookup = new Map();
+  // Windows only: named pipes whose connect returned ENOENT, per seat. The
+  // preflight cannot see a pipe without connecting to it, so without this a
+  // gone pipe looked present on every poll: a send attempt was created and
+  // failed every few seconds, and the sessions-file lookup below never ran.
+  // A path leaves the set when the seat's record names another path.
+  const gonePipes = new Map();
+  const checkSocket = (seat, path) => {
+    if (hostPlatform === "win32" && gonePipes.get(seat)?.paths.has(path)) {
+      return { state: "unreadable", reason: "messaging_socket_missing" };
+    }
+    return socketAlive(path);
+  };
+  const markPipeGone = (seat, recordPath, path) => {
+    if (hostPlatform !== "win32" || !path) return;
+    let entry = gonePipes.get(seat);
+    if (!entry || entry.recordPath !== recordPath) {
+      entry = { recordPath, paths: new Set() };
+      gonePipes.set(seat, entry);
+    }
+    entry.paths.add(path);
+  };
   const unreachable = new Map();
   const downKept = new Set();
   const clearedOnce = new Set();
@@ -263,7 +285,8 @@ export function createClaudeCodeQueueChannel({
     // written into the record.
     let socketPath = record.messaging_socket;
     let source = "";
-    let socketCheck = socketAlive(socketPath);
+    if (gonePipes.has(seat) && gonePipes.get(seat).recordPath !== record.messaging_socket) gonePipes.delete(seat);
+    let socketCheck = checkSocket(seat, socketPath);
     let lookupState = "";
     let lookupReason = "";
     if (socketCheck.reason === "messaging_socket_missing") {
@@ -274,7 +297,7 @@ export function createClaudeCodeQueueChannel({
       if (lastLookup.get(seat)?.identity !== identity) lastLookup.delete(seat);
       const cached = found.get(seat);
       const cachedAlive = cached ? alive(cached.pid) : false;
-      if (cached && cachedAlive === true && socketAlive(cached.socket).state === "ok") {
+      if (cached && cachedAlive === true && checkSocket(seat, cached.socket).state === "ok") {
         socketPath = cached.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
       } else if (cached && cachedAlive === null) {
         // The pid check failed: keep the cache, and do not call the session ended or down.
@@ -285,14 +308,17 @@ export function createClaudeCodeQueueChannel({
         if (!before || now() - before.at >= LOOKUP_EVERY_MS) {
           let result;
           try {
-            result = await lookupSession({ configDir: record.claude_config_dir, sessionId: record.session });
+            result = await lookupSession({ configDir: nativePath(record.claude_config_dir, hostPlatform), sessionId: record.session, platform: hostPlatform });
           } catch (error) {
             result = { state: "unknown", reason: `sessions_lookup_failed:${error?.code ?? error?.message ?? error}` };
           }
           lookupState = result.state;
           lookupReason = result.reason ?? "";
           lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason, identity });
-          if (result.state === "found" && socketAlive(result.socket).state === "ok") {
+          // The sessions file names the pipe the live process has now: that
+          // outranks an earlier ENOENT on the same name.
+          if (result.state === "found") gonePipes.get(seat)?.paths.delete(result.socket);
+          if (result.state === "found" && checkSocket(seat, result.socket).state === "ok") {
             found.set(seat, { socket: result.socket, pid: result.pid, identity });
             socketPath = result.socket; source = "socket_from_sessions_file"; socketCheck = { state: "ok" };
           } else if (result.state === "found") {
@@ -355,6 +381,8 @@ export function createClaudeCodeQueueChannel({
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
       if (result.reason === "socket_error:ENOENT" || result.reason === "messaging_socket_missing") {
+        markPipeGone(seat, record.messaging_socket, socketPath);
+        if (socketPath !== record.messaging_socket) found.delete(seat);
         saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" });
       } else {
         saveSeat(book, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` });
