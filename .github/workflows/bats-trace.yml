@@ -23,7 +23,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tools
         run: |
           sudo apt-get update
@@ -47,7 +47,7 @@ jobs:
               bats "$f" </dev/null >/dev/null 2>&1 || echo "trace: $f exited non-zero (ignored)"
           done < shard-files.txt
           wc -l "$out"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bats-inputs-${{ matrix.shard }}
           path: ${{ runner.temp }}/inputs-${{ matrix.shard }}.tsv
