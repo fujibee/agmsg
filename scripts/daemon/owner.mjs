@@ -35,6 +35,16 @@ export function controlSocketPath(installRoot, gen, installId, platform = proces
   return join(installRoot, "run", `agmsgd.${gen}.sock`);
 }
 
+// The liveness of the current owner is read BEFORE the write transaction: on
+// Windows it can take a powershell call or three (about 0.7 s each, up to a 10 s
+// timeout), far longer than the 5 s busy timeout other writers wait for. Inside
+// the transaction the owner is read again; the answer is used only for the same
+// owner (gen, pid and claim time unchanged). A different owner is checked there
+// without the start-time read, as before this check existed.
+function ownerKey(owner) {
+  return owner ? `${owner.gen}|${owner.executor_pid}|${owner.executor_started_at}` : "";
+}
+
 // Read daemon_owner, and if the current owner is
 // state='none' or confirmed dead, take the next gen and move to
 // 'starting' -- ALSO requiring, in the same read, that daemon_intent still
@@ -46,7 +56,11 @@ export function controlSocketPath(installRoot, gen, installId, platform = proces
 //
 // `version` is this process's own build/version string, recorded in
 // daemon_owner.version once ownership is taken.
-export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen, version }) {
+export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen, version }, { alive: aliveOf = isAlive } = {}) {
+  const seen = readOwner(db);
+  const precheck = seen && seen.state !== "none" && seen.executor_pid != null
+    ? { key: ownerKey(seen), alive: aliveOf({ pid: seen.executor_pid, bootId: seen.executor_boot_id, startedAt: seen.executor_started_at }) }
+    : null;
   return withImmediateTransaction(db, () => {
     const intent = readIntent(db);
     if (intent.desired !== expectedDesired || intent.op_gen !== expectedOpGen) {
@@ -58,7 +72,9 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
       if (owner.executor_pid == null) {
         return { ok: false, reason: "current owner has no recorded executor; ownership cannot be checked. Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start" };
       }
-      const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at });
+      const alive = precheck && precheck.key === ownerKey(owner)
+        ? precheck.alive
+        : aliveOf({ pid: owner.executor_pid, bootId: owner.executor_boot_id }, { startOf: () => NaN });
       if (alive === true) return { ok: false, reason: "current owner is alive" };
       if (alive === null) {
         // Unknown is not proof of exit. Replacing this owner could leave two
