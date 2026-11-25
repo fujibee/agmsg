@@ -305,6 +305,6 @@ SH
 
   run env PATH="$shim:$PATH" bash "$SCRIPTS/team-list.sh" --json --scope all
   [ "$status" -eq 0 ]
-  [[ "$output" != *"unconverted config path"* ]]
+  [ "${output#*unconverted config path}" = "$output" ]
   [[ "$output" == *'"name":"alpha"'* ]] || [[ "$output" == *'"name": "alpha"'* ]]
 }
