@@ -267,3 +267,44 @@ json_field() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"requires python3"* ]]
 }
+
+@test "team list: hands python the cygpath -m form of each config path, because python reads them from a file (#881)" {
+  # On Git Bash, MSYS converts a native binary's argv but not the contents of a
+  # file it reads, so the config paths written into the entries file must
+  # already be in the form a native Python can open. Model that here: cygpath
+  # maps the teams directory to an alias, and python3 refuses any config path
+  # that is not under the alias, the way Windows Python cannot open /c/Users/...
+  bash "$SCRIPTS/join.sh" alpha alice claude-code /tmp/project-a
+  local teams_real alias shim
+  teams_real="$(cd "$SCRIPTS/../teams" && pwd)"
+  alias="$BATS_TEST_TMPDIR/native-teams"
+  ln -s "$teams_real" "$alias"
+  shim="$BATS_TEST_TMPDIR/shim"
+  mkdir -p "$shim"
+  cat > "$shim/cygpath" <<SH
+#!/usr/bin/env bash
+[ "\$1" = -m ] || exit 1
+case "\$2" in
+  "$teams_real"|"$teams_real"/*) printf '%s\n' "$alias\${2#"$teams_real"}" ;;
+  *) printf '%s\n' "\$2" ;;
+esac
+SH
+  cat > "$shim/python3" <<SH
+#!/usr/bin/env bash
+entries=""
+prev=""
+for a in "\$@"; do [ "\$prev" = --entries ] && entries="\$a"; prev="\$a"; done
+if [ -n "\$entries" ]; then
+  while IFS=\$'\t' read -r _ p; do
+    case "\$p" in "$alias"/*) ;; *) echo "unconverted config path: \$p" >&2; exit 3 ;; esac
+  done < "\$entries"
+fi
+exec "$MOCK_PYTHON3" "\$@"
+SH
+  chmod +x "$shim/cygpath" "$shim/python3"
+
+  run env PATH="$shim:$PATH" bash "$SCRIPTS/team-list.sh" --json --scope all
+  [ "$status" -eq 0 ]
+  [ "${output#*unconverted config path}" = "$output" ]
+  [[ "$output" == *'"name":"alpha"'* ]] || [[ "$output" == *'"name": "alpha"'* ]]
+}
