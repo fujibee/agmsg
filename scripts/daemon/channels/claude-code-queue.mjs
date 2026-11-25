@@ -134,14 +134,19 @@ export function createClaudeCodeQueueChannel({
   // own path is gone; and since when the seat could not be reached.
   const found = new Map();
   const lastLookup = new Map();
-  // Windows only: named pipes whose connect returned ENOENT, per seat. The
-  // preflight cannot see a pipe without connecting to it, so without this a
-  // gone pipe looked present on every poll: a send attempt was created and
-  // failed every few seconds, and the sessions-file lookup below never ran.
-  // A path leaves the set when the seat's record names another path.
+  // Windows only: named pipes whose connect returned ENOENT, per seat, and
+  // when. The preflight cannot see a pipe without connecting to it, so without
+  // this a gone pipe looked present on every poll: a send attempt was created
+  // and failed every few seconds, and the sessions-file lookup below never
+  // ran. The mark lasts LOOKUP_EVERY_MS, the lookup's own interval, so the
+  // same pipe is dialed again at most once a minute and a pipe that comes back
+  // under the same name is used again within a minute even when the sessions
+  // file cannot be read. A new record path, or the sessions file listing the
+  // name, clears it at once.
   const gonePipes = new Map();
   const checkSocket = (seat, path) => {
-    if (hostPlatform === "win32" && gonePipes.get(seat)?.paths.has(path)) {
+    const at = hostPlatform === "win32" ? gonePipes.get(seat)?.paths.get(path) : undefined;
+    if (at !== undefined && now() - at < LOOKUP_EVERY_MS) {
       return { state: "unreadable", reason: "messaging_socket_missing" };
     }
     return socketAlive(path);
@@ -150,10 +155,10 @@ export function createClaudeCodeQueueChannel({
     if (hostPlatform !== "win32" || !path) return;
     let entry = gonePipes.get(seat);
     if (!entry || entry.recordPath !== recordPath) {
-      entry = { recordPath, paths: new Set() };
+      entry = { recordPath, paths: new Map() };
       gonePipes.set(seat, entry);
     }
-    entry.paths.add(path);
+    entry.paths.set(path, now());
   };
   const unreachable = new Map();
   const downKept = new Set();
@@ -278,7 +283,9 @@ export function createClaudeCodeQueueChannel({
       try { store.close(); } catch { /* keep the read result */ }
     }
     // Check every poll, including idle seats. A socket recreated at the same
-    // path is eligible immediately; there is no persistent absence cache.
+    // path is eligible immediately; there is no persistent absence cache. On
+    // Windows a pipe that answered ENOENT waits out one lookup interval first
+    // (gonePipes above).
     // The record's path is primary. When it is gone, the socket of the session's
     // live process in Claude Code's own sessions file is the second source (#1910);
     // it is used only when the process and its start time match, and it is never

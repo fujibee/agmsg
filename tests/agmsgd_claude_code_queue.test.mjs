@@ -825,13 +825,15 @@ test('Windows: after the recorded pipe answers ENOENT, the live pipe of the same
   await channel.stop();
 });
 
-test('Windows: a pipe known to be gone gets no new send attempt each poll while no live pipe is found', async (t) => {
+test('Windows: a pipe known to be gone is dialed at most once a minute while no live pipe is found', async (t) => {
   const { db, state, channel, calls } = windowsPipeFixture(t, () => ({ state: 'unknown', reason: 'sessions_dir_unreadable' }));
   await channel.pollOnce();
-  for (const minutes of [0, 1, 2]) { state.minutes = minutes; state.sequence += 1; await channel.pollOnce(); }
+  for (const minutes of [0, 0.25, 0.5, 0.75]) { state.minutes = minutes; state.sequence += 1; await channel.pollOnce(); }
   assert.equal(calls.sends.length, 1);
   assert.equal(db.prepare('SELECT count(*) AS n FROM beta_claude_queue').get().n, 1);
   assert.deepEqual(seatBrief(channel), { state: 'unaddressable', reason: 'messaging_socket_missing' });
+  state.minutes = 1; await channel.pollOnce();
+  assert.equal(calls.sends.length, 2);
   // A new record path is tried again at once.
   state.socket = '\\\\.\\pipe\\LOCAL\\cc-msg-renewed';
   await channel.pollOnce();
@@ -847,4 +849,26 @@ test('Windows: when the sessions file lists the same pipe name again, it is dial
   assert.deepEqual(calls.sends, ['\\\\.\\pipe\\LOCAL\\cc-msg-old', '\\\\.\\pipe\\LOCAL\\cc-msg-old']);
   assert.equal(calls.lookups, 1);
   await channel.stop();
+});
+
+test('Windows: a pipe that comes back under the same name is used again within a minute, even with no readable sessions file', async (t) => {
+  const { state, channel, calls } = windowsPipeFixture(t, () => ({ state: 'unknown', reason: 'sessions_dir_missing' }));
+  let first = true;
+  const revived = createClaudeCodeQueueChannel({
+    ...state.options,
+    now: () => Date.UTC(2026, 10, 25) + state.minutes * 60_000,
+    socketAlive: () => ({ state: 'ok' }),
+    lookupSession: async () => ({ state: 'unknown', reason: 'sessions_dir_missing' }),
+    send: async (args) => { calls.sends.push(args.socketPath); if (first) { first = false; return { state: 'failed', reason: 'socket_error:ENOENT' }; } return { state: 'sent' }; },
+    downSet: () => true,
+    downClear: () => true,
+  });
+  await channel.stop();
+  await revived.pollOnce();
+  state.minutes = 0.5; await revived.pollOnce();
+  assert.equal(calls.sends.length, 1);
+  state.minutes = 1; await revived.pollOnce();
+  assert.deepEqual(calls.sends, ['\\\\.\\pipe\\LOCAL\\cc-msg-old', '\\\\.\\pipe\\LOCAL\\cc-msg-old']);
+  assert.deepEqual(seatBrief(revived), { state: 'addressable', reason: '' });
+  await revived.stop();
 });
