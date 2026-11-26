@@ -500,6 +500,52 @@ WRAPPER
   [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
 }
 
+@test "WSL with unreadable ps is unchecked unless the pid is confirmed gone" {
+  printf 'test-boot\n' > "$BATS_TEST_TMPDIR/boot-id"
+  printf '6.18-microsoft-standard-WSL2\n' > "$BATS_TEST_TMPDIR/osrelease"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='test-boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  local presence
+  for presence in alive unknown gone; do
+    run env TEST_PRESENCE="$presence" bash -c '
+      source "$SCRIPTS/lib/daemon-state.sh"
+      uname() { printf "Linux\n"; }
+      ps() { return 1; }
+      _AGMSG_BOOT_ID_FILE="$BATS_TEST_TMPDIR/boot-id"
+      _AGMSG_OS_RELEASE_FILE="$BATS_TEST_TMPDIR/osrelease"
+      _agmsg_pid_signal_presence() { printf "%s\n" "$TEST_PRESENCE"; }
+      _agmsg_daemon_self_heal() { printf "unexpected self-heal\n"; }
+      agmsg_daemon_read_state
+      printf "%s\n" "$AGMSGD_HEALTH"
+      if [ "$TEST_PRESENCE" != gone ]; then
+        agmsg_daemon_warn_if_stopped
+        agmsg_daemon_warn_if_stopped always
+      fi
+    '
+    [ "$status" -eq 0 ]
+    if [ "$presence" = gone ]; then
+      [ "$output" = stopped ]
+    else
+      assert_contains unchecked
+      assert_lacks 'stopped while enabled'
+      assert_lacks 'unexpected self-heal'
+      [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+      [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+    fi
+  done
+  # A readable stopped/zombie state remains positive evidence, even on WSL.
+  run bash -c '
+    source "$SCRIPTS/lib/daemon-state.sh"
+    uname() { printf "Linux\n"; }
+    ps() { printf "T\n"; }
+    _AGMSG_BOOT_ID_FILE="$BATS_TEST_TMPDIR/boot-id"
+    _AGMSG_OS_RELEASE_FILE="$BATS_TEST_TMPDIR/osrelease"
+    agmsg_daemon_read_state
+    printf "%s\n" "$AGMSGD_HEALTH"
+  '
+  [ "$status" -eq 0 ]
+  [ "$output" = stopped ]
+}
+
 @test "warn_if_stopped never erases an existing down_notice on an UNOBSERVED (install.db missing) check (review round 1 NEEDS FIX)" {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'

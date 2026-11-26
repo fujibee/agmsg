@@ -953,6 +953,77 @@ EOF
   grep -q unrelated "$wrong_root/run/down/agmsgd.json"
 }
 
+# Opens a sqlite3 connection on $1 that holds an EXCLUSIVE transaction until
+# the caller writes COMMIT to fd 9, and reads its confirmation from fd 8.
+# The holder is registered with teardown's owned-pid mechanism before any
+# assertion can end the test.
+#
+# Bash 4+ feeds sqlite3 through a coprocess, like install-op-lock.sh. On
+# Windows, sqlite3.exe connected to a Git Bash mkfifo pair behaves as if
+# interactive: it prints its version banner first and holds its output back,
+# so the "held" line never arrives within the read timeout. Anonymous pipes
+# do not have that problem. Bash 3.2 has no coproc and keeps the fifo pair,
+# under $2 (inside $FAKE_HOME so teardown removes it). Windows also ends the
+# line with CR, which is stripped before the comparison.
+_hold_exclusive_sqlite() {
+  local db="$1" fifodir="$2" holder_pid read_fd write_fd line
+  if [ "${BASH_VERSINFO[0]:-3}" -ge 4 ]; then
+    eval 'coproc HELD_SQLITE { exec sqlite3 "$db" 2>&1; }'
+    holder_pid="$HELD_SQLITE_PID"
+    _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
+    read_fd="${HELD_SQLITE[0]}"; write_fd="${HELD_SQLITE[1]}"
+    # Plain descriptors, so the releaser subshell in the caller inherits them.
+    eval "exec 8<&${read_fd} 9>&${write_fd}"
+    # Close the coprocess's own copies so 8/9 are the only ones: closing 9
+    # then really ends sqlite3's stdin, as it does for the fifo.
+    eval "exec ${read_fd}<&- ${write_fd}>&-"
+  else
+    mkdir -p "$fifodir"
+    mkfifo "$fifodir/in" "$fifodir/out"
+    sqlite3 "$db" < "$fifodir/in" > "$fifodir/out" 2>&1 &
+    holder_pid=$!
+    _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
+    exec 9> "$fifodir/in"
+    exec 8< "$fifodir/out"
+  fi
+  printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
+  IFS= read -r -t 5 -u 8 line
+  line="${line%$'\r'}"
+  [ "$line" = held ]
+}
+
+# A CI-only (never reproduced locally) failure measured this week (bats #24,
+# 11-21 macOS run 44850365985, 11-23 ubuntu job 137494736304): "install.db:
+# reading the install id failed (sqlite3 rc=5)" right as install --update
+# started, immediately behind that same test's own prior sqlite3 write to
+# install.db. agmsg_install_db_ensure_meta's CREATE TABLE/SELECT/INSERT ran
+# with the default busy_timeout=0 -- the same race
+# agmsg_install_db_apply_schema below already guards against (see its own
+# comment), just missed here. Proven directly here, the same way: a
+# background writer holds an EXCLUSIVE transaction on the (not yet
+# bootstrapped) db file for longer than sqlite3's default busy_timeout but
+# well inside the 5000ms this function now asks for, and the call still
+# succeeds once that writer lets go. Remove the `.timeout 5000` from
+# agmsg_install_db_ensure_meta's CREATE TABLE call and this goes red with
+# exactly the measured "reading the install id failed (sqlite3 rc=5)" line.
+@test "agmsg_install_db_ensure_meta: tolerates a brief exclusive hold instead of failing immediately (flaky bats #24)" {
+  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install-meta.db"
+  # A real held EXCLUSIVE lock on the db file BEFORE it has ever been
+  # bootstrapped by ensure_meta itself -- this races ensure_meta's own
+  # first statement (CREATE TABLE IF NOT EXISTS), not a later read against
+  # an already-populated db.
+  _hold_exclusive_sqlite "$db" "$FAKE_HOME/meta-lock-fifos"
+  ( sleep 0.5; printf 'COMMIT;\n' >&9 2>/dev/null || true ) &
+  local releaser_pid=$!
+  run bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$lib" "$db"
+  wait "$releaser_pid" 2>/dev/null || true
+  exec 9>&- 8<&-
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM meta;")" = 1 ]
+  [ "$(sqlite3 "$db" "SELECT install_id FROM meta;")" = "$output" ]
+}
+
 # A CI-only (never reproduced locally) failure measured on #1904: a schema
 # apply right after a prior test's real agmsgd stop occasionally failed with
 # "could not apply the daemon schema to install.db" -- `cmd_stop` confirms
@@ -968,7 +1039,7 @@ EOF
 # the 5000ms this function now asks for, and the call still succeeds once
 # that writer lets go.
 @test "agmsg_install_db_apply_schema: tolerates a brief exclusive hold instead of failing immediately" {
-  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install.db" schema="$REPO_ROOT/scripts/daemon/schema.sql" fifodir in_fifo out_fifo holder_pid
+  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install.db" schema="$REPO_ROOT/scripts/daemon/schema.sql"
   # The real bootstrap, not a hand-rolled meta table: schema.sql expects
   # columns (schema_version among them) a minimal stand-in would not have,
   # which fails for an unrelated reason (a genuine schema mismatch) that
@@ -977,32 +1048,10 @@ EOF
   bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$lib" "$db" >/dev/null
   # A real held EXCLUSIVE lock, not a fake one -- a plain heredoc/pipe into
   # sqlite3 hits EOF and ends the transaction as soon as it is written, so
-  # this needs the same fifo-backed, held-open connection pattern
-  # install-op-lock.sh uses for the same reason (sqlite3 only holds the lock
-  # for as long as its stdin stays open). Under $FAKE_HOME, not a separate
-  # mktemp dir outside it (review): this file's own teardown only removes
-  # $FAKE_HOME, so anything meant to be cleaned up automatically has to live
-  # there.
-  fifodir="$FAKE_HOME/lock-fifos"
-  in_fifo="$fifodir/in"; out_fifo="$fifodir/out"
-  mkdir -p "$fifodir"
-  mkfifo "$in_fifo" "$out_fifo"
-  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
-  holder_pid=$!
-  # Registered with teardown's own owned-pid mechanism IMMEDIATELY (before
-  # any assertion that could end the test, per that function's own
-  # docstring) -- rather than this test's own unconfirmed `kill` at the end,
-  # which both skips the ownership check every other teardown-reaped process
-  # in this file gets, and never runs at all if an assertion below fails
-  # first (review: this test's own assertions sit between the fork and that
-  # kill, exactly the gap #963 was raised about elsewhere in this file).
-  _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
-  exec 9> "$in_fifo"
-  exec 8< "$out_fifo"
-  printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
-  local line
-  IFS= read -r -t 5 -u 8 line
-  [ "$line" = held ]
+  # this needs a held-open connection, the pattern install-op-lock.sh uses
+  # for the same reason (sqlite3 only holds the lock for as long as its stdin
+  # stays open). See _hold_exclusive_sqlite.
+  _hold_exclusive_sqlite "$db" "$FAKE_HOME/lock-fifos"
   # Released well inside this function's own 5000ms timeout, from a second
   # process so the release genuinely overlaps the foreground call below
   # rather than happening before it starts. Bounded and self-terminating

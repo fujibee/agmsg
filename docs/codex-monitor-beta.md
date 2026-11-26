@@ -1,5 +1,7 @@
 # Codex Monitor (legacy)
 
+This bridge and its shell shim apply to the terminal CLI, not the Codex desktop app; use agmsgd and run `$agmsg actas <name>` in the app chat for native queue delivery.
+
 Codex does not expose Claude Code's Monitor tool, but it can still receive messages in
 monitor (legacy) mode: agmsg's Codex monitor launches Codex through an app-server bridge
 and delivers incoming messages as turns.

@@ -171,6 +171,25 @@ If agmsgd stops while enabled, the next ordinary agmsg script operation warns at
 
 To return to bridge notices, run `agmsg daemon disable`, then restart the Codex sessions listed as having no bridge (for example, `codex resume`, followed by `$agmsg actas <name>`). They receive no new notices until restarted. Existing bridge sessions need no restart, and subsequent Codex launches get a bridge. Notices already accepted by the Codex queue are not cancelled and may appear once more. Claude Code seats go back to Monitor at their next SessionStart; an open Claude Code session gets no notices until then. To restore notices in an existing session, resume it so SessionStart arms Monitor again. `stop` stops the daemon without removing its resident service; `disable` also unregisters that service.
 
+### Desktop apps
+
+Claude Code in the Claude desktop app's **Code tab** and Codex in the **Codex desktop app (ChatGPT.app)** can join an agmsg team. Verified on macOS with agmsg 1.8.2 and agmsgd running as a login service: all ten message directions involving an app across two terminal seats and two app seats worked, including idle app conversations (notices arrived 1–5 seconds after sending).
+
+Choose a **Local** session and select your project folder in Claude Code's Code tab. Cloud sessions cannot reach this machine's install. Without a selected folder, the app uses a temporary scratch workspace; select a folder for a lasting seat. In the Codex app, open the project; the app uses `~/.codex`. Its shell runs in a sandbox with networking disabled: local `send` and `inbox` work, but remote sync and other network operations cannot run from that shell.
+
+After installing agmsg, claim an existing team identity in the app conversation:
+
+```text
+/agmsg actas <name>     # Claude Code, Code tab
+$agmsg actas <name>     # Codex app
+```
+
+For a new identity, run `/agmsg` or `$agmsg` first and follow the team setup. Use **agmsgd** for app notices. It reaches Claude Code through the session's cross-session socket and Codex through the Codex queue using the thread and profile recorded by `actas`; it also reaches idle conversations. The Codex monitor (legacy) bridge and shell shim are for the terminal CLI, not the Codex app. Claude Code's Monitor remains an alternative when direct delivery is unavailable.
+
+**Open a new chat? Run `actas <name>` again there.** Delivery moves to that chat and stops going to the old one; without `actas`, it keeps going to the old chat. App handoff replaces the recorded destination rather than refusing it as held. If the Claude Code app chat's process ends, notices stop until you run `actas` again; queued messages remain and arrive after reclaiming the seat.
+
+App seats have no addressable terminal pane: `peek`, `poke`, `spawn`, and `arrange` are unsupported. Their `team` status shows identity, CLI session, and reach as `n/a`. Desktop app support is verified on **macOS**.
+
 ## First run
 
 Open your project in your agent (Claude Code, Codex, Gemini CLI, etc.) and run:
@@ -200,7 +219,7 @@ Same project, same agent type, different role — for example a `tech-lead` iden
 /agmsg drop biz-analyst    # remove the role from this project
 ```
 
-`actas <name>` is **exclusive across sessions**: it switches both sending and receiving to `<name>`, claims a lock that stops peer sessions from subscribing to the same name, and refuses if another session already holds it. `drop` releases the lock. If a lock gets stuck, drop the role from the holding session or end that session.
+For terminal seats, `actas <name>` is **exclusive across sessions**: it switches both sending and receiving to `<name>`, claims a lock that stops peer sessions from subscribing to the same name, and refuses if another session already holds it. `drop` releases the lock. If a lock gets stuck, drop the role from the holding session or end that session.
 
 See [docs/actas.md](docs/actas.md) for the full mechanics — exclusivity model, recovery, liveness / PID recycling, Codex caveat.
 

@@ -9,16 +9,21 @@
 // process is checked against it, and anything else is "not found" -- a socket
 // is never guessed.
 //
-// Fields read: sessionId, pid, procStart (UTC, the form `ps -o lstart=` prints
-// for the process start in local time), messagingSocketPath.
-// tests/claude_code_sessions.test.mjs pins this shape.
+// Fields read: sessionId, pid, procStart, messagingSocketPath. On macOS and
+// Linux procStart is the UTC form `ps -o lstart=` prints for the process start
+// in local time. On Windows it is the process creation time as a FILETIME (100 ns
+// ticks since 1601, UTC), the value Process.StartTime.ToFileTimeUtc() returns,
+// and the socket is a named pipe. tests/claude_code_sessions.test.mjs pins both.
 //
-// Process launches: one `ps -o lstart= -p <pid>` per candidate that matched the
-// session id and whose pid is alive; none when no file matches.
+// Process launches: one `ps -o lstart= -p <pid>` (Windows: one powershell) per
+// candidate that matched the session id and whose pid is alive; none when no
+// file matches.
 
 import { execFile } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isNamedPipePath } from "./claude-code-queue-io.mjs";
+import { parseFileTime } from "../executor.mjs";
 
 const MAX_FILES = 500;
 const START_TOLERANCE_MS = 2_000;
@@ -44,6 +49,19 @@ function psStart(pid, run = execFile) {
   });
 }
 
+function windowsStart(pid, run = execFile) {
+  return new Promise((resolve) => {
+    run("powershell", ["-NoProfile", "-NonInteractive", "-Command", `[Diagnostics.Process]::GetProcessById(${Number(pid)}).StartTime.ToFileTimeUtc()`],
+      { encoding: "utf8", timeout: 10_000, windowsHide: true }, (error, stdout) => {
+        if (error) return resolve("");
+        resolve(String(stdout).trim());
+      });
+  });
+}
+
+// A Windows FILETIME as a decimal string -> epoch ms, or NaN.
+export { parseFileTime };
+
 // "Mon Nov  2 00:34:49 2026" (UTC) -> epoch ms, or NaN when it is not that shape.
 export function parseStart(text, zone) {
   const clean = String(text ?? "").trim().replace(/\s+/g, " ");
@@ -58,8 +76,9 @@ export function parseStart(text, zone) {
  *   { state: "ended" }                the directory was read and no live process has this session
  *   { state: "unknown", reason }      could not tell: unreadable directory, files of another shape, a pid that could not be checked
  */
-export async function findSessionSocket({ configDir, sessionId, alive = pidAlive, startOf = psStart, platform = process.platform }) {
-  if (platform === "win32") return { state: "unknown", reason: "sessions_files_not_read_on_windows" };
+export async function findSessionSocket({ configDir, sessionId, alive = pidAlive, startOf, platform = process.platform }) {
+  const windows = platform === "win32";
+  const readStart = startOf ?? (windows ? windowsStart : psStart);
   if (!configDir || !sessionId) return { state: "unknown", reason: "sessions_lookup_needs_session_and_config_dir" };
   const dir = join(configDir, "sessions");
   let names;
@@ -88,12 +107,13 @@ export async function findSessionSocket({ configDir, sessionId, alive = pidAlive
     const live = alive(pid);
     if (live === null) { unreadable += 1; continue; }
     if (!live) continue;
-    const want = parseStart(data.procStart, "utc");
-    const have = parseStart(await startOf(pid), "local");
+    const want = windows ? parseFileTime(data.procStart) : parseStart(data.procStart, "utc");
+    const have = windows ? parseFileTime(await readStart(pid)) : parseStart(await readStart(pid), "local");
     if (Number.isNaN(want) || Number.isNaN(have)) { unreadable += 1; continue; }
     if (Math.abs(want - have) > START_TOLERANCE_MS) continue; // the pid now belongs to another process
     const socket = data.messagingSocketPath;
-    if (!socket.startsWith("/") || /[\u0000-\u001f]/.test(socket)) { unreadable += 1; continue; }
+    const shapeOk = windows ? isNamedPipePath(socket) : socket.startsWith("/");
+    if (!shapeOk || /[\u0000-\u001f]/.test(socket)) { unreadable += 1; continue; }
     return { state: "found", socket, pid };
   }
   // Files of another shape could hide the session: that is not proof it ended.

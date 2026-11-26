@@ -4,6 +4,44 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-11-26
+
+### Fixed
+- agmsgd (Windows): when a running Claude Code session has moved to a new messaging pipe, agmsgd finds the current pipe from the session's file and delivers there, instead of retrying the old one on every poll (#2042)
+- team list (Windows): native Windows Python can open the team config paths, so `agmsg team list` no longer skips every team with "could not read config" (#2040)
+- agmsgd (Windows): a reused pid no longer reads as the running agmsgd; the pid's start time is checked against the owner's claim time, so `agmsg daemon start` starts a new one after the node was killed (#2045)
+- agmsgd: a heartbeat left by a killed executor no longer reads as running, so `agmsg daemon start` starts a new one (#2038)
+- agmsgd: `daemon start` reports running only for an owner that started after it; on Windows it says when no one is signed in (#2026)
+- agmsgd: the socket and the owner's heartbeat are checked before a restart, so a second agmsgd is not started next to a live one (#2023)
+- remote: connect reports roster, name and server-instance drift and continues; members are matched by id (#2036)
+- remote: connect adopts its own registration after the roster changed, on the journal's evidence (#2031)
+- Codex bridge: workspace roots are passed as physical paths, so a symlinked state directory no longer breaks the seat's shell (#2021)
+- antigravity: turn delivery rules carry the always-on trigger (#2019)
+- install: the install.db meta read has a busy timeout (#2020)
+- tests: the busy-timeout tests hold the sqlite3 lock through a coprocess so they run on Windows (#2041); the rotation look-ahead test pins its decrypt concurrency (#2032)
+- CI: the full suite runs on the release pull request and daily; pull requests run only what their changes reach (#2027)
+
+[1.9.1]: https://github.com/fujibee/agmsg/compare/v1.9.0...v1.9.1
+
+## [1.9.0] - 2026-11-24
+
+### Added
+- Desktop apps: Claude Code in the Claude desktop app's Code tab (Local sessions) and Codex in the Codex desktop app join a team as seats. agmsgd delivers to them even while the conversation is idle: Claude Code through the session's cross-session socket, Codex through the Codex queue with the thread and profile recorded by actas. Verified on macOS (#2016, #2025)
+
+### Changed
+- actas: in a desktop app, running actas in a new chat takes the role over and delivery moves to that chat; without it, delivery stays with the old chat. A terminal seat still refuses a role held by another live session (#2016)
+
+### Fixed
+- delivery: `agmsg delivery agmsgd` for Codex and the other types prints only the agmsgd result, not the monitor-mode setup and shim advice (#2016)
+- team: a Codex desktop app seat shows identity, CLI session and reach as n/a, the same as a Claude Code desktop seat (#2016)
+- remote: unlock reprocessing decrypts a few messages at once and reads a page's local ids in one call (#2022)
+- input-box: a labeled Claude Code top rule is paired with the full-width bottom rule (#2005)
+- scripts: grep -q input is read without a pipe, so a skipped match cannot change a result (#2011)
+- tests: AGMSG_HOME and AGMSG_INSTALL_HOME are cleared, and a test that changes the real state directory fails (#2008)
+- CI: a rerun runs only the tests the earlier attempt did not pass (#2010)
+
+[1.9.0]: https://github.com/fujibee/agmsg/compare/v1.8.2...v1.9.0
+
 ## [1.8.2] - 2026-11-21
 
 ### Fixed

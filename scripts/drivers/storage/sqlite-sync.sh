@@ -1333,6 +1333,12 @@ storage_sync_apply_pull() {
     _sqlite_sync_apply_fail "the page produced no readable record count"
     _sqlite_sync_why; return 13
   fi
+  # The local event ids of the whole page at once: a `$(compat_uuid7)` per
+  # imported message was a subshell plus date, head, od and tr each time, the
+  # largest per-message cost left in this loop (measured: ~9 process launches
+  # per message). One call makes them all; the loop below takes the next one.
+  local uuid7s
+  uuid7s=$(compat_uuid7_bulk "$page_count") || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
   record_index=0
   while [ "$record_index" -lt "$page_count" ]; do
     record_index=$((record_index + 1))
@@ -1505,7 +1511,9 @@ storage_sync_apply_pull() {
         echo "agmsg: storage sync apply received an importable message without its projection" >&2
         _sqlite_sync_apply_fail; _sqlite_sync_why; return 13;
       }
-      local_id=$(compat_uuid7) || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
+      local_id="${uuid7s%%$'\n'*}"
+      [ -n "$local_id" ] || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
+      uuid7s="${uuid7s#*$'\n'}"
       printf "%s\n" "
         INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
         SELECT 'message_sent','$local_id','$tl','$from_q',

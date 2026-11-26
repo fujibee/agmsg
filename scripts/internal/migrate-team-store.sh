@@ -14,6 +14,10 @@
 
 set -euo pipefail
 
+# A newline for the whole-line table-name checks below (a case match, which needs
+# no pipe and no temporary file).
+NL=$'\n'
+
 TEAM="${1:?Usage: migrate-team-store.sh <team>}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -50,7 +54,7 @@ _drop_from_shared() {
   local sql="BEGIN;"
   local t
   for t in events messages read_cursors; do
-    printf '%s\n' "$src_tables" | grep -qx "$t" || continue
+    case "$NL$src_tables$NL" in *"$NL$t$NL"*) ;; *) continue ;; esac
     sql="$sql DELETE FROM $t WHERE team='$lit';"
   done
   sql="$sql COMMIT;"
@@ -61,7 +65,7 @@ _drop_from_shared() {
 [ -f "$SHARED" ] || { echo "team store: no shared store to move from" >&2; exit 1; }
 src_tables="$(agmsg_sqlite "$SHARED" \
   "SELECT name FROM sqlite_master WHERE type='table';" 2>/dev/null || true)"
-has_table() { printf '%s\n' "$src_tables" | grep -qx "$1"; }
+has_table() { case "$NL$src_tables$NL" in *"$NL$1$NL"*) return 0 ;; *) return 1 ;; esac; }
 
 # Every column of events that moves, ASKED OF THE STORE rather than listed
 # here. The copy and the containment check below both use this, and they have to
@@ -117,7 +121,7 @@ _missing_from_dest() {
   local dest_lit; dest_lit="$(agmsg_sql_readfile_path "$DEST")"
   local t sql out
   for t in events messages read_cursors; do
-    printf '%s\n' "$src_tables" | grep -qx "$t" || continue
+    case "$NL$src_tables$NL" in *"$NL$t$NL"*) ;; *) continue ;; esac
     # Every column the copy carries, not just the key.
     #
     # A key alone proves too little here. After the destination is removed the

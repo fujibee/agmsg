@@ -11,7 +11,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync
   rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { ageExecutableVersion, CipherStateError, openEnvelope,
+import { ageExecutableVersion, CipherStateError, decryptConcurrency, openEnvelope,
   readNativeAgeIdentity } from "./sync-cipher.mjs";
 import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 import { STORAGE_ROSTER_KINDS } from "./wire-kinds.mjs";
@@ -3254,6 +3254,37 @@ export async function rosterSequencesFor(config, dependencies = {}) {
   return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
 }
 
+// The member ids in this team's local roster, and the ids its roster journal
+// records as having left. Null when either cannot be read, so the caller
+// falls back to names rather than guessing.
+export async function localMemberIds(config, dependencies = {}) {
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const rosterFile = dependencies.rosterFile ?? rosterFileFor(config.local_team);
+  if (!rosterFile) return null;
+  try {
+    const value = JSON.parse(await readFileCall(rosterFile, "utf8"));
+    if (!value?.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) return null;
+    const ids = new Set();
+    for (const agent of Object.values(value.agents)) {
+      if (typeof agent?.member_id !== "string" || !agent.member_id) return null;
+      ids.add(agent.member_id);
+    }
+    const left = new Set();
+    let text = "";
+    try { text = await readFileCall(join(dirname(rosterFile), "roster.jsonl"), "utf8"); }
+    catch (error) { if (error?.code !== "ENOENT") return null; }
+    for (const line of text.split(/\r?\n/u)) {
+      if (!line) continue;
+      let record;
+      try { record = JSON.parse(line); } catch { return null; }
+      if (record?.type === "member_left" && typeof record.member_id === "string") left.add(record.member_id);
+    }
+    return { ids, left };
+  } catch {
+    return null;
+  }
+}
+
 export async function readStateCycle(config, limit, dependencies = {}) {
   const driverCall = dependencies.driverCall ?? driver;
   const requestCall = dependencies.requestCall ?? request;
@@ -3290,8 +3321,17 @@ export async function readStateCycle(config, limit, dependencies = {}) {
   // is a wait, not a fault, and the names are what make it actionable -- an
   // agent about to pick its own name needs to know which ones are taken, which
   // is the whole reason `docs/remote-setup.md` step 4 exists.
+  //
+  // Compared by member id when the local ids can be read (#2035): the server's
+  // list stays at the roster the team registered with, so a seat renamed since
+  // keeps its id under a new name here, and a seat that left is still listed
+  // there. Neither is a member this machine is waiting for. Names are the
+  // fallback when the ids cannot be read.
+  const known = await (dependencies.localMemberIdsCall ?? localMemberIds)(config);
   const unmaterialised = members
-    .filter((member) => !localAgents.includes(member.name))
+    .filter((member) => known
+      ? !known.ids.has(member.member_id) && !known.left.has(member.member_id)
+      : !localAgents.includes(member.name))
     .map((member) => member.name);
   if (unmaterialised.length > 0) {
     await eventCall("roster.incomplete", {
@@ -4401,7 +4441,27 @@ export async function reprocessCycle(config, limit, dependencies = {}, scope = "
         cursorRecord ? [...pendingRosterRecords, cursorRecord] : pendingRosterRecords);
       pendingRosterRecords = [];
     };
-    for (const candidate of candidates) {
+    // Candidates are evaluated a few at a time ahead of the loop (decryption is
+    // an age process per message), but consumed strictly in order, so results,
+    // errors and the order of everything applied are the same as one at a time.
+    // A key rotation changes how every later sequence is read, so what was
+    // started ahead of one is thrown away and evaluated again after it.
+    const lookahead = decryptConcurrency() * 2;
+    const ahead = new Map();
+    const evaluateAhead = (index) => {
+      for (let j = index; j < candidates.length && j < index + lookahead; j += 1) {
+        if (ahead.has(j)) continue;
+        const c = candidates[j];
+        if (c.server_seq === "0") break;
+        const promise = Promise.resolve().then(() => evaluateCall(config, capabilities,
+          { server_seq: c.server_seq, id: c.id, server_received_at: c.server_received_at,
+            envelope: c.envelope }));
+        promise.catch(() => {});   // reported when consumed in order, not as unhandled
+        ahead.set(j, promise);
+      }
+    };
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
       const token = reprocessCandidateToken(candidate);
       if (seenTokens.has(token)) throw new Error("driver reprocess repeated a candidate");
       seenTokens.add(token);
@@ -4420,10 +4480,13 @@ export async function reprocessCycle(config, limit, dependencies = {}, scope = "
       }
       const message = { server_seq: candidate.server_seq, id: candidate.id,
         server_received_at: candidate.server_received_at, envelope: candidate.envelope };
-      const evaluated = await evaluateCall(config, capabilities, message);
+      evaluateAhead(index);
+      const evaluated = await ahead.get(index);
+      ahead.delete(index);
       const record = { type: "sync_pull_message", ...message, ...evaluated };
       storageRecords.push(record);
       if (record.status === "importable" && record.projection?.kind === "key_rotated") {
+        ahead.clear();
         // A rotation changes how every later sequence is interpreted. Flush
         // earlier roster mutations before publishing and activating it; a
         // page may interleave both kinds, and the journal is append-only.

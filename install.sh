@@ -1701,7 +1701,7 @@ $_agmsg_running_team"
   agmsg_install_sync_codex_shim
   CODEX_SHIM_STATUS=""
   [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
-  if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
+  if grep -q '^installed:' <<<"$CODEX_SHIM_STATUS"; then
     CODEX_SHIM_FORCE="${AGMSG_CODEX_SHIM_FORCE:-}"
     agmsg_install_refresh_codex_shim || exit 1
   fi
@@ -1851,7 +1851,7 @@ CODEX_SHIM="$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh"
 agmsg_install_sync_codex_shim
 CODEX_SHIM_STATUS=""
 [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
-if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
+if grep -q '^installed:' <<<"$CODEX_SHIM_STATUS"; then
   # Stdout suppressed (mirrors the --update block's success case above);
   # stderr is NOT, since codex-shim-install.sh's own refusal already names the
   # current owner and the exact consequence of forcing -- repeating a

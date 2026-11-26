@@ -2,6 +2,83 @@
 
 load test_helper
 
+# The trusted-heartbeat checks, shared by the two shapes below: start and
+# status believe a fresh heartbeat and change nothing.
+_assert_heartbeat_trusted() {
+  local before heartbeat
+  before="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" '.dump')"
+  heartbeat="$(cat "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json")"
+  printf 'leave this alone\n' > "$TEST_SKILL_DIR/run/agmsgd-tool-path"
+  run bash "$DAEMON" start
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq 'already running (heartbeat); nothing was changed'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" '.dump')" = "$before" ]
+  [ "$(cat "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json")" = "$heartbeat" ]
+  [ "$(cat "$TEST_SKILL_DIR/run/agmsgd-tool-path")" = 'leave this alone' ]
+  run bash "$DAEMON" status --json
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq 'recent heartbeat'
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"; agmsg_daemon_warn_if_stopped' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = ready ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = 7 ]
+}
+
+_write_heartbeat() {   # [pid_ns]
+  node -e 'const r={install_id:"daemon-sh-test", gen:4, sequence:2, at:new Date().toISOString()}; if (process.argv[2]) r.pid_ns=process.argv[2]; require("node:fs").writeFileSync(process.argv[1], JSON.stringify(r))' "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json" "${1:-}"
+}
+
+@test "start and status trust a recent heartbeat across an invisible PID without changing any state" {
+  # Codex's Linux sandbox: its own pid namespace, so the executor's pid answers
+  # "no such process" there. A heartbeat from another (or no recorded)
+  # namespace cannot be contradicted by that.
+  [ "$(uname -s)" = Linux ] || skip "pid namespaces are Linux-only"
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=999999, executor_boot_id='not-readable-here';"
+  _write_heartbeat 'pid:[4026531836-not-this-one]'
+  _assert_heartbeat_trusted
+  _write_heartbeat
+  _assert_heartbeat_trusted
+}
+
+@test "start and status trust a recent heartbeat from a live executor whose boot id cannot be read" {
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=$$, executor_boot_id='not-readable-here';"
+  _write_heartbeat "$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+  _assert_heartbeat_trusted
+}
+
+@test "status does not call a killed executor running while its heartbeat is still fresh" {
+  # The heartbeat outlives a killed executor by up to 20 seconds. From the
+  # executor's own pid view (any caller on macOS/Windows, the recorded
+  # namespace on Linux), "no such process" overrides it.
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=999999, executor_boot_id='not-readable-here';"
+  refute kill -0 999999 2>/dev/null
+  _write_heartbeat "$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+  run bash "$DAEMON" status
+  refute grep -Fq 'recent heartbeat' <<<"$output"
+  grep -Fq 'agmsgd is stopped' <<<"$output"
+  run node --disable-warning=ExperimentalWarning "$SCRIPTS/daemon/heartbeat.mjs" "$TEST_SKILL_DIR"
+  [ "$output" = not_running ]
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
+  refute grep -Fxq ready <<<"$output"
+}
+
+@test "stop removes its heartbeat even when intent is already off" {
+  _seed_install_db
+  printf '{}\n' > "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json"
+  run bash "$DAEMON" stop
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json" ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
+  printf '{}\n' > "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json"
+  run bash "$DAEMON" stop
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json" ]
+}
+
 setup() {
   setup_test_env
   DAEMON="$SCRIPTS/daemon.sh"
@@ -291,7 +368,8 @@ _assert_start_result() {
   ( . "$SCRIPTS/lib/down-notice.sh" 2>/dev/null; down_notice_set agmsgd down stale stale )
   _run_with_deadline 10 bash "$DAEMON" start
   _assert_start_result 'already running'
-  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  # A confirmed-running start is read-only, including diagnostic records.
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
@@ -709,6 +787,76 @@ EOF
   [ "$status" -eq 0 ]
   [ ! -f "$marker" ]
   [ -z "$(ls "$TEST_SKILL_DIR/run/"agmsgd-*.xml 2>/dev/null || true)" ]
+}
+
+# A Windows install whose owner row was left "ready" by an executor that died
+# with the machine (no clean end recorded), and whose task does not run: the
+# launcher stand-in does nothing, as Task Scheduler does for an "Interactive
+# only" task when no one is signed in (#2024).
+_stale_ready_windows_install() {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  local gitroot="$TEST_SKILL_DIR/fake-windows/GitRoot"
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log" AGMSGD_FAKE_GIT_ROOT="$gitroot"
+  mkdir -p "$gitroot/bin"
+  : > "$gitroot/bin/bash.exe"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_SKILL_DIR/fake-windows/noop-launcher.sh"
+  cat > "$TEST_SKILL_DIR/fake-windows/tasklist" <<'EOF2'
+#!/usr/bin/env bash
+case "${AGMSGD_FAKE_SESSIONS:-none}" in
+  none) printf 'INFO: No tasks are running which match the specified criteria.\r\n' ;;
+  ssh) printf '"explorer.exe","4100","Services","0","61,220 K"\r\n' ;;
+  rdp) printf '"explorer.exe","3260","RDP-Tcp#0","2","98,004 K"\r\n' ;;
+  fail) exit 1 ;;
+  quoted) printf '"unrecognised quoted output"\r\n' ;;
+  empty) ;;
+  info) printf 'INFO: output is not a tasklist no-match response\r\n' ;;
+  mixed) printf '"explorer.exe","4100","Services","0","61,220 K"\r\nsomething else\r\n' ;;
+esac
+EOF2
+  chmod +x "$TEST_SKILL_DIR/fake-windows/noop-launcher.sh" "$TEST_SKILL_DIR/fake-windows/tasklist"
+  export PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" \
+    AGMSGD_TASKLIST="$TEST_SKILL_DIR/fake-windows/tasklist" AGMSGD_FAKE_TASK_XML="$TEST_SKILL_DIR/fake-windows/captured.xml" \
+    AGMSGD_FAKE_TASK_MARKER="$TEST_SKILL_DIR/fake-windows/registered" AGMSGD_TEST_LAUNCHER="$TEST_SKILL_DIR/fake-windows/noop-launcher.sh"
+  # enable registers the task and then waits for a start that never comes.
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ -f "$AGMSGD_FAKE_TASK_MARKER" ] || { echo "$output"; false; }
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired = 'on';
+    UPDATE daemon_owner SET gen = 22, state = 'ready', executor_pid = 999999, executor_started_at = '2026-10-30T21:14:21.602Z',
+      executor_boot_id = '1793083314', socket = '$TEST_SKILL_DIR/run/no-such.sock', version = 'test', started_at = '2026-10-30T21:14:21.602Z',
+      last_end_reason = NULL, last_end_at = NULL;"
+}
+
+@test "daemon.sh start: an owner row left ready from before a restart is not reported as running (#2024)" {
+  _stale_ready_windows_install
+  AGMSGD_FAKE_SESSIONS=ssh _run_with_deadline 30 bash "$DAEMON" start
+  [ "$status" -ne 0 ]
+  refute grep -Fq "daemon start: running" <<<"$output"
+  grep -Fq "did not become ready in time" <<<"$output"
+  grep -Fq "no one is signed in now" <<<"$output"
+}
+
+@test "daemon.sh: the no-sign-in note appears only when no desktop session of the user exists (#2024)" {
+  _stale_ready_windows_install
+  AGMSGD_FAKE_SESSIONS=none run bash "$DAEMON" status
+  [ "$status" -ne 0 ]
+  grep -Fq "no one is signed in now" <<<"$output"
+  AGMSGD_FAKE_SESSIONS=ssh run bash "$DAEMON" status
+  grep -Fq "no one is signed in now" <<<"$output"
+  # Signed in over Remote Desktop: the task can run, so no note.
+  AGMSGD_FAKE_SESSIONS=rdp run bash "$DAEMON" status
+  [ "$status" -ne 0 ]
+  refute grep -Fq "signed in" <<<"$output"
+  # tasklist failed: nothing is claimed.
+  AGMSGD_FAKE_SESSIONS=fail run bash "$DAEMON" status
+  refute grep -Fq "signed in" <<<"$output"
+  # Output it does not recognise: nothing is claimed either.
+  local mode
+  for mode in quoted empty mixed info; do
+    AGMSGD_FAKE_SESSIONS="$mode" run bash "$DAEMON" status
+    refute grep -Fq "signed in" <<<"$output"
+  done
 }
 
 # A wrapper named `sqlite3`, placed ahead of the real one on PATH, that
@@ -1264,18 +1412,21 @@ EOF
   [[ "$output" == *"terminal CLI directories (herdr, tmux) were not recorded"* ]]
 }
 
-@test "daemon.sh start: already running with a newer record says to stop and start again, since agmsgd applies it only at startup" {
+@test "daemon.sh start: already running leaves the terminal CLI record unchanged even when PATH changed" {
   _seed_install_db
   _write_completion_record
   _run_with_deadline 15 bash "$DAEMON" start
   _assert_start_result 'running'
+  local before
+  before="$(cat "$TEST_SKILL_DIR/run/agmsgd-tool-path")"
   mkdir -p "$TEST_SKILL_DIR/clibin2"
   printf '#!/bin/sh\nexit 0\n' > "$TEST_SKILL_DIR/clibin2/herdr"
   chmod +x "$TEST_SKILL_DIR/clibin2/herdr"
   PATH="$TEST_SKILL_DIR/clibin2:$PATH" _run_with_deadline 15 bash "$DAEMON" start
   bash "$DAEMON" stop >/dev/null 2>&1 || true
   _assert_start_result 'already running'
-  [[ "$output" == *"take effect after: agmsg daemon stop, then agmsg daemon start"* ]]
+  [ "$(cat "$TEST_SKILL_DIR/run/agmsgd-tool-path")" = "$before" ]
+  [[ "$output" == *'nothing was changed'* ]]
 }
 
 # The record writer runs inside cmd_start under errexit: a failed write AND a

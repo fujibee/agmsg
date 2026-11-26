@@ -10,7 +10,7 @@ COUNT=0
 while IFS=$'\t' read -r team role; do
   [ -n "$team" ] && [ -n "$role" ] || continue
   status="$(bash "$MONITOR" status --project "$PROJECT" --team "$team" --name "$role" 2>/dev/null || true)"
-  if printf '%s\n' "$status" | grep -q ' tui-pty paused$'; then
+  if grep -q ' tui-pty paused$' <<<"$status"; then
     PAUSED="${PAUSED}${PAUSED:+
 }$team"$'\t'"$role"
     COUNT=$((COUNT + 1))

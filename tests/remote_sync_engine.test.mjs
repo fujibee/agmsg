@@ -50,6 +50,7 @@ import {
   pullBootstrap,
   parseStrictJsonl,
   readStateCycle,
+  localMemberIds,
   rosterSequencesFor,
   readStateUpdateBatches,
   reprocessCycle,
@@ -1744,6 +1745,51 @@ test("read-state stays quiet once the roster has caught up", async () => {
   await readStateCycle(config, 100, readStateHarness(threeMembers,
     [...threeMembers.map((member) => member.name), "masa-mini"], extra));
   assert.deepEqual(extra.filter(([name]) => name === "roster.incomplete"), []);
+});
+
+test("read-state compares members by id: a renamed or departed seat is not missing (#2035)", async () => {
+  const events = [];
+  const harness = readStateHarness(threeMembers, ["masa-renamed"], events);
+  // masa-claude is "masa-renamed" here now (same id); masa-codex left; masa-grok is unknown.
+  harness.localMemberIdsCall = async () => ({
+    ids: new Set([threeMembers[0].member_id]),
+    left: new Set([threeMembers[1].member_id]),
+  });
+  await readStateCycle(config, 100, harness);
+  const incomplete = events.filter(([name]) => name === "roster.incomplete");
+  assert.equal(incomplete.length, 1);
+  assert.deepEqual(incomplete[0][1], { server_members: 3, local_members: 1, missing: ["masa-grok"] });
+
+  const quiet = [];
+  const caughtUp = readStateHarness(threeMembers, ["masa-renamed"], quiet);
+  caughtUp.localMemberIdsCall = async () => ({
+    ids: new Set([threeMembers[0].member_id, threeMembers[2].member_id]),
+    left: new Set([threeMembers[1].member_id]),
+  });
+  await readStateCycle(config, 100, caughtUp);
+  assert.deepEqual(quiet.filter(([name]) => name === "roster.incomplete"), []);
+});
+
+test("localMemberIds reads the roster's ids and the journal's departures, and gives up on anything unreadable", async () => {
+  const files = {
+    "/t/config.json": JSON.stringify({ agents: { alpha: { member_id: "id-1" }, beta: { member_id: "id-2" } } }),
+    "/t/roster.jsonl": '{"type":"member_joined","member_id":"id-3"}\n{"type":"member_left","member_id":"id-3"}\n',
+  };
+  const readFileCall = async (path) => {
+    if (path in files) return files[path];
+    throw Object.assign(new Error("missing"), { code: "ENOENT" });
+  };
+  const result = await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall });
+  assert.deepEqual([...result.ids].sort(), ["id-1", "id-2"]);
+  assert.deepEqual([...result.left], ["id-3"]);
+
+  delete files["/t/roster.jsonl"];
+  assert.deepEqual([...(await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall })).left], []);
+
+  files["/t/roster.jsonl"] = "{not json\n";
+  assert.equal(await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall }), null);
+  files["/t/config.json"] = JSON.stringify({ agents: { alpha: {} } });
+  assert.equal(await localMemberIds(config, { rosterFile: "/t/config.json", readFileCall }), null);
 });
 
 test("read-state context refetches a concurrent retention floor", async () => {
@@ -6031,4 +6077,97 @@ test("recordSkips: a count that only went up rewrites the record but does not st
     else process.env.AGMSG_SYNC_CONNECTION_DIR = savedConnection;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+function reprocessFixture(count, evaluateCall, extra = {}) {
+  const capabilities = {
+    protocol_version: 1, server_instance_id: config.server_instance_id,
+    team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
+    current_seq: String(count), next_sequence_boundary: String(count + 1),
+    accepted_envelope_versions: [1], write_allowed_ciphers: ["none"],
+    policy_revision: "0", effective_from_seq: "1", max_blob_bytes: "1048576",
+    policy_history: [{ policy_revision: "0", effective_from_seq: "1",
+      accepted_envelope_versions: [1], write_allowed_ciphers: ["none"] }],
+  };
+  const ids = Array.from({ length: count }, (_, i) =>
+    `550e8400-e29b-41d4-a716-4466554400${String(i + 10)}`);
+  const applied = [];
+  let done = false;
+  const deps = {
+    healthCall: async () => ({ server_instance_id: config.server_instance_id, team_id: config.remote_team_id }),
+    requestCall: async () => capabilities,
+    driverCall: async (operation, _config, input) => {
+      if (operation === "apply") {
+        done = true;
+        for (const record of input) if (record.id) applied.push(record.id);
+        return [{ type: "sync_apply_result", transport_cursor: String(count), corrupt_count: 0 },
+          ...ids.map((id, i) => ({ type: "sync_apply_outcome", id, server_seq: String(i + 1), status: "imported" }))];
+      }
+      return [
+        { type: "sync_state", driver_generation: "g", transport_cursor: String(count) },
+        ...(done ? [] : ids).map((id, i) => ({ type: "sync_reprocess_candidate", server_seq: String(i + 1), id,
+          server_received_at: "2026-07-22T11:00:00.000000Z",
+          envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" },
+          prior_status: "authentication_failed" })),
+        { type: "sync_reprocess_page", next_after: null, has_more: false },
+      ];
+    },
+    evaluateCall,
+    eventCall: async () => {},
+    logApplyCall: async () => {},
+    ...extra,
+  };
+  return { deps, ids, applied };
+}
+const importable = (id) => ({ status: "importable", projection: { body: id, created_at: "2026-07-22T11:00:00.000000Z",
+  from_agent: "alice", to_agent: "bob" }, policy_revision: "0", local_security_revision: "0" });
+
+test("reprocess evaluates a few candidates at once but applies them in candidate order", async () => {
+  let inFlight = 0; let peak = 0;
+  const fixture = reprocessFixture(8, async (_c, _caps, message) => {
+    inFlight += 1; peak = Math.max(peak, inFlight);
+    // Earlier candidates take longer, so an unordered consumer would reverse them.
+    await new Promise((resolve) => setTimeout(resolve, 40 - Number(message.server_seq) * 4));
+    inFlight -= 1;
+    return importable(message.id);
+  });
+  await reprocessCycle(config, 100, fixture.deps);
+  assert.deepEqual(fixture.applied, fixture.ids);
+  assert.ok(peak > 1, `expected overlap, peak was ${peak}`);
+});
+
+test("reprocess reports the first failing candidate in order, even if a later one failed first", async () => {
+  const fixture = reprocessFixture(4, async (_c, _caps, message) => {
+    if (message.server_seq === "2") { await new Promise((r) => setTimeout(r, 30)); throw new Error("second failed"); }
+    if (message.server_seq === "4") throw new Error("fourth failed");
+    return importable(message.id);
+  });
+  await assert.rejects(() => reprocessCycle(config, 100, fixture.deps), /second failed/);
+  assert.deepEqual(fixture.applied, []);
+});
+
+test("reprocess evaluates again what was started ahead of a key rotation", async (t) => {
+  // The look-ahead is twice the decrypt concurrency, which follows the host's
+  // cores; a 3-core runner looks one message less ahead and the counts below
+  // would not hold. Pin it so every candidate is started ahead of the rotation.
+  const previousJobs = process.env.AGMSG_AGE_DECRYPT_JOBS;
+  process.env.AGMSG_AGE_DECRYPT_JOBS = "2";
+  t.after(() => {
+    if (previousJobs === undefined) delete process.env.AGMSG_AGE_DECRYPT_JOBS;
+    else process.env.AGMSG_AGE_DECRYPT_JOBS = previousJobs;
+  });
+  const calls = {};
+  const fixture = reprocessFixture(4, async (_c, _caps, message) => {
+    calls[message.server_seq] = (calls[message.server_seq] ?? 0) + 1;
+    if (message.server_seq === "2") {
+      return { status: "importable", projection: { kind: "key_rotated", epoch: "1" },
+        policy_revision: "0", local_security_revision: "0" };
+    }
+    return importable(message.id);
+  }, { rosterDriverCall: async () => [], activateKeyRotationsCall: async () => {} });
+  await reprocessCycle(config, 100, fixture.deps);
+  assert.equal(calls["1"], 1);
+  assert.equal(calls["2"], 1);
+  assert.equal(calls["3"], 2);
+  assert.equal(calls["4"], 2);
 });

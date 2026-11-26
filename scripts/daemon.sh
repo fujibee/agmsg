@@ -47,6 +47,7 @@ _path_hint() {
 AGMSGD_LAUNCHCTL="${AGMSGD_LAUNCHCTL:-launchctl}"
 AGMSGD_SYSTEMCTL="${AGMSGD_SYSTEMCTL:-systemctl}"
 AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
+AGMSGD_TASKLIST="${AGMSGD_TASKLIST:-tasklist}"
 # Empty selects the absolute native whoami.exe under the Windows system root.
 AGMSGD_WHOAMI="${AGMSGD_WHOAMI:-}"
 
@@ -497,6 +498,35 @@ _schtasks() {
   MSYS2_ARG_CONV_EXCL='*' "$AGMSGD_SCHTASKS" "$@"
 }
 
+# The task is registered "Interactive only": Task Scheduler runs it only while
+# this user is signed in to Windows, at the console or over Remote Desktop. A
+# machine used only over SSH has no such session, so the task never runs and
+# `schtasks /Run` still reports SUCCESS. Say so when that is the case (#2024).
+# A signed-in desktop has an explorer.exe of this user in a session other than
+# 0 (SSH and services run in session 0). One tasklist call; prints nothing when
+# it cannot tell.
+_windows_no_logon_note() {
+  local rows
+  rows="$(MSYS2_ARG_CONV_EXCL='*' "$AGMSGD_TASKLIST" /FI "IMAGENAME eq explorer.exe" /FI "USERNAME eq ${USERNAME:-}" /FO CSV /NH 2>/dev/null)" || return 0
+  rows="${rows//$'\r'/}"
+  # Decide from recognised output only. A desktop session (an explorer.exe row
+  # with Session# other than 0) means signed in. Rows all in session 0, or the
+  # no-match INFO line alone (English tasklist), mean no one is signed in. Anything else -- an
+  # unrecognised line, or no output -- says nothing.
+  printf '%s\n' "$rows" | awk '
+    /^[[:space:]]*$/ { next }
+    /^"explorer\.exe","[0-9]+","[^"]*","[0-9]+",/ {
+      split($0, f, "\",\""); rows++
+      if (f[4] != "0") desktop = 1
+      next
+    }
+    /^INFO: No tasks are running which match the specified criteria\.[[:space:]]*$/ { info++; next }
+    { other = 1 }
+    END { exit (other || desktop || (rows == 0 && info != 1) || (rows > 0 && info > 0)) ? 1 : 0 }
+  ' || return 0
+  echo "agmsg daemon: agmsgd's scheduled task runs only while you are signed in to Windows, and no one is signed in now (this machine is used only over SSH), so Task Scheduler does not start it. Sign in at the console or over Remote Desktop and it starts within a minute."
+}
+
 # Paths go into the task XML as text; a "&" in a user name would otherwise
 # make the task impossible to create.
 _xml_escape() {
@@ -726,10 +756,16 @@ _resolve_codex() {
 _wait_for_ready() {
   local target_op_gen="$1" since="${2:-}" waited=0
   while [ "$waited" -lt 100 ]; do
-    local state op_gen
-    state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    local state op_gen owner_row started_at
+    owner_row="$(agmsg_sqlite "$INSTALL_DB" "SELECT state || '|' || COALESCE(started_at, '') FROM daemon_owner;" 2>/dev/null || true)"
+    state="${owner_row%%|*}"
+    started_at="${owner_row#*|}"
     op_gen="$(agmsg_sqlite "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null || true)"
-    if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ]; then
+    # op_gen is the intent this start itself just wrote, so it always matches.
+    # What ties a ready owner to this start is that it claimed ownership after
+    # the start began: a row left ready by an executor that died with the
+    # machine (no clean end is recorded) is older than that (#2024).
+    if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ] && { [ -z "$since" ] || [[ ! "$started_at" < "$since" ]]; }; then
       return 0
     fi
     if [ -n "$since" ] && [ "$state" != "ready" ] && [ "$(agmsg_sqlite "$INSTALL_DB" "SELECT count(*) FROM daemon_start_attempts WHERE at >= '$since' AND reason = 'intent changed since the launcher read it';" 2>/dev/null || echo 0)" != 0 ]; then
@@ -831,22 +867,22 @@ cmd_start() {
     '') ;;
     *) _usage; return 2 ;;
   esac
-  _ensure_install_db_schema
-  # Before the "already running" answer below: a running agmsgd picks the
-  # record up at its next start (the update path restarts it).
-  [ "$(_os)" = windows ] || _record_tool_path
-  local state
-  state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
-  local running_node
+  _require_install_db
+  local running_node observed=""
   running_node="$(_resolve_node 2>/dev/null || true)"
-  if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
-    echo "agmsg daemon start: already running"
-    _tool_path_restart_hint
-    _agmsg_down_notice_clear_if_present agmsgd
-    agmsg_daemon_seat_report start
-    _path_hint status
-    return 0
+  if [ -n "$running_node" ]; then
+    observed="$("$running_node" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/heartbeat.mjs" "$SKILL_DIR" --start)" || observed=""
   fi
+  case "$observed" in
+    running:*)
+      echo "agmsg daemon start: already running (${observed#running:}); nothing was changed"
+      _path_hint status
+      return 0 ;;
+  esac
+  _ensure_install_db_schema
+  # Record tool paths only when actually starting. A live no-op above must
+  # not change the configuration a future daemon would read.
+  [ "$(_os)" = windows ] || _record_tool_path
 
   # A install that was never enabled (enable refuses without a service
   # manager) has no Node recorded, and the launcher cannot start without
@@ -899,6 +935,11 @@ cmd_start() {
     fi
     ready_rc=0
     _wait_for_ready "$new_op_gen" "$since" || ready_rc=$?
+    # Ready in the record is not yet running: the executor must be alive and
+    # answer, the same check the "already running" answer above uses.
+    if [ "$ready_rc" = 0 ] && [ -n "$running_node" ] && ! "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
+      ready_rc=1
+    fi
     # A launcher that read the intent just before this run bumped it declined;
     # the intent is final now, so one more start settles it.
     if [ "$ready_rc" = 2 ] && [ "$attempt" = 1 ]; then
@@ -918,6 +959,7 @@ cmd_start() {
     if [ "$(_os)" = windows ] && _service_registered; then
       echo "agmsg daemon start: the scheduled task $(_schtasks_name) was created and started, but agmsgd never reported ready. Task Scheduler's own record of the run follows; 'agmsg daemon disable' removes the task." >&2
       _schtasks /Query /TN "$(_schtasks_name)" /V /FO LIST 2>&1 | grep -E 'Status|Last Run Time|Last Result|Task To Run' >&2 || true
+      _windows_no_logon_note >&2
     fi
     agmsg_daemon_warn_if_stopped always
     _path_hint status >&2
@@ -958,10 +1000,12 @@ cmd_stop() {
   local desired
   desired="$(agmsg_sqlite "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
   if [ "$desired" != "on" ]; then
+    rm -f -- "$SKILL_DIR/run/agmsgd-heartbeat.json" || echo "agmsg daemon stop: could not remove the heartbeat file" >&2
     echo "agmsg daemon stop: already stopped"
     return 0
   fi
   agmsg_sqlite "$INSTALL_DB" "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'stop', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  rm -f -- "$SKILL_DIR/run/agmsgd-heartbeat.json" || echo "agmsg daemon stop: could not remove the heartbeat file" >&2
   local socket
   socket="$(agmsg_sqlite "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
   _request_stop_over_socket "$socket"
@@ -1016,6 +1060,9 @@ cmd_status() {
         "$node_path" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" --all || status_rc=$?
       else
         "$node_path" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" || status_rc=$?
+      fi
+      if [ "$status_rc" != 0 ] && [ "$(_os)" = windows ] && _service_registered; then
+        _windows_no_logon_note
       fi
       agmsg_daemon_seat_report status
     fi

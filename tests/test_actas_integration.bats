@@ -494,3 +494,71 @@ _owner_only() {   # <team> <agent>
   [ "${_r%%$'\t'*}" = "ok" ] || return 1
   printf '%s' "${_r#*$'\t'}"
 }
+
+# --- desktop app conversations take a role over (decided 2026-11-23) ---
+
+@test "actas-claim: a new Claude desktop chat takes the role over from a live older chat" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
+  fake_register T alice
+  fake_session "sid-owner" >/dev/null     # the old chat is alive
+  echo "sid-owner" > "$(actas_lock_path T alice)"
+
+  CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_HOST_SESSION_ID=local_new \
+    run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p1 claude-code alice "sid-new"
+  [ "$status" -eq 0 ]
+  grep -q "status=ok" <<<"$output"
+  if grep -q "status=held" <<<"$output"; then return 1; fi
+  [ "$(_owner_only T alice)" = "sid-new" ]
+}
+
+@test "actas-claim: a terminal seat is still refused while an older session holds the role" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
+  fake_register T alice
+  fake_session "sid-owner" >/dev/null
+  echo "sid-owner" > "$(actas_lock_path T alice)"
+
+  CLAUDE_CODE_ENTRYPOINT=cli \
+    run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p1 claude-code alice "sid-thief"
+  [ "$status" -eq 1 ]
+  grep -q "status=held" <<<"$output"
+  [ "$(_owner_only T alice)" = "sid-owner" ]
+}
+
+@test "actas takeover: both desktop drivers opt in; no terminal driver does" {
+  source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
+  [ "$(agmsg_terminal_get claude-desktop actas_takeover 0)" = 1 ]
+  [ "$(agmsg_terminal_get codex-app actas_takeover 0)" = 1 ]
+  for t in tmux herdr orca plain; do
+    [ "$(agmsg_terminal_get $t actas_takeover 0)" = 0 ]
+  done
+}
+
+@test "actas takeover: an empty or unreadable lock is left to the ordinary claim, not taken" {
+  fake_register T alice
+  : > "$(actas_lock_path T alice)"
+  run actas_lock_takeover T alice sid-new
+  [ "$status" -eq 1 ]
+  [ "$(_owner_only T alice)" = "" ]
+}
+
+@test "actas-claim: a desktop takeover that fails says why (unverified), not that the old chat holds the role" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
+  fake_register T alice
+  fake_session "sid-owner" >/dev/null
+  echo "sid-owner" > "$(actas_lock_path T alice)"
+  # A mktemp that fails only for the takeover's temporary file.
+  mkdir -p "$BATS_TEST_TMPDIR/fail-bin"
+  cat > "$BATS_TEST_TMPDIR/fail-bin/mktemp" <<EOS
+#!/bin/bash
+case "\$*" in *actas-takeover*) exit 1 ;; esac
+exec $(command -v mktemp) "\$@"
+EOS
+  chmod +x "$BATS_TEST_TMPDIR/fail-bin/mktemp"
+
+  PATH="$BATS_TEST_TMPDIR/fail-bin:$PATH" CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_HOST_SESSION_ID=local_new \
+    run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p1 claude-code alice "sid-new"
+  [ "$status" -eq 1 ]
+  grep -q "status=unverified team=T reason=takeover_write_failed" <<<"$output"
+  if grep -q "status=held" <<<"$output"; then return 1; fi
+  [ "$(_owner_only T alice)" = "sid-owner" ]
+}
