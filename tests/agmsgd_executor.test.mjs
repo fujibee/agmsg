@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { bootId, currentExecutor, isAlive, sameBoot } from "../scripts/daemon/executor.mjs";
+import { bootId, currentExecutor, isAlive, parseFileTime, sameBoot, windowsOwnerReplaced, windowsProcessStart } from "../scripts/daemon/executor.mjs";
 
 test("bootId is stable across calls and isAlive tells living/dead/wrong-boot apart", () => {
   assert.equal(bootId(), bootId(), "bootId must not change within the same boot");
@@ -71,6 +71,53 @@ test("the approximate (win32) boot id tolerates drift and never proves death by 
   const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
   assert.equal(isAlive({ pid: dead.pid, bootId: "99900" }, { plat: "win32", current: "99000" }), false, "a pid that is gone is dead");
   assert.equal(sameBoot("another-boot", "win32", "99900"), false, "a record in another form is a plain mismatch");
+});
+
+// Windows hands a freed pid to the next process at once (seen after taskkill /F
+// on agmsgd's node), so a live answer is checked against the owner's claim: a
+// process that started after the claim is another process.
+test("win32: a live pid whose process started after the owner's claim is a reused pid, so dead", () => {
+  const self = currentExecutor();
+  const claimed = "2026-11-25T11:59:20.000Z";
+  const opts = (startedMs) => ({ plat: "win32", current: self.bootId, startOf: () => startedMs });
+  assert.equal(isAlive({ ...self, startedAt: claimed }, opts(Date.parse("2026-11-25T11:59:21.000Z"))), false, "started after the claim: another process");
+  assert.equal(isAlive({ ...self, startedAt: claimed }, opts(Date.parse("2026-11-25T11:59:19.500Z"))), true, "started before the claim: the executor");
+  assert.equal(isAlive({ ...self, startedAt: claimed }, opts(NaN)), true, "an unreadable start time of a pid that still answers proves nothing");
+  assert.equal(isAlive({ ...self, startedAt: undefined }, opts(Date.parse("2026-11-25T11:59:21.000Z"))), true, "no claim time proves nothing");
+  let asked = 0;
+  isAlive({ ...self, startedAt: claimed }, { plat: "darwin", current: self.bootId, startOf: () => { asked += 1; return NaN; } });
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  isAlive({ pid: dead.pid, bootId: self.bootId, startedAt: claimed }, { plat: "win32", current: self.bootId, startOf: () => { asked += 1; return NaN; } });
+  assert.equal(asked, 0, "the start time is read only on Windows, and only for a pid that answers");
+});
+
+test("windowsOwnerReplaced reads a Windows FILETIME against the claim and re-asks a pid whose start cannot be read", () => {
+  assert.equal(new Date(parseFileTime("134400309614673747")).toISOString(), "2026-11-24T21:56:01.467Z");
+  assert.ok(Number.isNaN(parseFileTime("not a filetime")));
+  const start = () => parseFileTime("134400309614673747");
+  const up = () => true;
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:00.000Z", { startOf: start, answers: up }), true, "started after the claim");
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: start, answers: up }), false, "started before the claim");
+  assert.equal(windowsOwnerReplaced(7, "-", { startOf: start, answers: up }), false, "no claim time proves nothing");
+  // Measured: the reused pid belonged to a process that lived about 250 ms, so
+  // it was often gone again before its start time could be read.
+  const answers = [true, false];
+  let reads = 0;
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { reads += 1; return NaN; }, answers: () => answers.shift() }), true, "gone after an unreadable start");
+  assert.equal(reads, 1);
+  reads = 0;
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { reads += 1; return NaN; }, answers: up }), false, "a pid that keeps answering unreadably proves nothing");
+  assert.equal(reads, 3, "at most three reads");
+  // The last read can also outlast the short-lived process: the pid is asked
+  // once more after it, without a fourth read.
+  const lastGone = [true, true, true, false];
+  reads = 0;
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { reads += 1; return NaN; }, answers: () => lastGone.shift() }), true, "gone after the third unreadable start");
+  assert.equal(reads, 3);
+  assert.equal(lastGone.length, 0, "the pid is asked after the third read");
+  assert.equal(windowsOwnerReplaced(7, "2026-11-24T21:56:02.000Z", { startOf: () => { throw new Error("must not read"); }, answers: () => false }), true, "a pid already gone needs no read");
+  assert.ok(Number.isNaN(windowsProcessStart(7, () => { throw new Error("no powershell"); })));
+  assert.equal(windowsProcessStart(7, () => "134400309614673747\r\n"), parseFileTime("134400309614673747"));
 });
 
 test("linux: the boot id is the kernel boot_id, and a btime record is not read as another boot", () => {

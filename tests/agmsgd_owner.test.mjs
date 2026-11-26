@@ -51,6 +51,43 @@ test("takeOwnership: none -> starting -> ready is a clean run", () => {
   }
 });
 
+// On Windows the owner's liveness can take powershell calls (seconds); it is
+// read before the write transaction, so other writers never wait on it.
+test("takeOwnership reads the owner's liveness outside the write transaction, and uses it only for the same owner", () => {
+  const { dir, db } = freshDb();
+  try {
+    const first = takeOwnership(db, { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "v1" });
+    markReady(db, first.gen);
+    const calls = [];
+    const dead = (rec, opts) => { calls.push({ rec, opts, inTransaction: db.isTransaction }); return false; };
+    const second = takeOwnership(db, { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "v2" }, { alive: dead });
+    assert.equal(second.ok, true, "a dead owner is replaced");
+    assert.equal(calls.length, 1, "one liveness read for an unchanged owner");
+    assert.equal(calls[0].inTransaction, false, "read outside the write transaction");
+    assert.ok(calls[0].rec.startedAt, "the claim time is passed for the Windows start-time check");
+
+    // The owner changes between that read and the transaction: the answer is
+    // not reused, and the new owner is checked inside without the start-time read.
+    markReady(db, second.gen);
+    const seen = [];
+    const changing = (rec, opts) => {
+      seen.push({ rec, opts, inTransaction: db.isTransaction });
+      if (seen.length === 1) db.prepare("UPDATE daemon_owner SET executor_pid = executor_pid + 1").run();
+      return seen.length === 1 ? false : true;
+    };
+    const third = takeOwnership(db, { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "v3" }, { alive: changing });
+    assert.equal(third.ok, false, "the changed owner is alive, so it is kept");
+    assert.match(third.reason, /alive/);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].inTransaction, true);
+    assert.ok(Number.isNaN(seen[1].opts.startOf(1)), "no start-time read inside the transaction");
+    assert.equal(seen[1].rec.startedAt, undefined);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("takeOwnership refuses when the current owner is alive", () => {
   const { dir, db } = freshDb();
   try {

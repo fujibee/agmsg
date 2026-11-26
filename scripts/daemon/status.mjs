@@ -210,8 +210,11 @@ async function main() {
   const liveness = await observeLiveness(installRoot, { owner, installId });
   const reachable = liveness.source === 'socket';
   if (liveness.running) alive = true;
+  // The heartbeat check already proved this owner's executor gone; asking the
+  // same pid again would only repeat that (on Windows, more powershell calls).
+  else if (liveness.heartbeat?.state === 'contradicted') alive = false;
   else if (owner.state !== 'none' && owner.executor_pid != null) {
-    try { alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id }); }
+    try { alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at }); }
     catch { alive = null; } // Caller restrictions cannot refute a socket/heartbeat.
   }
   const result = classify({ owner, intent, alive, reachable, lastAttempt, heartbeatFresh: liveness.source === 'heartbeat' });
