@@ -9,6 +9,10 @@ setup() {
   # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
   # agent process too.
   export AGMSG_AGENT_PID=""
+  unset AGMSG_CODEX_BRIDGE_APP_SERVER AGMSG_CODEX_BRIDGE_LAUNCHER AGMSG_CODEX_SEAT_KEY
+  unset AGMSG_CODEX_APP_SERVER_CMD AGMSG_CODEX_BRIDGE_CMD AGMSG_CODEX_OWNER_ID
+  export CODEX_HOME="$TEST_SKILL_DIR/codex-profile"
+  mkdir -p "$CODEX_HOME"
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
@@ -1051,7 +1055,7 @@ EOF
   [[ "$output" =~ "started turn" ]]
 }
 
-@test "codex-bridge: stops instead of looping on the same unread max_id" {
+@test "codex-bridge: backs off and retries the same unread frontier without exiting" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1107,15 +1111,88 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --timeout 1 --interval 1
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$(write_bridge_timeout_runner)" 12000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 2
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]
   [[ "$output" =~ "wakeup 1" ]]
-  [[ "$output" =~ "stopping to avoid a repeated wakeup loop" ]]
+  grep -Fq 'wakeup 2' <<<"$output"
+  grep -Fq 'unchanged unread frontier; retrying with backoff' <<<"$output"
+  refute grep -Fq 'stopping to avoid' <<<"$output"
 }
 
-@test "codex-bridge: stops after the configured watch-once failure limit" {
+@test "codex-bridge: rechecks a stale frontier before retry and skips a consumed message" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-loop.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+let spawns = 0;
+
+function send(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread: { id: "thread-1", status: { type: "idle" } } },
+    });
+  } else if (message.method === "process/spawn") {
+    spawns += 1;
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({
+        jsonrpc: "2.0",
+        method: "process/exited",
+        params: {
+          processHandle: message.params.processHandle,
+          exitCode: spawns <= 2 ? 0 : 2,
+          stdout: spawns <= 2 ? `status=pending count=1 max_id=7\nspawn=${spawns}\n` : "status=empty\n",
+          stderr: "",
+        },
+      });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { threadId: message.params.threadId, turn: { id: "turn-1" } },
+      });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$(write_bridge_timeout_runner)" 6000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 2
+
+  [ "$status" -eq 124 ]
+  grep -Fq "wakeup 1" <<<"$output"
+  refute grep -Fq 'wakeup 2' <<<"$output"
+  grep -Fq 'unchanged unread frontier; retrying with backoff' <<<"$output"
+  refute grep -Fq 'stopping to avoid' <<<"$output"
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'Codex unread frontier is unchanged' <<<"$output"
+}
+
+@test "codex-bridge: remains resident beyond the configured watch failure threshold" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1156,13 +1233,78 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$(write_bridge_timeout_runner)" 6000 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
     --request-timeout-ms 1000 --watch-failure-limit 1
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "watch-once failed with exit 1: fake watch failure" ]]
-  [[ "$output" =~ "stopping after 1 consecutive watch-once failure" ]]
+  grep -Fq 'watch failure threshold reached (2)' <<<"$output"
+  refute grep -Fq 'stopping after' <<<"$output"
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -Fq 'Codex watch failed' <<<"$output"
+}
+
+@test "codex-bridge: recovers after watch failures and clears the degraded notice" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-watch-fail.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+let spawns = 0;
+
+function send(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    spawns += 1;
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({
+        jsonrpc: "2.0",
+        method: "process/exited",
+        params: {
+          processHandle: message.params.processHandle,
+          exitCode: spawns <= 3 ? 1 : 0,
+          stdout: spawns <= 3 ? "" : "status=pending count=1 max_id=9\n",
+          stderr: "fake watch failure",
+        },
+      });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } }), 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$(write_bridge_timeout_runner)" 12000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
+    --request-timeout-ms 1000 --watch-failure-limit 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  grep -Fq "watch-once failed with exit 1: fake watch failure" <<<"$output"
+  grep -Fq 'watch failure threshold reached (2)' <<<"$output"
+  refute grep -Fq 'stopping after' <<<"$output"
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'Codex watch failed' <<<"$output"
 }
 
 @test "codex-bridge: watch-once timeout exit does not count toward failure limit" {
@@ -1862,7 +2004,7 @@ server.listen(sock);
 EOF
 }
 
-@test "codex-bridge: the failure cap reaches even when wakes interleave (#936)" {
+@test "codex-bridge: failure backoff escalates while wakes interleave without stopping (#936)" {
   run node -e 'const net=require("net"),crypto=require("crypto");if(!net||!crypto)process.exit(1);'
   [ "$status" -eq 0 ] || skip "node net/crypto not available"
   run node -e 'const fs=require("fs"),net=require("net");const s=process.argv[1];try{fs.unlinkSync(s)}catch(_){}const sv=net.createServer();sv.on("error",()=>process.exit(2));sv.listen(s,()=>sv.close(()=>{try{fs.unlinkSync(s)}catch(_){}process.exit(0)}));' "$TEST_SKILL_DIR/probe3.sock"
@@ -1881,14 +2023,15 @@ EOF
   # production 5s re-arm backoff -- AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS
   # shortens that wait; it is the cycle COUNT this test asserts on, not how
   # long each cycle's backoff takes.
-  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 run node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 run node "$(write_bridge_timeout_runner)" 18000 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-x \
-    --app-server "unix://$sock" --timeout 1 --interval 1
+    --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 3
   kill "$server_pid" 2>/dev/null || true
 
-  [ "$status" -ne 0 ]
-  grep -q "stopping after" <<<"$output"
-  grep -q "consecutive watch-once failure" <<<"$output"
+  [ "$status" -eq 0 ]
+  grep -Fq 'watch failure threshold reached (3)' <<<"$output"
+  grep -Fq 'wakeup 3' <<<"$output"
+  refute grep -Fq 'stopping after' <<<"$output"
 }
 
 @test "codex-bridge: an invalid watch-rearm override falls back to the production delay, not an immediate re-arm" {
@@ -2432,4 +2575,74 @@ JS
   [ "$status" -eq 0 ]
   [[ "$output" == *"healthy message"* ]]
   [[ "$output" != *"inbox.sh failed"* ]]
+}
+
+@test "codex-bridge: failed notice adapters retry before successful transitions are deduplicated" {
+  run node - "$TYPES/codex/codex-bridge.js" <<'JS'
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const method = source.match(/  watchNotice\(state, reason\) \{[\s\S]*?\n  \}/)[0];
+let attempts = 0;
+const instance = vm.runInNewContext(`({${method}})`, {
+  path: require("path"), toPosixPath: (value) => value,
+  SCRIPTS_DIR: "/fixture/scripts", SKILL_DIR: "/fixture", BASH_BIN: "bash",
+  console: { error() {} },
+  spawnSync: () => ({ status: ++attempts % 2 ? 1 : 0 }),
+});
+instance.watchNoticeComponent = "fixture";
+for (const state of [null, "degraded"]) {
+  const before = attempts;
+  instance.watchNotice(state, "reason");
+  instance.watchNotice(state, "reason");
+  instance.watchNotice(state, "reason");
+  assert.strictEqual(attempts - before, 2);
+}
+JS
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: real helper I/O failures retry the same set and clear transitions" {
+  run node - "$TYPES/codex/codex-bridge.js" "$TEST_SKILL_DIR" <<'JS'
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const assert = require("assert");
+const { spawnSync } = require("child_process");
+const root = fs.mkdtempSync(path.join(process.argv[3], "notice-io-"));
+fs.mkdirSync(path.join(root, "scripts/lib"), { recursive: true });
+fs.copyFileSync(path.join(process.argv[3], "scripts/lib/down-notice.sh"), path.join(root, "scripts/lib/down-notice.sh"));
+const source = fs.readFileSync(process.argv[2], "utf8");
+const method = source.match(/  watchNotice\(state, reason\) \{[\s\S]*?\n  \}/)[0];
+let attempts = 0;
+const instance = vm.runInNewContext(`({${method}})`, {
+  path, toPosixPath: (value) => value, SCRIPTS_DIR: path.join(root, "scripts"),
+  SKILL_DIR: root, BASH_BIN: "bash", console: { error() {} },
+  spawnSync: (...args) => { attempts++; return spawnSync(...args); },
+});
+instance.watchNoticeComponent = "fixture";
+const runDir = path.join(root, "run");
+const record = path.join(runDir, "down/fixture.json");
+fs.writeFileSync(runDir, "blocked");
+instance.watchNotice("degraded", "reason");
+assert.strictEqual(instance.watchNoticeSignature, undefined);
+fs.unlinkSync(runDir);
+instance.watchNotice("degraded", "reason");
+assert.strictEqual(JSON.parse(fs.readFileSync(record)).reason, "reason");
+instance.watchNotice("degraded", "reason");
+assert.strictEqual(attempts, 2);
+const previous = fs.readFileSync(record);
+fs.unlinkSync(record);
+fs.mkdirSync(record);
+instance.watchNotice(null, "");
+assert.strictEqual(attempts, 3);
+fs.rmdirSync(record);
+fs.writeFileSync(record, previous);
+instance.watchNotice(null, "");
+assert.strictEqual(fs.existsSync(record), false);
+instance.watchNotice(null, "");
+assert.strictEqual(attempts, 4);
+JS
+  [ "$status" -eq 0 ]
 }
