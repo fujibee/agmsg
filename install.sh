@@ -95,6 +95,9 @@ agmsg_load_renderable_skill_types
 # Warning when an update adds a built-in that a trusted plugin already replaces.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/plugin-shadow.sh"
+# Companion spawn_options.yaml.sample placement ($AGMSG_SPAWN_OPTIONS_FILE dir or ~/.agmsg/config/).
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/spawn-options.sh"
 
 # Types that already get their OWN dedicated skill file, written elsewhere in
 # this script -- always in that type's own format, unconditionally, gated
@@ -1030,6 +1033,15 @@ agmsg_install_optional_uninstaller_copy() {
     chmod +x "$SKILL_DIR/uninstall.sh" 2>/dev/null || true
 }
 
+agmsg_install_spawn_options_sample() {
+  local created
+  created="$(agmsg_ensure_spawn_options_sample "$SKILL_DIR/scripts/spawn_options.yaml.sample")"
+  if [ -n "$created" ]; then
+    echo "  + created spawn options sample at $created"
+  fi
+  return 0
+}
+
 agmsg_install_optional_codex_chmod() {
   chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
 }
@@ -1709,6 +1721,7 @@ $_agmsg_running_team"
   agmsg_install_op_phase_end || exit 1
   agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" "$CMD_NAME" || exit 1
   agmsg_install_op_run_phase agmsg_install_write_version || exit 1
+  agmsg_install_op_run_phase agmsg_install_spawn_options_sample || exit 1
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
   # #1572 fixed the leak; this sweeps up whatever an install made before
@@ -1886,6 +1899,7 @@ if [ ! -f "$SKILL_DIR/db/config.yaml" ]; then
   agmsg_install_op_run_phase bash "$SKILL_DIR/scripts/config.sh" show >/dev/null || exit 1
   echo "  + created default config at db/config.yaml"
 fi
+agmsg_install_op_run_phase agmsg_install_spawn_options_sample || exit 1
 
 # --- Install Claude Code global command ---
 agmsg_install_op_phase_begin || exit 1

@@ -872,17 +872,63 @@ fn manifest_get(path: &std::path::Path, key: &str) -> Option<String> {
     None
 }
 
+const SPAWN_OPTIONS_SAMPLE: &str = include_str!("../../../scripts/spawn_options.yaml.sample");
+
 /// Resolve the spawn-options file: $AGMSG_SPAWN_OPTIONS_FILE, else
 /// ~/.agmsg/config/spawn_options.yaml (same resolution as
 /// scripts/lib/spawn-options.sh:agmsg_spawn_options_file).
 fn spawn_options_file() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("AGMSG_SPAWN_OPTIONS_FILE") {
         if !p.is_empty() {
+            #[cfg(target_os = "windows")]
+            let p = msys_to_native(&p);
             return std::path::PathBuf::from(p);
         }
     }
     let home = home_dir_string().unwrap_or_else(|| ".".into());
+    #[cfg(target_os = "windows")]
+    let home = msys_to_native(&home);
     std::path::PathBuf::from(home).join(".agmsg/config/spawn_options.yaml")
+}
+
+/// Resolve the companion sample file path beside `spawn_options_file()`:
+/// dirname($AGMSG_SPAWN_OPTIONS_FILE)/spawn_options.yaml.sample when set,
+/// else ~/.agmsg/config/spawn_options.yaml.sample.
+fn spawn_options_sample_file() -> std::path::PathBuf {
+    let target = spawn_options_file();
+    let dir = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    dir.join("spawn_options.yaml.sample")
+}
+
+/// Ensure `spawn_options.yaml.sample` exists beside `spawn_options_file()`.
+/// Creates missing parent directories and writes LF-normalized sample content
+/// only when the sample file does not already exist (never touches
+/// `spawn_options.yaml` itself and never overwrites an existing sample).
+/// Returns `Ok(true)` when newly created, `Ok(false)` when already present.
+pub fn ensure_spawn_options_sample() -> Result<bool, String> {
+    let sample_path = spawn_options_sample_file();
+    if let Some(parent) = sample_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    let normalized = SPAWN_OPTIONS_SAMPLE.replace("\r\n", "\n").replace('\r', "\n");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&sample_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(normalized.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Extra CLI argv tokens for `agent_type` from the spawn-options YAML: a flat
@@ -2975,5 +3021,43 @@ exit 0
         let mut b = bodies(&got);
         b.sort();
         assert_eq!(b, vec!["a-two", "b-two", "c-two"], "each once");
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_spawn_options_sample_places_beside_env_override_without_touching_active_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested").join("custom_spawn_options.yaml");
+        let expected_sample = dir.path().join("nested").join("spawn_options.yaml.sample");
+        let _env = EnvGuard::set("AGMSG_SPAWN_OPTIONS_FILE", &target.to_string_lossy());
+
+        assert_eq!(super::spawn_options_sample_file(), expected_sample);
+        assert_eq!(super::ensure_spawn_options_sample().unwrap(), true);
+        assert!(expected_sample.is_file(), "sample file should be created");
+        assert!(!target.exists(), "active spawn_options.yaml must not be created");
+
+        let raw = std::fs::read(&expected_sample).unwrap();
+        assert!(!raw.contains(&b'\r'), "sample must be written with LF line endings only");
+        let text = String::from_utf8(raw).unwrap();
+        assert!(text.contains("tui.disable_paste_burst=true"));
+
+        // Second call must be a non-destructive no-op.
+        std::fs::write(&expected_sample, "# custom user sample\n").unwrap();
+        assert_eq!(super::ensure_spawn_options_sample().unwrap(), false);
+        assert_eq!(std::fs::read_to_string(&expected_sample).unwrap(), "# custom user sample\n");
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_spawn_options_sample_defaults_to_home_dot_agmsg_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let _override = EnvGuard::set("AGMSG_SPAWN_OPTIONS_FILE", "");
+        let _home = EnvGuard::set("HOME", &dir.path().to_string_lossy());
+
+        let expected = dir.path().join(".agmsg/config/spawn_options.yaml.sample");
+        assert_eq!(super::spawn_options_sample_file(), expected);
+        assert_eq!(super::ensure_spawn_options_sample().unwrap(), true);
+        assert!(expected.is_file());
+        assert!(!dir.path().join(".agmsg/config/spawn_options.yaml").exists());
     }
 }
