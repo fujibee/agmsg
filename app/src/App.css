@@ -242,6 +242,15 @@ select:focus {
   margin: 2px 0;
 }
 .new-menu-tabs { min-width: 200px; }
+.new-menu-note {
+  max-width: 260px;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted, inherit);
+  opacity: 0.85;
+  white-space: normal;
+}
 
 /* Right-click context menus (member row: Spawn/Rename/Leave; pane header:
    Close/Move to). overflow is visible (not hidden) so the Move-to submenu can

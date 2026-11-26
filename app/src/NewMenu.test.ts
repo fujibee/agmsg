@@ -66,9 +66,17 @@ describe("the + menu in the tab bar", () => {
     expect(noTeam.find((e) => e.key === "fileview")?.disabled).toBe(true);
     const off = entries("tabs", { addonEngine: mockEngineOff });
     expect(off.find((e) => e.key === "diffview")?.disabled).toBe(true);
-    expect(off.find((e) => e.key === "diffview")?.title).toContain("navigation control");
+    expect(off.find((e) => e.key === "diffview")?.title).toContain("addons.reason.navigation");
     expect(off.find((e) => e.key === "shell")?.disabled).toBe(false);
     expect(off.find((e) => e.key === "install")?.disabled).toBe(false);
+  });
+  it("while the check is starting or running, the menu says Checking, never that the check failed", () => {
+    for (const code of ["check-pending", "checking"]) {
+      const e = entries("tabs", { addonEngine: { ok: false, reasons: [], codes: [code] } });
+      const title = e.find((x) => x.key === "fileview")?.title;
+      expect(title, code).toContain("addons.checking");
+      expect(title, code).not.toContain("addons.reason.generic");
+    }
   });
   it("a disabled add-on is not listed", () => {
     const addons = mockSnapshot.addons.map((a) => (a.id === "shinshin86/agmsg-office" ? { ...a, enabled: false } : a));
