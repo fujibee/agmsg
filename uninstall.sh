@@ -118,7 +118,9 @@ echo ""
 confirm() {
   if [ "$AUTO_YES" = true ]; then return 0; fi
   printf "  %s (y/n) [n]: " "$1"
-  read -r input
+  local input=""
+  # No answer to read (EOF, e.g. stdin from /dev/null) is a "no" (#2044).
+  if ! read -r input; then echo ""; fi
   [ "${input:-n}" = "y" ] || [ "${input:-n}" = "Y" ]
 }
 
@@ -847,6 +849,31 @@ else
     done
   fi
   echo ""
+
+  # Asked here, before the first removal (#2044): _uninstall_one removes the
+  # commands, hooks, skill copies, launcher and Codex writable_roots entries on
+  # both sides of its own data question, so a "no" there (or no answer at all,
+  # e.g. stdin from /dev/null) used to leave an install stripped of them. Same
+  # two questions, same order, as --all above.
+  if [ "$AUTO_YES" != true ]; then
+    echo "  This removes, for $(basename "$SELF_SKILL_DIR") only: its slash commands and hooks"
+    echo "  (globally and in every joined project), its Copilot, Antigravity, OpenCode,"
+    echo "  Hermes and Grok Build skills, its launcher, its scripts, and its Codex"
+    echo "  writable_roots entries."
+    if ! confirm "Remove $(basename "$SELF_SKILL_DIR")?"; then
+      echo "  Aborted; nothing was changed."
+      if [ ! -t 0 ]; then
+        echo "  (no terminal to answer on: pass --yes to uninstall without asking)"
+      fi
+      echo ""
+      exit 0
+    fi
+    if [ "$KEEP_DATA" != true ] && ! confirm "Also remove its DB (message history), teams, plugins and ext-tool settings (including saved secrets)?"; then
+      KEEP_DATA=true
+    fi
+    # Both answered above; _uninstall_one must not ask again.
+    AUTO_YES=true
+  fi
 
   _uninstall_one "$SELF_SKILL_DIR"
 

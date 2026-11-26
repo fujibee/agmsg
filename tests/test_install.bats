@@ -2545,6 +2545,86 @@ EOF
   [ ! -e "$FAKE_HOME/.gemini/config/skills/agmsg" ]
 }
 
+# A snapshot of everything under FAKE_HOME (paths and contents), to show a run
+# left it byte for byte as it was.
+_home_snapshot() {
+  (cd "$FAKE_HOME" && find . -path ./.agmsg -prune -o -print | LC_ALL=C sort | while IFS= read -r p; do
+    printf '%s\n' "$p"
+    if [ -f "$p" ] && [ ! -L "$p" ]; then cksum < "$p"; fi
+  done)
+}
+
+# An install with its /agmsg command, plus a Codex config holding this
+# install's writable_roots in the spelling install.sh writes them (#2044: a
+# "no" used to take both away). Seeded after _restore_install, which builds the
+# install in a template HOME on Linux and macOS: a marker made in FAKE_HOME
+# beforehand is never seen by that install.
+_restore_install_with_codex_roots() {
+  _restore_install --marker .claude || return 1
+  [ -f "$FAKE_HOME/.claude/commands/agmsg.md" ] || return 1
+  local root
+  mkdir -p "$FAKE_HOME/.codex" || return 1
+  {
+    printf '[sandbox_workspace_write]\nwritable_roots = [\n'
+    while IFS= read -r root; do
+      printf "  '%s',\n" "$root"
+    done < <(bash -c '. "$1"; agmsg_codex_writable_paths "$2"' _ "$SK/scripts/lib/codex-config.sh" "$SK")
+    printf ']\n'
+  } > "$FAKE_HOME/.codex/config.toml" || return 1
+  grep -qF "/db'" "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "uninstall: with no answer to read (stdin from /dev/null) nothing changes (#2044)" {
+  _restore_install_with_codex_roots
+  local before after
+  before="$(_home_snapshot)"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" < /dev/null
+  [ "$status" -eq 0 ]
+  grep -qF "Aborted; nothing was changed." <<<"$output"
+  grep -qF -- "pass --yes" <<<"$output"
+  after="$(_home_snapshot)"
+  [ "$before" = "$after" ]
+  [ -f "$FAKE_HOME/.claude/commands/agmsg.md" ]
+  grep -qF "/db'" "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "uninstall: answering n to the first question changes nothing (#2044)" {
+  _restore_install_with_codex_roots
+  local before after
+  before="$(_home_snapshot)"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" <<<"n"
+  [ "$status" -eq 0 ]
+  grep -qF "Aborted; nothing was changed." <<<"$output"
+  after="$(_home_snapshot)"
+  [ "$before" = "$after" ]
+  [ -f "$FAKE_HOME/.claude/commands/agmsg.md" ]
+  grep -qF "/db'" "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "uninstall: y then n removes the install but keeps its DB and teams (#2044)" {
+  _restore_install_with_codex_roots
+  # A fresh install has no teams until an agent joins one.
+  mkdir -p "$SK/teams" && printf 'keep\n' > "$SK/teams/keep.txt"
+  printf 'y\nn\n' | HOME="$FAKE_HOME" bash "$SK/uninstall.sh"
+  [ ! -e "$FAKE_HOME/.claude/commands/agmsg.md" ]
+  refute grep -qF "/db'" "$FAKE_HOME/.codex/config.toml"
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
+  [ -d "$SK/db" ]
+  [ -f "$SK/teams/keep.txt" ]
+}
+
+@test "uninstall: y then y removes the install with its data (#2044)" {
+  _restore_install_with_codex_roots
+  mkdir -p "$SK/teams" && printf 'gone\n' > "$SK/teams/gone.txt"
+  printf 'y\ny\n' | HOME="$FAKE_HOME" bash "$SK/uninstall.sh"
+  [ ! -e "$FAKE_HOME/.claude/commands/agmsg.md" ]
+  refute grep -qF "/db'" "$FAKE_HOME/.codex/config.toml"
+  [ ! -e "$SK/SKILL.md" ]
+  [ ! -e "$SK/db" ]
+  [ ! -e "$SK/teams" ]
+}
+
 @test "install: --agent-type grok-build gets its own dedicated file, shared SKILL.md stays codex (#1449)" {
   mkdir -p "$FAKE_HOME/.grok"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type grok-build
