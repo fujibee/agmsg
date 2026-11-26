@@ -163,6 +163,130 @@ teardown() {
   done
 }
 
+@test "codex shim: a global option that takes a value does not hide a non-remote subcommand" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  # Each pair is one option and its separate value, placed BEFORE the subcommand
+  # (for example `codex -c key=value mcp list`). The value must not be mistaken
+  # for the subcommand, or a non-interactive command would get `--remote` added.
+  local pair opt val
+  for pair in "-c|key=value" "--config|key=value" "-m|some-model" "--model|some-model" \
+              "-p|some-profile" "--profile|some-profile" "-s|read-only" "--sandbox|read-only" \
+              "-a|never" "--ask-for-approval|never" "-i|pic.png" "--image|pic.png" \
+              "--enable|some-feature" "--disable|some-feature" "--add-dir|/tmp" \
+              "--local-provider|ollama" "--remote-auth-token-env|SOME_ENV" "--remote|ws://127.0.0.1:1"; do
+    opt="${pair%%|*}"
+    val="${pair#*|}"
+    : > "$CALL_LOG"
+
+    run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" "$1" "$2" mcp list' _ "$opt" "$val"
+
+    [ "$status" -eq 0 ]
+    grep -Fq "real-codex <$opt> <$val> <mcp> <list>" "$CALL_LOG" || {
+      echo "unexpected routing for $opt $val: $(cat "$CALL_LOG")" >&3
+      false
+    }
+    ! grep -q "^monitor" "$CALL_LOG" \
+      || { echo "unexpected monitor routing for $opt $val: $(cat "$CALL_LOG")" >&3; false; }
+  done
+}
+
+@test "codex shim: consecutive valued options and attached spellings still find the subcommand" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  # The attached spellings already worked before the change (guard against a
+  # regression); the separate-value spellings and the consecutive case are the
+  # ones the change fixes.
+  local args expected word
+  for args in "-c a=b -m some-model" "-ca=b -msome-model" "--config=a=b --model=some-model" "-c a=b --model=some-model -s read-only"; do
+    : > "$CALL_LOG"
+
+    expected="real-codex"
+    for word in $args; do
+      expected="$expected <$word>"
+    done
+    expected="$expected <exec> <go>"
+
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" $1 exec go' _ "$args"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$CALL_LOG")" = "$expected" ] || {
+      echo "unexpected routing for '$args': $(cat "$CALL_LOG")" >&3
+      false
+    }
+    ! grep -q "^monitor" "$CALL_LOG" \
+      || { echo "unexpected monitor routing for '$args': $(cat "$CALL_LOG")" >&3; false; }
+  done
+}
+
+@test "codex shim: a valued option before resume still takes the resume branch" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash -c 'cd "$TEST_PROJECT" && bash "$TYPES/codex/codex-shim.sh" -c key=value resume'
+
+  [ "$status" -eq 0 ]
+  grep -Fq "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <--> <-c> <key=value>" "$CALL_LOG" || {
+    echo "unexpected routing: $(cat "$CALL_LOG")" >&3
+    false
+  }
+}
+
+@test "codex shim: a valued option before a prompt string still reaches the monitor" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash -c 'cd "$TEST_PROJECT" && bash "$TYPES/codex/codex-shim.sh" -m some-model "do the thing"'
+
+  [ "$status" -eq 0 ]
+  grep -Fq "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <codex> <--> <-m> <some-model> <do the thing>" "$CALL_LOG" || {
+    echo "unexpected routing: $(cat "$CALL_LOG")" >&3
+    false
+  }
+}
+
+# Stop a process and everything below it, so a hung shim cannot be left spinning.
+kill_tree() {
+  local child
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$1" 2>/dev/null); do
+      kill_tree "$child"
+    done
+  fi
+  kill "$1" 2>/dev/null || true
+  sleep 0.1
+  kill -9 "$1" 2>/dev/null || true
+}
+
+@test "codex shim: a valued option as the last argument does not hang the argument scan" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  # With no value left to skip, `shift 2` fails without consuming the option;
+  # the scan then repeats on the same argument forever. Run each case in the
+  # background with a ~5 s watchdog so a regression fails instead of hanging.
+  local opt pid i
+  for opt in -c --config -m --model --enable --add-dir -C --cd --cwd; do
+    : > "$CALL_LOG"
+    ( cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+        bash "$TYPES/codex/codex-shim.sh" "$opt" ) >/dev/null 2>&1 &
+    pid=$!
+    for i in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill_tree "$pid"
+      wait "$pid" 2>/dev/null || true
+      echo "shim hung on a trailing $opt" >&3
+      false
+    fi
+    wait "$pid"
+    grep -q "^monitor" "$CALL_LOG" \
+      || { echo "trailing $opt did not reach the monitor: $(cat "$CALL_LOG")" >&3; false; }
+  done
+}
+
 @test "codex shim: --cd project is used for monitor detection" {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
