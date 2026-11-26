@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - agmsgd (Windows): when a running Claude Code session has moved to a new messaging pipe, agmsgd finds the current pipe from the session's file and delivers there, instead of retrying the old one on every poll (#2042)
 - team list (Windows): native Windows Python can open the team config paths, so `agmsg team list` no longer skips every team with "could not read config" (#2040)
+- agmsgd (Windows): a reused pid no longer reads as the running agmsgd; the pid's start time is checked against the owner's claim time, so `agmsg daemon start` starts a new one after the node was killed (#2045)
 - agmsgd: a heartbeat left by a killed executor no longer reads as running, so `agmsg daemon start` starts a new one (#2038)
 - agmsgd: `daemon start` reports running only for an owner that started after it; on Windows it says when no one is signed in (#2026)
 - agmsgd: the socket and the owner's heartbeat are checked before a restart, so a second agmsgd is not started next to a live one (#2023)
