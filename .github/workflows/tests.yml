@@ -232,7 +232,7 @@ jobs:
       # run everything). From the pull request's diff; empty on a full run.
       bats_skip: ${{ steps.detect.outputs.bats_skip }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # need base + head history to diff the PR range
       - id: detect
@@ -584,7 +584,7 @@ jobs:
           printf '%s\n' "$BASE_SHA" > "$RUNNER_TEMP/pr-base/base.txt"
       - name: Upload this run's base
         if: github.event_name == 'pull_request' && github.event.action != 'closed'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-base
           path: ${{ runner.temp }}/pr-base/base.txt
@@ -666,7 +666,7 @@ jobs:
       # runs this long; the offender is named in the log and fails alone.
       BATS_TEST_TIMEOUT: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Whether this shard runs the suite: not on a docs-only diff, and the
       # macOS shards only on a full run (release pull request, daily).
@@ -905,7 +905,7 @@ jobs:
       - name: Upload hang samples
         if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hang-samples-${{ matrix.os }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/hang-samples.txt
@@ -918,7 +918,7 @@ jobs:
       - name: Upload bats results (for a rerun)
         if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bats-results-${{ matrix.os }}-${{ matrix.shard }}-a${{ github.run_attempt }}
           path: ${{ runner.temp }}/bats-results.tsv
@@ -928,7 +928,7 @@ jobs:
       - name: Upload bats timings
         if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/bats-timings.tsv
@@ -943,7 +943,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check shard results
         env:
@@ -1035,13 +1035,13 @@ jobs:
     # cancellation rather than a result.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping contract
         if: needs.changes.outputs.contracts_needed == 'false'
         run: echo "Diff does not touch anything the age-v1 contract reads; skipping."
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: needs.changes.outputs.contracts_needed != 'false'
         with:
           go-version: '1.25.x'
@@ -1114,7 +1114,7 @@ jobs:
         # run at once.
         os: [ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping
         if: needs.changes.outputs.contracts_needed == 'false'
@@ -1230,7 +1230,7 @@ jobs:
         # environment native Windows users run agmsg under.
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
@@ -1289,7 +1289,7 @@ jobs:
       - name: Restore sqlite3 (cache)
         if: steps.leg.outputs.run == 'true' && matrix.sqlite
         id: sqlite-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\sqlite-tools
           key: sqlite3-${{ runner.os }}-sqliteorg-${{ env.WINDOWS_SQLITE_VERSION }}
@@ -1407,18 +1407,18 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: No app changes — skipping typecheck
         if: needs.changes.outputs.app_changed == 'false'
         run: echo "Diff does not touch app/ — reporting green without running the typecheck."
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         if: needs.changes.outputs.app_changed != 'false'
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: needs.changes.outputs.app_changed != 'false'
         with:
           node-version: 22
@@ -1485,13 +1485,13 @@ jobs:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: No server or sync changes — skipping checks
         if: needs.changes.outputs.server_changed == 'false' && needs.changes.outputs.sync_changed == 'false'
         run: echo "Diff does not touch server/ or the Stage-1 client — reporting green without running remote integration checks."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
         with:
           node-version: 22
@@ -1613,7 +1613,7 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: No app changes — skipping app tests
         if: needs.changes.outputs.app_changed == 'false'
@@ -1668,7 +1668,7 @@ jobs:
     # `tests/*.bats`, so it is cheap enough to run unconditionally rather than
     # to gate.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No bats, no bash 3.2, no runners: this is a static read of the test
       # sources. The BEHAVIOUR it encodes was measured on both shells (#670);
@@ -1684,7 +1684,7 @@ jobs:
     # that skips on some diffs is a required context that can sit pending. It
     # is a static read of `scripts/**/*.sh`.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Ubuntu's bash is 5.x, and one of the three shapes this looks for is
       # fatal ONLY on bash 3.2 (macOS /bin/bash). That is why the check is
@@ -1702,7 +1702,7 @@ jobs:
     # diffs is a required context that can sit pending. It is a static read of
     # `scripts/**/*.sh`.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The suite cannot do this one. Every entry point that reaches those
       # files runs `set -euo pipefail`; tests/test_helper.bash sets no shell
@@ -1719,9 +1719,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           check-latest: true
