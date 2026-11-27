@@ -34,9 +34,11 @@ describe("the limits capability", () => {
   });
 
   it("adds the feature name only while a limit is set, in either profile", () => {
-    expect(teamFeatures("open", "none", none)).toEqual([]);
-    expect(teamFeatures("open", "none", { ...none, teams: 5n })).toEqual(["limits"]);
-    expect(teamFeatures("accounts", "none", none)).toEqual(["devices"]);
-    expect(teamFeatures("accounts", "none", { ...none, devices: 3n })).toEqual(["devices", "limits"]);
+    expect(teamFeatures("open", "none", none)).toEqual(["roster-snapshot"]);
+    expect(teamFeatures("open", "none", { ...none, teams: 5n })).toEqual(["roster-snapshot", "limits"]);
+    expect(teamFeatures("accounts", "none", none)).toEqual(["roster-snapshot", "devices"]);
+    expect(teamFeatures("accounts", "none", { ...none, devices: 3n })).toEqual(
+      ["roster-snapshot", "devices", "limits"],
+    );
   });
 });
