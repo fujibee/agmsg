@@ -12,6 +12,9 @@ const environmentSchema = z.object({
   // public origin the approval page and capability URLs are built from.
   AGMSG_OWNER_SECRET: z.string().optional(),
   AGMSG_PUBLIC_URL: z.string().optional(),
+  // Comma-separated client ids that may ask for a device code. Public
+  // identifiers, not secrets; the default is the agmsg command-line client.
+  AGMSG_DEVICE_CLIENT_IDS: z.string().optional(),
   AGMSG_RETENTION_MAX_LIVE_MESSAGES: z.string()
     .regex(/^[1-9][0-9]*$/u)
     .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n,
@@ -29,6 +32,8 @@ export type Config = {
   ownerSecret: string | null;
   // Origin only, no trailing slash: https://agmsg.example.com
   publicUrl: string | null;
+  // Client ids accepted at POST /v1/device/code (accounts profile).
+  deviceClientIds: string[];
   databaseUrl: string;
   host: string;
   port: number;
@@ -87,6 +92,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Config
     profile: parsed.AGMSG_PROFILE,
     ownerSecret,
     publicUrl,
+    deviceClientIds: (parsed.AGMSG_DEVICE_CLIENT_IDS ?? "agmsg-cli")
+      .split(",").map((id) => id.trim()).filter((id) => id !== ""),
     databaseUrl: parsed.DATABASE_URL,
     host: parsed.HOST,
     port: parsed.PORT,

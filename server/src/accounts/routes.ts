@@ -97,6 +97,9 @@ export async function registerDeviceRoutes(
     noStore(reply);
     const body = codeBody.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ error: "bad_request" });
+    if (!config.deviceClientIds.includes(body.data.client_id)) {
+      return reply.status(400).send({ error: "invalid_client" });
+    }
     if (!issueLimiter.hit(`ip:${request.ip}`, DEVICE_LIMITS.issuePerAddressPerHour, Date.now())) {
       return reply.status(429).send({ error: "slow_down" });
     }

@@ -22,6 +22,7 @@ describeDatabase("POST /v1/connect", () => {
     profile: "open",
     ownerSecret: null,
     publicUrl: null,
+    deviceClientIds: ["agmsg-cli"],
     databaseUrl: databaseUrl ?? "",
     host: "127.0.0.1",
     port: 8788,

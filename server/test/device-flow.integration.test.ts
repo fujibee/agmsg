@@ -25,7 +25,7 @@ describeDatabase("device flow", () => {
   let addressCounter = 0;
 
   const config: Config = {
-    profile: "accounts", ownerSecret, publicUrl: origin,
+    profile: "accounts", ownerSecret, publicUrl: origin, deviceClientIds: ["agmsg-cli"],
     databaseUrl: databaseUrl ?? "", host: "127.0.0.1", port: 0,
     logLevel: "silent", retentionMaxLiveMessages: null,
   };
@@ -195,6 +195,12 @@ describeDatabase("device flow", () => {
       expect(answer.statusCode).toBe(400);
       expect(answer.json()).toEqual({ error: "expired_token" });
     }
+  });
+
+  it("refuses a client id that is not on the list", async () => {
+    const answer = await requestCode({ client_id: "stranger" });
+    expect(answer.statusCode).toBe(400);
+    expect(answer.json()).toEqual({ error: "invalid_client" });
   });
 
   it("rejects an unknown field and a machine name that could fake page copy", async () => {
