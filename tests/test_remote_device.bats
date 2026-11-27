@@ -453,6 +453,25 @@ STUB
   [ -z "$(saved_approvals)" ]
 }
 
+@test "device pull: a refusal that is not JSON still drops the approval (401), and a non-JSON 503 keeps it" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_DATA_STATUS=401 MOCK_DATA_BODY=text
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "saved approval was dropped"
+  [ -z "$(saved_approvals)" ]
+  # The name lookup reads the answer through a different helper.
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "saved approval was dropped"
+  [ -z "$(saved_approvals)" ]
+  # Weather is not a refusal, whatever the body.
+  curl -sS "$ENDPOINT/_test/data-status?value=503&body=text" >/dev/null
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 1 ]
+  lacks "$output" "dropped"
+  [ -s "$(saved_approvals)" ]
+}
+
 @test "device pull: a data-side server error keeps the saved approval" {
   start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_DATA_STATUS=503
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned

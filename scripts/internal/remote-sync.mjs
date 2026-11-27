@@ -1791,7 +1791,12 @@ async function send(config, path, init, authHeaders) {
       error.status = response.status; error.retryable = true;
       throw error;
     }
-    throw new Error(`HTTP ${response.status} returned invalid JSON`);
+    // httpStatus, not status: `status` decides whether a failure is retried, and
+    // this error has never been retried. It only lets a caller that has to tell
+    // a refused address (401, 410) from weather read what the server said.
+    const invalid = new Error(`HTTP ${response.status} returned invalid JSON`);
+    invalid.httpStatus = response.status;
+    throw invalid;
   }
   if (protocol !== PROTOCOL) {
     if (!response.ok && [502, 503, 504].includes(response.status)) {
@@ -1799,7 +1804,9 @@ async function send(config, path, init, authHeaders) {
       error.status = response.status; error.retryable = true;
       throw error;
     }
-    throw new Error("response protocol version mismatch");
+    const mismatch = new Error("response protocol version mismatch");
+    mismatch.httpStatus = response.status;
+    throw mismatch;
   }
   if (!response.ok) {
     validateErrorBinding(config, response.status, body);
@@ -4830,7 +4837,12 @@ async function publicGet(serverUrl, path) {
   }
   let body;
   try { body = JSON.parse(text); } catch {
-    throw new Error(`HTTP ${response.status} returned invalid JSON`);
+    // httpStatus, not status: `status` decides whether a failure is retried, and
+    // this error has never been retried. It only lets a caller that has to tell
+    // a refused address (401, 410) from weather read what the server said.
+    const invalid = new Error(`HTTP ${response.status} returned invalid JSON`);
+    invalid.httpStatus = response.status;
+    throw invalid;
   }
   if (!response.ok) {
     // This message is no longer only for a log: the resolve-team CLI
@@ -5104,8 +5116,9 @@ if (process.argv[1] &&
     // (401, 410) from a failure that may pass names a file here, and gets the
     // status code and nothing else: no URL, no message text.
     const failureFile = process.env.AGMSG_REMOTE_FAILURE_FILE;
-    if (failureFile && [401, 410].includes(error.status)) {
-      try { writeFileSync(failureFile, `${error.status}\n`); } catch { /* best effort */ }
+    const refused = error.httpStatus ?? error.status;
+    if (failureFile && [401, 410].includes(refused)) {
+      try { writeFileSync(failureFile, `${refused}\n`); } catch { /* best effort */ }
     }
     process.exitCode = 1;
   });

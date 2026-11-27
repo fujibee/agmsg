@@ -47,6 +47,8 @@ DEVICE_ERROR = os.environ.get("MOCK_DEVICE_ERROR", "")
 # A status every request under a capability prefix (/t/<secret>/...) answers with:
 # the data side refusing an address, while the routes on the origin keep working.
 DATA_STATUS = os.environ.get("MOCK_DATA_STATUS", "")
+# "text": the data-side refusal is plain text, not JSON (a gateway or proxy page).
+DATA_BODY = os.environ.get("MOCK_DATA_BODY", "")
 # A status /v1/device/activate answers with instead of activating (empty: activate).
 DEVICE_ACTIVATE_STATUS = os.environ.get("MOCK_DEVICE_ACTIVATE_STATUS", "")
 DEVICE_SECRET = "mocksecret0123456789abcdef0123456789abcdef"
@@ -289,9 +291,12 @@ class Handler(BaseHTTPRequestHandler):
         # Python requires the declaration to precede the first mention anywhere
         # in the function — including the read in the /v1/health branch below.
         global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT, LAST_CLIENT_VERSION
-        global DEVICE_PENDING, FEATURES, CONNECT_STATUS, DEVICE_ACTIVATE_STATUS, DATA_STATUS
+        global DEVICE_PENDING, FEATURES, CONNECT_STATUS, DEVICE_ACTIVATE_STATUS, DATA_STATUS, DATA_BODY
         if DATA_STATUS and self.via_capability:
-            self._send_json(int(DATA_STATUS), {"error": {"code": "unauthorized"}})
+            if DATA_BODY == "text":
+                self._send_raw(int(DATA_STATUS), "denied")
+            else:
+                self._send_json(int(DATA_STATUS), {"error": {"code": "unauthorized"}})
             return
         # Read before write, and only for a route under test: the inspection
         # route itself is a request too, and capturing unconditionally would
@@ -329,7 +334,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"features": FEATURES})
             return
         if self.path.startswith("/_test/data-status"):
-            DATA_STATUS = self.path.partition("?value=")[2]
+            value, _, body_kind = self.path.partition("?value=")[2].partition("&body=")
+            DATA_STATUS, DATA_BODY = value, body_kind
             self._send_json(200, {"status": DATA_STATUS})
             return
         if self.path.startswith("/_test/activate-status"):
