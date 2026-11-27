@@ -33,6 +33,9 @@ function teamNotFound(): ProtocolError {
   return new ProtocolError(404, "team-not-found", "team is not provisioned");
 }
 
+// The device each request resolved to, for the hooks after onRequest.
+const deviceOf = new WeakMap<FastifyRequest, string>();
+
 type Options = {
   pool: Pool;
   config: Config;
@@ -58,6 +61,7 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
         return reply;
       }
       request.headers["agmsg-team-id"] = device.teamId;
+      deviceOf.set(request, device.deviceId);
       const pathTeam = (request.params as { teamId?: string }).teamId;
       if (pathTeam !== undefined && pathTeam !== device.teamId) {
         void reply.status(404).send(errorBody(teamNotFound()));
@@ -80,6 +84,25 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
           void reply.status(404).send(errorBody(teamNotFound()));
           return reply;
         }
+      }
+    });
+    // When a device last fetched, for the owner's device list. Written on
+    // GET /v1/messages at most once a minute, so a polling client costs one
+    // conditional UPDATE and almost always zero row changes. A failed write
+    // must never fail the fetch it only describes.
+    scope.addHook("preHandler", async (request) => {
+      if (request.method !== "GET" || !(request.routeOptions.url ?? "").endsWith("/v1/messages")) return;
+      const deviceId = deviceOf.get(request);
+      if (!deviceId) return;
+      try {
+        await pool.query(
+          `UPDATE devices SET last_fetch_at = clock_timestamp()
+            WHERE device_id = $1
+              AND (last_fetch_at IS NULL OR last_fetch_at < clock_timestamp() - interval '1 minute')`,
+          [deviceId],
+        );
+      } catch (error) {
+        request.log.warn({ event: "last-fetch-write-failed", error_name: error instanceof Error ? error.name : typeof error });
       }
     });
     void scope.register(dataPlane, { pool, config });

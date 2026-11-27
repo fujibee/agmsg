@@ -128,6 +128,12 @@ describeDatabase("device flow", () => {
     expect(list.statusCode).toBe(200);
     const mine = list.json().devices.find((d: { thisMachine: boolean }) => d.thisMachine);
     expect(mine).toMatchObject({ label: "laptop", type: "claude-code", devicePubkey: null, lastFetchAt: null });
+    // after a fetch, the list says when
+    await app.inject({ method: "GET", url: `${path}/v1/messages?after=0`, headers: { "agmsg-protocol-version": "1" } });
+    const later = await app.inject({ method: "GET", url: "/v1/devices", headers: { authorization: `Bearer ${path.split("/")[2]}` } });
+    const fetched = later.json().devices.find((d: { thisMachine: boolean }) => d.thisMachine);
+    expect(typeof fetched.lastFetchAt).toBe("string");
+    expect(Number.isNaN(Date.parse(fetched.lastFetchAt))).toBe(false);
   });
 
   it("keeps a code single-use, and a consumed grant cannot be collected twice", async () => {

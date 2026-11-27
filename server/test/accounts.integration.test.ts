@@ -203,6 +203,30 @@ describeDatabase("accounts profile", () => {
       expect({ ...known.json(), server_instance_id: "x" }).toEqual({ ...unknown.json(), server_instance_id: "x" });
     });
 
+    it("records when a device last fetched, at most once a minute, only on GET /v1/messages", async () => {
+      const lastFetch = async (): Promise<string | null> =>
+        (await pool.query<{ t: string | null }>(
+          `SELECT last_fetch_at::text AS t FROM devices WHERE device_id = $1`, [live.deviceId],
+        )).rows[0]?.t ?? null;
+      expect(await lastFetch()).toBeNull();
+      await at(live.secret, "/v1/capabilities");
+      expect(await lastFetch()).toBeNull(); // other routes do not count as a fetch
+      expect((await at(live.secret, "/v1/messages?after=0")).statusCode).toBe(200);
+      const first = await lastFetch();
+      expect(first).not.toBeNull();
+      await at(live.secret, "/v1/messages?after=0");
+      expect(await lastFetch()).toBe(first); // inside the minute: no write
+      await pool.query(`UPDATE devices SET last_fetch_at = now() - interval '2 minutes' WHERE device_id = $1`, [live.deviceId]);
+      const stale = await lastFetch();
+      await at(live.secret, "/v1/messages?after=0");
+      expect(await lastFetch()).not.toBe(stale); // outside the minute: written again
+      // a refused request records nothing
+      const before = await pool.query<{ t: string | null }>(`SELECT last_fetch_at::text AS t FROM devices WHERE device_id = $1`, [revoked.deviceId]);
+      await at(revoked.secret, "/v1/messages?after=0");
+      const after = await pool.query<{ t: string | null }>(`SELECT last_fetch_at::text AS t FROM devices WHERE device_id = $1`, [revoked.deviceId]);
+      expect(after.rows[0]?.t).toBe(before.rows[0]?.t);
+    });
+
     it("never writes a secret into the request log", async () => {
       const lines: string[] = [];
       const logged = createApp(pool, { ...config("accounts"), logLevel: "info" }, {
