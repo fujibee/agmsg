@@ -39,6 +39,8 @@ describeDatabase("static limits", () => {
     port: 8788,
     logLevel: "silent",
     retentionMaxLiveMessages: liveMessages,
+    escrowBackend: "none",
+    escrowKeyfile: null,
     limits: { devices: null, teams },
   });
 
