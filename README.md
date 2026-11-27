@@ -490,7 +490,7 @@ An `uninstall.sh` copy ships inside every install, so this works whether you
 installed via `git clone`, `npx agmsg`, or the curl one-liner:
 
 ```bash
-~/.agents/skills/agmsg/uninstall.sh              # This install only (confirms each step)
+~/.agents/skills/agmsg/uninstall.sh              # This install only (asks before removing anything)
 ~/.agents/skills/agmsg/uninstall.sh --yes        # This install only, no confirmation
 ~/.agents/skills/agmsg/uninstall.sh --keep-data  # Remove skill but keep DB and teams
 ~/.agents/skills/agmsg/uninstall.sh --all        # Every agmsg install on this machine

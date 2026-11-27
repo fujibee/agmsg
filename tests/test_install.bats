@@ -493,6 +493,91 @@ _pid_gone_harness() {   # <kill message>
   [ ! -e "$shim" ]
 }
 
+# Every path under FAKE_HOME with its content checksum (directories and
+# symlinks by name), sorted: two equal snapshots mean nothing was changed.
+_uninstall_tree_snapshot() {
+  (cd "$FAKE_HOME" && find . -print | LC_ALL=C sort | while IFS= read -r p; do
+    if [ -f "$p" ] && [ ! -L "$p" ]; then printf '%s %s\n' "$(cksum <"$p")" "$p"
+    else printf 'node %s\n' "$p"; fi
+  done)
+}
+
+# One install with something in every place uninstall removes from: the
+# global command, a joined project's hooks, the Codex writable_roots, the
+# OpenCode/Hermes/Grok Build skill files and the shim.
+_uninstall_prompt_fixture() {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex" \
+    "$FAKE_HOME/.config/opencode" "$FAKE_HOME/.hermes" "$FAKE_HOME/.grok"
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$REPO_ROOT/install.sh" >/dev/null
+  PROJECT="$FAKE_HOME/project"
+  mkdir -p "$PROJECT"
+  bash "$SK/scripts/join.sh" myteam alice claude-code "$PROJECT" >/dev/null
+  HOME="$FAKE_HOME" bash "$SK/scripts/delivery.sh" set turn claude-code "$PROJECT" >/dev/null
+  _plant_own_shim
+  [ -f "$FAKE_HOME/.claude/commands/agmsg.md" ]
+  grep -qF "$SK/" "$PROJECT/.claude/settings.local.json"
+  grep -qF "/.agmsg/agmsg/" "$FAKE_HOME/.codex/config.toml"
+  [ -f "$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md" ]
+}
+
+@test "uninstall: with no answer to the question (stdin /dev/null), nothing is changed (#2044)" {
+  # The question used to come after the commands, hooks, skill copies and
+  # shim were removed, and the Codex writable_roots and the other skill files
+  # went after it whatever the answer.
+  _uninstall_prompt_fixture
+  local before after
+  before="$(_uninstall_tree_snapshot)"
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Aborted. Nothing was changed."* ]]
+  after="$(_uninstall_tree_snapshot)"
+  [ "$before" = "$after" ]
+}
+
+@test "uninstall: answering n to the install question changes nothing, --keep-data included (#2044)" {
+  _uninstall_prompt_fixture
+  local before after
+  before="$(_uninstall_tree_snapshot)"
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" <<<"n"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Aborted. Nothing was changed."* ]]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" --keep-data <<<"n"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Aborted. Nothing was changed."* ]]
+  # --keep-data has no data question to ask.
+  [[ "$output" != *"Also remove its DB"* ]]
+  after="$(_uninstall_tree_snapshot)"
+  [ "$before" = "$after" ]
+}
+
+@test "uninstall: y then n removes the install everywhere and keeps its DB and teams (#2044)" {
+  _uninstall_prompt_fixture
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" <<<$'y\nn'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Also remove its DB (message history) and teams?"* ]]
+  [ ! -e "$SK/scripts" ]
+  [ ! -f "$FAKE_HOME/.claude/commands/agmsg.md" ]
+  refute grep -qF "$SK/" "$PROJECT/.claude/settings.local.json"
+  refute grep -qF "/.agmsg/agmsg/" "$FAKE_HOME/.codex/config.toml"
+  [ ! -f "$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md" ]
+  [ -d "$SK/teams" ] || [ -d "$FAKE_HOME/.agmsg/agmsg/teams" ]
+  [ -d "$SK/db" ] || [ -d "$FAKE_HOME/.agmsg/agmsg/db" ]
+}
+
+@test "uninstall: y then y removes the install and its DB and teams, asked once each (#2044)" {
+  _uninstall_prompt_fixture
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" <<<$'y\ny'
+  [ "$status" -eq 0 ]
+  [ "$(grep -o "(y/n)" <<<"$output" | wc -l | tr -d " ")" -eq 2 ]
+  [[ "$output" != *"including DB and teams"* ]]
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/teams" ]
+  [ ! -e "$FAKE_HOME/.agmsg/agmsg/teams" ]
+  [ ! -f "$FAKE_HOME/.claude/commands/agmsg.md" ]
+}
+
+
 @test "uninstall: removes only the targeted install, leaving a second install's command, project hooks/commands, and writable_roots in place (#1400)" {
   # Ran uninstall.sh removed EVERY ~/.agents/skills/*/ install on the machine,
   # not just its own -- a throwaway --cmd install's uninstall wiped every
