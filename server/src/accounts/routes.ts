@@ -75,9 +75,11 @@ export async function registerDeviceRoutes(
   const signInLimiter = new FixedWindowCounter();
   const actionLimiter = new FixedWindowCounter();
   const attemptLimiter = new FixedWindowCounter();
+  const tokenLimiter = new FixedWindowCounter();
+  const unknownCodeLimiter = new FixedWindowCounter();
   const sweeper = setInterval(() => {
     const now = Date.now();
-    for (const limiter of [issueLimiter, signInLimiter, actionLimiter, attemptLimiter]) limiter.sweep(now);
+    for (const limiter of [issueLimiter, signInLimiter, actionLimiter, attemptLimiter, tokenLimiter, unknownCodeLimiter]) limiter.sweep(now);
   }, 10 * 60 * 1000);
   sweeper.unref();
   app.addHook("onClose", async () => { clearInterval(sweeper); });
@@ -132,9 +134,17 @@ export async function registerDeviceRoutes(
     noStore(reply);
     const body = tokenBody.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ error: "bad_request" });
+    const now = Date.now();
+    if (!tokenLimiter.hit(`tok:${request.ip}`, DEVICE_LIMITS.tokenPollsPerAddressPerHour, now) ||
+        unknownCodeLimiter.over(`unk:${request.ip}`, DEVICE_LIMITS.unknownDeviceCodesPerAddressPerHour, now)) {
+      return reply.status(429).send({ error: "slow_down" });
+    }
     const result = await pollToken(pool, {
       deviceCode: body.data.device_code, clientId: body.data.client_id, accountId,
     });
+    if ("unknown" in result) {
+      unknownCodeLimiter.hit(`unk:${request.ip}`, DEVICE_LIMITS.unknownDeviceCodesPerAddressPerHour, now);
+    }
     switch (result.status) {
       case "slow_down":
         return reply.status(400).send({ error: "slow_down", interval: result.interval });

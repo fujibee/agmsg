@@ -139,6 +139,9 @@ export async function decideGrant(
 
 export type PollResult =
   | { status: "authorization_pending" | "access_denied" | "expired_token" | "machine_exists" }
+  // The same answer as expired_token on the wire; `unknown` lets the caller
+  // count device codes that matched no grant at all.
+  | { status: "expired_token"; unknown: true }
   | { status: "slow_down"; interval: number }
   | { status: "ready"; secret: string; machineName: string; teamId: string; accountId: string };
 
@@ -159,7 +162,8 @@ export async function pollToken(
       [deviceCodeHashOf(input.deviceCode), input.clientId, POLL_INTERVAL_SECONDS],
     );
     const grant = rows[0];
-    if (!grant || grant.expired || grant.state === "consumed") {
+    if (!grant) return { status: "expired_token" as const, unknown: true as const };
+    if (grant.expired || grant.state === "consumed") {
       return { status: "expired_token" as const };
     }
     if (grant.state === "denied") return { status: "access_denied" as const };

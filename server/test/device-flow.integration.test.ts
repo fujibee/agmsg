@@ -203,6 +203,20 @@ describeDatabase("device flow", () => {
     expect(answer.json()).toEqual({ error: "invalid_client" });
   });
 
+  it("limits unknown device codes per address without slowing a real machine's polling", async () => {
+    const guesser = "10.77.0.1";
+    const guess = () => post("/v1/device/token", { device_code: randomBytes(32).toString("base64url"), client_id: "agmsg-cli" }, guesser);
+    for (let i = 0; i < 60; i += 1) expect((await guess()).statusCode).toBe(400);
+    expect((await guess()).statusCode).toBe(429);
+    expect((await guess()).json()).toEqual({ error: "slow_down" });
+    // another address is unaffected, and so is a real code from the same one
+    const code = (await requestCode({ machine_name: "patient" }, "10.77.0.2")).json();
+    const real = await post("/v1/device/token", { device_code: code.device_code, client_id: "agmsg-cli" }, "10.77.0.2");
+    expect(real.json().error).toBe("authorization_pending");
+    const blockedReal = await post("/v1/device/token", { device_code: code.device_code, client_id: "agmsg-cli" }, guesser);
+    expect(blockedReal.statusCode).toBe(429);
+  });
+
   it("rejects an unknown field and a machine name that could fake page copy", async () => {
     expect((await requestCode({ surprise: 1 })).statusCode).toBe(400);
     expect((await requestCode({ machine_name: " padded" })).statusCode).toBe(400);
