@@ -189,7 +189,7 @@ describeDatabase("accounts profile", () => {
       const own = await at(live.secret, `/v1/teams/${teamA}`);
       expect(own.statusCode).toBe(200);
       expect(own.json().team_id).toBe(teamA);
-      const history = await at(live.secret, `/v1/teams/${teamA}/messages`);
+      const history = await at(live.secret, `/v1/teams/${teamA}/messages?after=0`);
       expect(history.statusCode).toBe(200);
     });
 
