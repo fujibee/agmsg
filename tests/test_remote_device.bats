@@ -188,6 +188,24 @@ recorded_endpoint() {
   [ "$(device_state | jq -r '.last_code_body.machine_name')" = "second-install" ]
 }
 
+@test "device connect: an explicit --machine-name is sent exactly as given" {
+  start_mock MOCK_FEATURES=device-approval
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --machine-name "My laptop (työ) \"2\"" testteam
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.last_code_body.machine_name')" = 'My laptop (työ) "2"' ]
+}
+
+@test "device connect: a --machine-name the server would refuse stops before it is asked" {
+  start_mock MOCK_FEATURES=device-approval
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --machine-name " padded " testteam
+  [ "$status" -eq 1 ]
+  has "$output" "nothing was changed"
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --machine-name "$(printf 'a%.0s' $(seq 1 129))" testteam
+  [ "$status" -eq 1 ]
+  [ "$(device_state | jq -r '.codes')" = 0 ]
+  [ -z "$(recorded_endpoint)" ]
+}
+
 @test "device connect: a machine name the server already holds is reported with the way out" {
   start_mock MOCK_FEATURES=device-approval MOCK_DEVICE_ERROR=machine_exists
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
@@ -508,7 +526,6 @@ STUB
   [ "$(device_state | jq -r '.last_code_body.team_id')" = "$PULL_TEAM_ID" ]
   stop_engine cloned
   # By name there is nothing to send before the approval: the owner chooses.
-  rm -rf "$TEST_SKILL_DIR/teams/cloned"
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" named
   [ "$(device_state | jq -r '.last_code_body | has("team_id")')" = false ]
   stop_engine named

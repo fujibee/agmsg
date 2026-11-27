@@ -818,7 +818,7 @@ _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 # activation the server could not take) leaves the saved copy, and the next run
 # retries from there instead of asking the user to approve again.
 _remote_device_approve() {
-  local origin="${1%/}" team="$2" position="${3:-}" team_id_arg="${4:-}" pending machine body out code doc err interval deadline \
+  local origin="${1%/}" team="$2" position="${3:-}" team_id_arg="${4:-}" pending machine machine_json body out code doc err interval deadline \
     device_code user_code uri uri_complete address expires saved_pos activated rc
   REMOTE_DEVICE_ADDRESS=""
   REMOTE_DEVICE_POSITION="$position"
@@ -845,12 +845,27 @@ _remote_device_approve() {
   fi
   # The machine's own label on the server. A server holds one live device per
   # name in a team, so two installs on one host (or two hosts that share a
-  # name) need different ones: --machine-name sets it, and the host name is only
-  # the default.
-  machine="${REMOTE_DEVICE_MACHINE_NAME:-}"
-  [ -n "$machine" ] || machine="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
-  machine="$(printf '%s' "$machine" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
-  [ -n "$machine" ] || machine="machine"
+  # name) need different ones. --machine-name sets it and is sent exactly as
+  # given: it is the user's label, not something to tidy. The server's own rules
+  # (1-128 characters, no control characters, no edge whitespace, NFC) are
+  # checked here only so a bad label stops before anything is asked of it.
+  # The host name is only the default, and that one is reduced to a safe alphabet.
+  if [ -n "$REMOTE_DEVICE_MACHINE_NAME" ]; then
+    machine="$REMOTE_DEVICE_MACHINE_NAME"
+    case "$machine" in
+      *[[:cntrl:]]*) echo "agmsg: --machine-name must not contain control characters; nothing was changed" >&2; return 1 ;;
+    esac
+    if [ "${#machine}" -gt 128 ] || [ "$machine" != "${machine#"${machine%%[![:space:]]*}"}" ] \
+       || [ "$machine" != "${machine%"${machine##*[![:space:]]}"}" ]; then
+      echo "agmsg: --machine-name must be 1 to 128 characters with no space at either end; nothing was changed" >&2
+      return 1
+    fi
+  else
+    machine="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
+    machine="$(printf '%s' "$machine" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+    [ -n "$machine" ] || machine="machine"
+  fi
+  machine_json="$(agmsg_sqlite_mem "SELECT json_quote('$(_agmsg_sqlesc "$machine")');")"
   body="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-body.XXXXXX")"
   out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
   # The team the machine joins, when it is already known (connect knows its own
@@ -858,11 +873,11 @@ _remote_device_approve() {
   # needs no choice from the owner, which is what lets a first connect succeed
   # on a server that holds no team yet. Without one the owner chooses.
   if [ -n "$team_id_arg" ]; then
-    printf '{"client_id":"%s","scope":"login","machine_name":"%s","team_id":"%s"}' \
-      "$_REMOTE_DEVICE_CLIENT_ID" "$machine" "$team_id_arg" > "$body"
+    printf '{"client_id":"%s","scope":"login","machine_name":%s,"team_id":"%s"}' \
+      "$_REMOTE_DEVICE_CLIENT_ID" "$machine_json" "$team_id_arg" > "$body"
   else
-    printf '{"client_id":"%s","scope":"login","machine_name":"%s"}' \
-      "$_REMOTE_DEVICE_CLIENT_ID" "$machine" > "$body"
+    printf '{"client_id":"%s","scope":"login","machine_name":%s}' \
+      "$_REMOTE_DEVICE_CLIENT_ID" "$machine_json" > "$body"
   fi
   code="$(_remote_http_json_call POST "$origin/v1/device/code" "$body" "$out")" || code="000"
   if [ "$code" != "200" ]; then
