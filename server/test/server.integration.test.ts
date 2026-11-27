@@ -546,6 +546,93 @@ describeDatabase("remote storage HTTP API v1", () => {
     });
   });
 
+  it("stores and returns the maximum wire epoch (0xffffffff)", async () => {
+    const epochTeam = "018f3f7e-0000-7000-8000-0000000000b2";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'epoch-boundary-team')`, [epochTeam]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none','age-v1']::TEXT[])`,
+      [epochTeam],
+    );
+    const epochHeaders = { ...headers, "agmsg-team-id": epochTeam };
+
+    // 0xffffffff is the top of the wire's validated epoch range and
+    // overflows a signed 32-bit column; this must round-trip exactly, not
+    // 500 on insert.
+    const atMax = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers: epochHeaders,
+      payload: { sequence: "1", epoch: 0xffffffff, blob: "bWF4LWVwb2No" },
+    });
+    expect(atMax.statusCode).toBe(200);
+    expect(atMax.json()).toMatchObject({ epoch: 0xffffffff });
+
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers: epochHeaders,
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toMatchObject({ sequence: "1", epoch: 0xffffffff });
+
+    // One past the wire's own max is a validation error, never reaches the DB.
+    const overWireMax = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers: epochHeaders,
+      payload: { sequence: "2", epoch: 0x100000000, blob: "b3Zlci1tYXg=" },
+    });
+    expect(overWireMax.statusCode).toBe(400);
+  });
+
+  it("re-provisioning the same manifest does not wipe a late joiner's read state", async () => {
+    const lateTeam = "018f3f7e-0000-7000-8000-0000000000b3";
+    const lateMember = "018f3f7e-0000-7000-8000-0000000000b4";
+    const retainedMember = "018f3f7e-0000-7000-8000-0000000000b5";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'late-joiner-provision-team')`, [lateTeam]);
+    await pool.query(
+      `INSERT INTO members (team_id, member_id, name) VALUES ($1, $2, 'retained-member')`,
+      [lateTeam, retainedMember],
+    );
+    // The late joiner has read state but, by design, no members row.
+    await pool.query(
+      `INSERT INTO read_frontiers(team_id, member_id, server_seq) VALUES ($1, $2, 3)`,
+      [lateTeam, lateMember],
+    );
+
+    const directory = await mkdtemp(join(tmpdir(), "agmsg-late-joiner-provision-"));
+    const manifestPath = join(directory, "team.json");
+    const connection = new URL(databaseUrl ?? "");
+    connection.searchParams.set("options", `-c search_path=${schema}`);
+    const environment = { ...process.env, DATABASE_URL: connection.toString() };
+    try {
+      await writeFile(
+        manifestPath,
+        JSON.stringify({
+          team_id: lateTeam,
+          team_name: "late-joiner-provision-team",
+          members: [{ member_id: retainedMember, name: "retained-member", registrations: [] }],
+        }),
+      );
+      await execFileAsync(
+        process.execPath,
+        ["node_modules/tsx/dist/cli.mjs", "src/provision.ts", manifestPath],
+        { cwd: process.cwd(), env: environment },
+      );
+
+      const stillThere = await pool.query<{ server_seq: string }>(
+        "SELECT server_seq::text FROM read_frontiers WHERE team_id=$1 AND member_id=$2",
+        [lateTeam, lateMember],
+      );
+      expect(stillThere.rows[0]?.server_seq).toBe("3");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await pool.query("DELETE FROM read_frontiers WHERE team_id=$1", [lateTeam]);
+    }
+  });
+
   it("max-merges and paginates composite read state", async () => {
     const exactId = "750e8400-e29b-41d4-a716-446655440002";
     const firstPage = await app.inject({

@@ -1122,17 +1122,20 @@ export async function getRosterSnapshot(
       if (!team) throw notFound(serverId, teamId);
       const stored = await client.query<{
         sequence: string;
-        epoch: number;
+        epoch: string;
         blob: string;
       }>(
-        "SELECT sequence::text, epoch, blob FROM roster_snapshots WHERE team_id = $1",
+        // epoch is BIGINT: node-pg returns int8 columns as strings to avoid
+        // precision loss, regardless of an explicit ::text cast, so the
+        // response type above already matches what comes back at runtime.
+        "SELECT sequence::text, epoch::text, blob FROM roster_snapshots WHERE team_id = $1",
         [teamId],
       );
       const row = stored.rows[0];
       return {
         ...common(serverId, team),
         ...(row
-          ? { sequence: row.sequence, epoch: row.epoch, blob: row.blob }
+          ? { sequence: row.sequence, epoch: Number(row.epoch), blob: row.blob }
           : { sequence: null, epoch: null, blob: null }),
       };
     },
