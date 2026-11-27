@@ -44,6 +44,9 @@ FEATURES = [f for f in os.environ.get("MOCK_FEATURES", "").split(",") if f]
 DEVICE_PENDING = int(os.environ.get("MOCK_DEVICE_PENDING", "0") or 0)
 DEVICE_INTERVAL = int(os.environ.get("MOCK_DEVICE_INTERVAL", "0") or 0)
 DEVICE_ERROR = os.environ.get("MOCK_DEVICE_ERROR", "")
+# A status every request under a capability prefix (/t/<secret>/...) answers with:
+# the data side refusing an address, while the routes on the origin keep working.
+DATA_STATUS = os.environ.get("MOCK_DATA_STATUS", "")
 # A status /v1/device/activate answers with instead of activating (empty: activate).
 DEVICE_ACTIVATE_STATUS = os.environ.get("MOCK_DEVICE_ACTIVATE_STATUS", "")
 DEVICE_SECRET = "mocksecret0123456789abcdef0123456789abcdef"
@@ -274,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         reaches the terminal. The token is not checked: this server issues and
         verifies no credential, exactly like the real one.
         """
+        self.via_capability = self.path.startswith("/t/")
         if self.path.startswith("/t/"):
             rest = self.path[len("/t/"):]
             cut = rest.find("/")
@@ -285,7 +289,10 @@ class Handler(BaseHTTPRequestHandler):
         # Python requires the declaration to precede the first mention anywhere
         # in the function — including the read in the /v1/health branch below.
         global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT, LAST_CLIENT_VERSION
-        global DEVICE_PENDING, FEATURES, CONNECT_STATUS, DEVICE_ACTIVATE_STATUS
+        global DEVICE_PENDING, FEATURES, CONNECT_STATUS, DEVICE_ACTIVATE_STATUS, DATA_STATUS
+        if DATA_STATUS and self.via_capability:
+            self._send_json(int(DATA_STATUS), {"error": {"code": "unauthorized"}})
+            return
         # Read before write, and only for a route under test: the inspection
         # route itself is a request too, and capturing unconditionally would
         # have it overwrite the very value it was asked to report.
@@ -320,6 +327,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/_test/features"):
             FEATURES = [f for f in self.path.partition("?value=")[2].split(",") if f]
             self._send_json(200, {"features": FEATURES})
+            return
+        if self.path.startswith("/_test/data-status"):
+            DATA_STATUS = self.path.partition("?value=")[2]
+            self._send_json(200, {"status": DATA_STATUS})
             return
         if self.path.startswith("/_test/activate-status"):
             DEVICE_ACTIVATE_STATUS = self.path.partition("?value=")[2]

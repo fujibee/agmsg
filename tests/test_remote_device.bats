@@ -399,6 +399,35 @@ recorded_endpoint() {
   stop_engine_of cloned
 }
 
+@test "device pull: a bootstrap the data side refuses as invalid drops the approval, and the next run approves again" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_DATA_STATUS=401
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "saved approval was dropped"
+  [ -z "$(saved_approvals)" ]
+  curl -sS "$ENDPOINT/_test/data-status?value=" >/dev/null
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.codes')" = 2 ]
+  stop_engine cloned
+}
+
+@test "device pull: a name lookup the data side refuses as invalid drops the approval too" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_DATA_STATUS=401
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "saved approval was dropped"
+  [ -z "$(saved_approvals)" ]
+}
+
+@test "device pull: a data-side server error keeps the saved approval" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_DATA_STATUS=503
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 1 ]
+  lacks "$output" "dropped"
+  [ -s "$(saved_approvals)" ]
+}
+
 @test "device pull: a server without the feature gets the manual pull" {
   start_mock MOCK_TEAM_CIPHER_PROFILE=none
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
