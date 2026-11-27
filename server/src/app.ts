@@ -8,6 +8,7 @@ import * as duplicateKeyJson from "json-dup-key-validator";
 import type { Pool } from "pg";
 import { ZodError, z } from "zod";
 import { originFeatures, teamFeatures } from "./accounts/features.js";
+import { registerDeviceRoutes } from "./accounts/routes.js";
 import { registerCapabilityScope, redactSecretPath } from "./accounts/scope.js";
 import type { Config } from "./config.js";
 import { errorBody, DatabaseUnavailableError, ProtocolError } from "./errors.js";
@@ -137,6 +138,7 @@ export function createApp(
     app.setNotFoundHandler((_request, reply) => {
       void reply.status(404).send(errorBody(new ProtocolError(404, "not-found", "no such route")));
     });
+    void app.register(registerDeviceRoutes, { pool, config });
     void app.register(registerCapabilityScope, { pool, config, dataPlane });
   } else {
     void app.register(dataPlane, { pool, config });

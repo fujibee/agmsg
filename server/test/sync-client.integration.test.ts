@@ -53,6 +53,8 @@ describeDatabase("Stage-1 polling sync client", () => {
     // make that first connect a 409.
     const config: Config = {
       profile: "open",
+    ownerSecret: null,
+    publicUrl: null,
       databaseUrl: databaseUrl ?? "",
       host: "127.0.0.1", port: 8787, logLevel: "silent",
       retentionMaxLiveMessages: null,
