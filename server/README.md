@@ -78,6 +78,9 @@ silently.
 | `AGMSG_LIMIT_DEVICES` | devices | read and listed; enforced where devices are approved |
 | `AGMSG_RETENTION_MAX_LIVE_MESSAGES` | live messages per team | retains the oldest instead of refusing (see Retention) |
 
+A limit that is set is enforced in every profile (`AGMSG_PROFILE=open` as well
+as `accounts`); a configured value is never silently ignored.
+
 Each value is a canonical positive integer that fits a signed BIGINT. The
 limits that are set appear under `limits` in `GET /v1/capabilities`; see
 `spec/v1.md`.
