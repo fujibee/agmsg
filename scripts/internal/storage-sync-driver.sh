@@ -51,6 +51,10 @@ case "$op" in
              storage_sync_apply_pull "$@" ;;
   reprocess) command -v storage_sync_reprocess >/dev/null 2>&1 || exit 14
              storage_sync_reprocess "$@" ;;
+  history-position) command -v storage_sync_history_position >/dev/null 2>&1 || exit 14
+                    storage_sync_history_position "$@" ;;
+  start-after) command -v storage_sync_start_after >/dev/null 2>&1 || exit 14
+               storage_sync_start_after "$@" ;;
   resync-status) command -v storage_sync_resync_status >/dev/null 2>&1 || exit 14
                  storage_sync_resync_status "$@" ;;
   resync) command -v storage_sync_resync >/dev/null 2>&1 || exit 14
@@ -63,7 +67,7 @@ case "$op" in
               storage_sync_block_read_state "$@" ;;
   read-unblock) command -v storage_sync_unblock_read_state >/dev/null 2>&1 || exit 14
                 storage_sync_unblock_read_state "$@" ;;
-  *) echo "usage: storage-sync-driver.sh capabilities|prepare|reconcile|apply|reprocess|resync-status|resync|read-prepare|read-apply|read-block|read-unblock ..." >&2; exit 2 ;;
+  *) echo "usage: storage-sync-driver.sh capabilities|prepare|reconcile|apply|reprocess|history-position|start-after|resync-status|resync|read-prepare|read-apply|read-block|read-unblock ..." >&2; exit 2 ;;
 esac || rc=$?
 
 # The operation failed and its last statement was the one that ran out of busy

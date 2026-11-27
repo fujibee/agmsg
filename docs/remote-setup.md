@@ -209,6 +209,36 @@ The history should contain:
 <from> → <to>: hello from machine A
 ```
 
+## Extra: connecting by device approval
+
+Some servers let a machine join by approval instead of by a hand-carried
+address. A server says so in the `features` array of its unauthenticated
+`GET /v1/health`; the client reads that and nothing else (never the host name).
+When `device-approval` is listed, `connect` and `pull` do this and the rest of
+the command is unchanged:
+
+1. The client asks the server to open an approval and prints one URL and a
+   short code. Open the URL, check the code, approve.
+2. The server answers with the address this machine uses from then on. It is a
+   capability: whoever holds it can act as this machine. It is saved in a file
+   only you can read, recorded in the team's binding, and never printed.
+3. `connect` registers the team as usual, with its whole roster.
+
+If anything fails after you approved and before the binding is recorded, the
+local team is untouched and still works, the approved address is kept, and
+running the same command again does not ask you to approve again. A denied or
+expired approval changes nothing.
+
+`connect` through approval does not upload the messages the team already holds;
+only messages written from the moment you run the command are sent. That
+includes one you write while you are still approving. Pass `--with-history` to
+upload the existing history as the manual connect does. If the storage driver in
+use cannot start from now (only the SQLite driver can today), `connect` stops
+before anything is sent and says so; pass `--with-history` or use the manual
+connect. A server that does not list `device-approval` gets the manual connect,
+exactly as before, including the upload of the existing history. A team that is
+already connected stays as it is.
+
 ## Extra: end-to-end encryption
 
 The remote team's encryption choice is fixed by its first connect and cannot

@@ -692,6 +692,221 @@ _remote_http_get_json() {
   printf '%s' "$curl_output"
 }
 
+# --- device approval ---------------------------------------------------------
+#
+# Some servers let a machine join by approval instead of by a hand-carried
+# address: the user opens a URL, types a short code, and the server hands the
+# machine a data address. A server says it does this in the `features` array of
+# its unauthenticated GET /v1/health. Nothing else decides it: not the host
+# name, not the path, not a setting here. A health answer that is not 200, is
+# not JSON, has no `features`, or does not list "device-approval" leaves every
+# command exactly as it was.
+#
+# The data address the server returns is a capability: whoever holds it can act
+# as this machine. It is never printed, never put on a command line, and only
+# ever written to a 0600 file under the credentials directory.
+
+_REMOTE_DEVICE_CLIENT_ID="agmsg-cli"
+
+# _remote_http_json_call <method> <url> <body_file|-> <out_body_file> [<bearer>] -> prints http_code
+# One request, no team header (the device routes have no team yet). The bearer,
+# when given, goes in the 0600 curl config file, never in argv.
+_remote_http_json_call() {
+  local method="$1" url="$2" body_file="$3" out_file="$4" bearer="${5:-}" \
+    cfg curl_output curl_status=0 curl_err work_dir
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-curl.XXXXXX")"
+  trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
+  cfg="$work_dir/config"
+  curl_err="$work_dir/stderr"
+  : > "$cfg"
+  chmod 600 "$cfg"
+  {
+    printf 'url = "%s"\n' "$url"
+    printf 'request = "%s"\n' "$method"
+    printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
+    if [ "$body_file" != "-" ]; then
+      printf 'header = "Content-Type: application/json"\n'
+      printf 'data = "@%s"\n' "$(_remote_curl_path "$body_file")"
+    fi
+    if [ -n "$bearer" ]; then
+      printf 'header = "Authorization: Bearer %s"\n' "$(_remote_curl_quote "$bearer")"
+    fi
+    printf 'connect-timeout = "10"\n'
+    printf 'max-time = "15"\n'
+    printf 'max-filesize = "2097152"\n'
+  } > "$cfg"
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
+    :
+  else
+    curl_status=$?
+  fi
+  [ "$curl_status" -eq 0 ] || curl_output="000"
+  if [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ]; then
+    cat "$curl_err" >&2 || true
+  fi
+  rm -rf "$work_dir"
+  trap - EXIT INT TERM
+  printf '%s' "$curl_output"
+}
+
+# _remote_server_lists_feature <origin> <feature> -> 0 when GET <origin>/v1/health lists it
+_remote_server_lists_feature() {
+  local origin="$1" feature="$2" out code doc found
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-health.XXXXXX")"
+  code="$(_remote_http_json_call GET "${origin%/}/v1/health" - "$out" 2>/dev/null)" || code="000"
+  if [ "$code" != "200" ]; then rm -f "$out"; return 1; fi
+  doc="$(LC_ALL=C sed "s/'/''/g" "$out")"
+  rm -f "$out"
+  found="$(agmsg_sqlite_mem "SELECT CASE WHEN json_valid('$doc') AND json_type('$doc','\$.features')='array'
+      THEN (SELECT count(*) FROM json_each('$doc','\$.features') WHERE value='$(_agmsg_sqlesc "$feature")')
+      ELSE 0 END;" 2>/dev/null)" || return 1
+  [ "$found" = "1" ]
+}
+
+# _remote_device_pending_file <team> -> path of the saved, not-yet-used data address
+_remote_device_pending_file() { printf '%s' "$CRED_ROOT/device-address.$1"; }
+
+# _remote_device_field <doc> <json path> -> value or empty
+_remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
+
+# _remote_device_approve <origin> <team> -> prints the data address on stdout
+#
+# Runs the approval and activates the address. A failure after approval and
+# before the caller has used the address keeps the address in a 0600 file, so
+# the next run does not ask the user to approve again.
+_remote_device_approve() {
+  local origin="${1%/}" team="$2" pending machine body out code doc err interval deadline \
+    device_code user_code uri uri_complete address secret expires
+  pending="$(_remote_device_pending_file "$team")"
+  if [ -s "$pending" ]; then
+    echo "  using the address approved earlier for team '$team'" >&2
+    cat "$pending"
+    return 0
+  fi
+  machine="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
+  machine="$(printf '%s' "$machine" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+  [ -n "$machine" ] || machine="machine"
+  body="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-body.XXXXXX")"
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
+  printf '{"client_id":"%s","scope":"login","machine_name":"%s"}' \
+    "$_REMOTE_DEVICE_CLIENT_ID" "$machine" > "$body"
+  code="$(_remote_http_json_call POST "$origin/v1/device/code" "$body" "$out")" || code="000"
+  if [ "$code" != "200" ]; then
+    err="$(_remote_device_field "$(cat "$out")" '$.error')"
+    rm -f "$body" "$out"
+    echo "agmsg: the server did not open an approval (HTTP $code${err:+, $err}); nothing was changed" >&2
+    return 1
+  fi
+  doc="$(cat "$out")"
+  device_code="$(_remote_device_field "$doc" '$.device_code')"
+  user_code="$(_remote_device_field "$doc" '$.user_code')"
+  uri="$(_remote_device_field "$doc" '$.verification_uri')"
+  uri_complete="$(_remote_device_field "$doc" '$.verification_uri_complete')"
+  interval="$(_remote_device_field "$doc" '$.interval')"
+  expires="$(_remote_device_field "$doc" '$.expires_in')"
+  case "$interval" in ''|*[!0-9]*) interval=5 ;; esac
+  case "$expires" in ''|*[!0-9]*) expires=900 ;; esac
+  if [ -z "$device_code" ] || [ -z "$user_code" ] || [ -z "${uri_complete:-$uri}" ]; then
+    rm -f "$body" "$out"
+    echo "agmsg: the server's approval answer was incomplete; nothing was changed" >&2
+    return 1
+  fi
+  echo "To connect team '$team', open this address and approve it:" >&2
+  echo "  ${uri_complete:-$uri}" >&2
+  echo "  code: $user_code" >&2
+  echo "Waiting for approval (up to $((expires / 60)) minutes)..." >&2
+
+  printf '{"device_code":"%s","client_id":"%s"}' "$device_code" "$_REMOTE_DEVICE_CLIENT_ID" > "$body"
+  deadline=$(( $(date +%s) + expires ))
+  while :; do
+    code="$(_remote_http_json_call POST "$origin/v1/device/token" "$body" "$out")" || code="000"
+    doc="$(cat "$out" 2>/dev/null || true)"
+    if [ "$code" = "200" ]; then break; fi
+    err="$(_remote_device_field "$doc" '$.error')"
+    case "$err" in
+      authorization_pending) : ;;
+      slow_down)
+        interval="$(_remote_device_field "$doc" '$.interval')"
+        case "$interval" in ''|*[!0-9]*) interval=10 ;; esac ;;
+      access_denied)
+        rm -f "$body" "$out"
+        echo "agmsg: the approval was denied; nothing was changed" >&2; return 1 ;;
+      expired_token)
+        rm -f "$body" "$out"
+        echo "agmsg: the approval expired; run the command again for a new code. Nothing was changed" >&2; return 1 ;;
+      *)
+        if [ "$code" = "000" ]; then
+          : # a transient network failure: keep waiting until the deadline
+        else
+          rm -f "$body" "$out"
+          echo "agmsg: the server refused the approval (HTTP $code${err:+, $err}); nothing was changed" >&2
+          return 1
+        fi ;;
+    esac
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      rm -f "$body" "$out"
+      echo "agmsg: no approval before the code expired; run the command again. Nothing was changed" >&2
+      return 1
+    fi
+    sleep "$interval"
+  done
+  rm -f "$body"
+  address="$(_remote_device_field "$doc" '$.capability_url')"
+  rm -f "$out"
+  if [ -z "$address" ]; then
+    echo "agmsg: the server approved but sent no address; nothing was changed" >&2
+    return 1
+  fi
+  # Durably saved BEFORE it is activated or used: the server shows it once.
+  mkdir -p "$CRED_ROOT"
+  ( umask 077; printf '%s' "$address" > "$pending" ) || {
+    echo "agmsg: could not save the approved address; nothing was changed" >&2; return 1; }
+  chmod 600 "$pending" 2>/dev/null || true
+  secret="${address##*/t/}"; secret="${secret%%/*}"
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
+  code="$(_remote_http_json_call POST "$origin/v1/device/activate" - "$out" "$secret")" || code="000"
+  rm -f "$out"
+  case "$code" in
+    200|204) ;;
+    *) echo "agmsg: approved, but the server did not activate the address (HTTP $code); run the command again" >&2
+       rm -f "$pending"; return 1 ;;
+  esac
+  printf '%s' "$address"
+}
+
+# --- start from now -----------------------------------------------------------
+#
+# Whether connecting a team sends the messages it already holds. The manual
+# connect has always sent them; the device-approval connect does not unless the
+# caller passes --with-history. The default for each path is one value here, so
+# changing a path's default is this line and nothing else.
+_REMOTE_HISTORY_DEFAULT_MANUAL=1
+_REMOTE_HISTORY_DEFAULT_DEVICE=0
+
+# The one place that says what happens when the storage driver cannot start a
+# connection from now. Nothing has been sent when this runs.
+_remote_history_cannot_start_from_now() {
+  echo "agmsg: this storage driver cannot start from now, so this connect would upload the team's existing messages." >&2
+  echo "agmsg: nothing was sent and nothing was changed. Pass --with-history to upload them, or use the manual connect." >&2
+}
+
+# _remote_history_mark <team> -> prints the position, or fails when the driver cannot
+_remote_history_mark() {
+  bash "$SCRIPT_DIR/internal/storage-sync-driver.sh" history-position "$1" 2>/dev/null
+}
+
+# _remote_history_start_after <team> <cfg> <position>
+# Reads the binding just written and starts its push after <position>.
+_remote_history_start_after() {
+  local team="$1" cfg="$2" position="$3" server remote protocol
+  server="$(_remote_read_config_field "$cfg" '$.remote_binding.server_instance_id')"
+  remote="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
+  protocol="$(_remote_read_config_field "$cfg" '$.remote_binding.protocol_version')"
+  bash "$SCRIPT_DIR/internal/storage-sync-driver.sh" start-after \
+    "$team" "$server" "$remote" "$protocol" "$position"
+}
+
 # _remote_archive_replaced_binding <cfg_escaped> <new_server_instance_id> \
 #   <new_remote_team_id> <new_protocol_version> <stamp>
 #
@@ -1359,6 +1574,18 @@ cmd_pull() {
   [ -n "$team" ] || { echo "agmsg: pull requires a local team name" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
 
+  # Device approval, when the server offers it: the origin becomes the data
+  # address the rest of pull uses unchanged. A machine pulling holds no history
+  # of this team (the guard below refuses otherwise), so there is nothing to
+  # start from.
+  local device_pulled=0
+  if _remote_server_lists_feature "$endpoint" device-approval; then
+    endpoint="$(_remote_device_approve "$endpoint" "$team")" || exit 1
+    endpoint="${endpoint%/}"
+    _remote_validate_endpoint "$endpoint" || exit 1
+    device_pulled=1
+  fi
+
   # The name is normally enough. A team_id had to be carried between machines by
   # hand only because it stood in for authentication, and this server has none
   # to stand in for. --team-id remains for the case a name cannot settle -- two
@@ -1554,6 +1781,9 @@ cmd_pull() {
   if [ "$needs_key" -eq 1 ] && ! _remote_holds_current_key "$team" "$cfg"; then
     cannot_read=1
   fi
+  # The binding is recorded, so the saved copy of the approved address has done
+  # its job.
+  [ "$device_pulled" -eq 0 ] || rm -f "$(_remote_device_pending_file "$team")"
 
   if [ "$cannot_read" -ne 0 ]; then
     echo "Pulled '$pulled_name' into local team '$team' ($imported message(s))."
@@ -2583,16 +2813,17 @@ cmd_connect() {
   # the permission (docs/design/remote-sync.md). The team_id and every
   # member_id were minted locally at team creation; the server records what it
   # is sent and never originates a team.
-  local endpoint="" team="" e2ee=0 positional=()
+  local endpoint="" team="" e2ee=0 with_history="" positional=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --endpoint) endpoint="${2:?--endpoint requires a value}"; shift 2 ;;
       --endpoint=*) endpoint="${1#--endpoint=}"; shift ;;
       --e2ee) e2ee=1; shift ;;
+      --with-history) with_history=1; shift ;;
       *) positional+=("$1"); shift ;;
     esac
   done
-  : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] <team>}"
+  : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] [--with-history] <team>}"
   # The plaintext-address rule protects message bodies that would otherwise
   # cross the network unencrypted. Under --e2ee those bodies are sealed before
   # they ever reach this check, so the rule has nothing left to protect here --
@@ -2603,7 +2834,7 @@ cmd_connect() {
   fi
   endpoint="${endpoint%/}"
   team="${positional[0]:-}"
-  [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] <team>" >&2; exit 1; }
+  [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] [--with-history] <team>" >&2; exit 1; }
 
   local cfg team_id team_name key_id binding_cipher
   cfg="$(_remote_team_config "$team")"
@@ -2619,6 +2850,39 @@ cmd_connect() {
       team_id="$(_remote_read_config_field "$cfg" '$.team_id')"
       ;;
   esac
+  # Device approval, when the server offers it and this team is not already
+  # connected. `endpoint` is then the server's origin; the approval turns it
+  # into the data address the rest of this command uses unchanged. A team that
+  # is already connected is left as it is -- a manual end-to-end key in
+  # particular is not moved here -- and the command says so.
+  local device_approved=0 live_endpoint live_disconnected history_pos="" use_device=0
+  live_endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
+  live_disconnected="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  if [ "$e2ee" -eq 0 ] && _remote_server_lists_feature "$endpoint" device-approval; then
+    use_device=1
+  fi
+  if [ -z "$with_history" ]; then
+    if [ "$use_device" -eq 1 ]; then with_history="$_REMOTE_HISTORY_DEFAULT_DEVICE"
+    else with_history="$_REMOTE_HISTORY_DEFAULT_MANUAL"; fi
+  fi
+  # Taken before the approval, so a message written while the user is still
+  # approving is newer than the command and is sent. When the driver cannot
+  # answer, stop here, before anything is asked of the server.
+  if [ "$with_history" -eq 0 ]; then
+    history_pos="$(_remote_history_mark "$team")" || {
+      _remote_history_cannot_start_from_now; exit 1; }
+  fi
+  if [ "$use_device" -eq 1 ]; then
+    if [ -n "$live_endpoint" ] && [ "$live_endpoint" != "null" ] \
+       && { [ -z "$live_disconnected" ] || [ "$live_disconnected" = "null" ]; }; then
+      echo "Team '$team' is already connected; it stays as it is (a manual end-to-end key is not moved by device approval)." >&2
+    else
+      endpoint="$(_remote_device_approve "$endpoint" "$team")" || exit 1
+      endpoint="${endpoint%/}"
+      _remote_validate_endpoint "$endpoint" || exit 1
+      device_approved=1
+    fi
+  fi
   key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
   # Asked HERE: before the key is minted and before the registration POST.
   # Every SHA-256 in the e2ee path -- the fingerprint printed by `key.sh
@@ -2725,6 +2989,8 @@ cmd_connect() {
   # the single place that knows the answer after either.
   local remote_team_name
   remote_team_name="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_name')"
+  # The address is recorded in the binding now; the saved copy has done its job.
+  [ "$device_approved" -eq 0 ] || rm -f "$(_remote_device_pending_file "$team")"
 
   if [ "$e2ee" -eq 0 ] && ! _remote_binding_allows_cipher "$cfg" none; then
     echo "agmsg: this remote does not allow $binding_cipher; no sync engine was started." >&2
@@ -2750,6 +3016,15 @@ cmd_connect() {
     echo "agmsg: connect recorded the binding but the per-team store migration failed — see 'remote status $team'." >&2
     exit 1
   }
+
+  # The store now holds the binding, so the push can be told where to begin.
+  # Before the engine exists: its first cycle would otherwise offer the history.
+  if [ "$with_history" -eq 0 ] && [ -n "$history_pos" ]; then
+    _remote_history_start_after "$team" "$cfg" "$history_pos" || {
+      echo "agmsg: could not start the push from now; the sync engine was not started, so nothing was sent. Run: remote.sh disconnect $team" >&2
+      exit 1
+    }
+  fi
 
   # Start the polling engine in the background: it pushes what we have, pulls
   # anything already there, and keeps running so new messages flow both ways as

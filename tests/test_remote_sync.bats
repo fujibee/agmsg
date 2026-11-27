@@ -2213,3 +2213,64 @@ _1966_cursor_only() {
   _1966_cursor_only 2
   [ "$(_1966_sql "SELECT COUNT(*) FROM sync_quarantine;")" -eq 0 ]
 }
+
+# --- start after a position -------------------------------------------------
+
+_candidate_count() {
+  printf '%s\n' "$1" | jq -s '[.[] | select(.type=="sync_push_candidate")] | length'
+}
+
+@test "sync contract: history position is 0 for an empty team and grows with each message" {
+  [ "$(storage_sync_history_position demo)" = 0 ]
+  storage_send demo alice bob "one" >/dev/null
+  first=$(storage_sync_history_position demo)
+  [ "$first" -ge 1 ]
+  storage_send demo alice bob "two" >/dev/null
+  [ "$(storage_sync_history_position demo)" -gt "$first" ]
+}
+
+@test "sync contract: a binding started after a position offers only what came later" {
+  local pos
+  storage_send demo alice bob "old one" >/dev/null
+  storage_send demo alice bob "old two" >/dev/null
+  pos=$(storage_sync_history_position demo)
+  storage_sync_start_after demo "$SERVER_ID" "$TEAM_ID" 1 "$pos"
+  # Non-vacuity: without a start the same store offers both.
+  [ "$(_candidate_count "$(prepare_push)")" -eq 0 ]
+  storage_send demo alice bob "new one" >/dev/null
+  [ "$(_candidate_count "$(prepare_push)")" -eq 1 ]
+}
+
+@test "sync contract: without start-after the same history is offered (the control)" {
+  storage_send demo alice bob "old one" >/dev/null
+  storage_send demo alice bob "old two" >/dev/null
+  [ "$(_candidate_count "$(prepare_push)")" -eq 2 ]
+}
+
+@test "sync contract: start-after is idempotent and never moves back" {
+  local pos
+  storage_send demo alice bob "old" >/dev/null
+  pos=$(storage_sync_history_position demo)
+  storage_sync_start_after demo "$SERVER_ID" "$TEAM_ID" 1 "$pos"
+  storage_send demo alice bob "newer" >/dev/null
+  # A second call with an older position must not bring "old" back into view.
+  storage_sync_start_after demo "$SERVER_ID" "$TEAM_ID" 1 0
+  [ "$(_candidate_count "$(prepare_push)")" -eq 1 ]
+}
+
+@test "sync contract: start-after keeps legacy history out too (the rewind does not undo it)" {
+  _seed_legacy_history
+  local pos
+  pos=$(storage_sync_history_position demo)
+  storage_sync_start_after demo "$SERVER_ID" "$TEAM_ID" 1 "$pos"
+  [ "$(_candidate_count "$(prepare_push)")" -eq 0 ]
+  storage_send demo alice bob "after the start" >/dev/null
+  [ "$(_candidate_count "$(prepare_push)")" -eq 1 ]
+}
+
+@test "sync contract: start-after refuses a position that is not a number" {
+  run storage_sync_start_after demo "$SERVER_ID" "$TEAM_ID" 1 "12;drop"
+  [ "$status" -eq 13 ]
+  run storage_sync_start_after demo "$SERVER_ID" "$TEAM_ID" 1 ""
+  [ "$status" -eq 13 ]
+}
