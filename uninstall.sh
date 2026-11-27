@@ -8,7 +8,7 @@ set -euo pipefail
 # but only when explicitly asked for.
 #
 # Usage:
-#   ./uninstall.sh                    # This install only (confirms each step)
+#   ./uninstall.sh                    # This install only (asks before removing anything)
 #   ./uninstall.sh --yes              # This install only, no confirmation
 #   ./uninstall.sh --keep-data        # Remove skill but keep DB and teams
 #   ./uninstall.sh --all              # Every agmsg install on the machine
@@ -847,6 +847,28 @@ else
     done
   fi
   echo ""
+
+  # Asked here, before anything is removed (#2044). The question used to sit
+  # inside _uninstall_one, after the commands, hooks, skill copies and shims
+  # were already gone and before the Codex writable_roots and the other skill
+  # files went whatever the answer: "n", or no answer at all (stdin from
+  # /dev/null), still left the install without its commands and hooks.
+  # The same two questions --all asks: the install, then separately its data.
+  if [ "$AUTO_YES" != true ]; then
+    echo "  This removes its slash command and hooks in every joined project, its"
+    echo "  skill copies and launcher shims, its Codex writable_roots entries and"
+    echo "  its skill directory."
+    if ! confirm "Remove $(basename "$SELF_SKILL_DIR")?"; then
+      echo "  Aborted. Nothing was changed."
+      echo ""
+      exit 0
+    fi
+    if [ "$KEEP_DATA" != true ] && ! confirm "Also remove its DB (message history) and teams?"; then
+      KEEP_DATA=true
+    fi
+    # Both answers are in: _uninstall_one must not ask again.
+    AUTO_YES=true
+  fi
 
   _uninstall_one "$SELF_SKILL_DIR"
 
