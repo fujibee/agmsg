@@ -51,6 +51,8 @@ EOF
   cat > "$FAKEBIN/lsof" <<'EOF'
 #!/usr/bin/env bash
 # lsof -a -p <pid> -d cwd -Fn
+# a one-shot hook, so a test can change state while the proof is running
+if [ -f "$PSDIR/on_lsof" ]; then h="$PSDIR/on_lsof.running"; mv "$PSDIR/on_lsof" "$h"; bash "$h"; rm -f "$h"; fi
 f="$PSDIR/cwd/$3"; [ -f "$f" ] || exit 1
 printf 'p%s\nn%s\n' "$3" "$(cat "$f")"
 EOF
@@ -146,6 +148,60 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   _seat t-late
   run agmsg_terminal_self_env
   [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_holds_this_thread" ]
+}
+
+@test "a slow launch (thread made 11 s after its TUI started) is found when that TUI is the only one" {
+  _under_daemon
+  _thread t-slow /work/a 589
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-slow
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "slow launch: two TUIs started in the window before the thread are not told apart" {
+  _under_daemon
+  _thread t-slow /work/a 560
+  _tui 91001 10:00 /work/a w1:pC
+  _tui 91002 09:40 /work/a w1:pN
+  _seat t-slow
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:several_codex_tuis_may_hold_this_thread" ]
+}
+
+@test "slow launch: a thread that is not the TUI's first (another one came before it) is unknown" {
+  _under_daemon
+  _thread t-first /work/a 599
+  _thread t-second /work/a 570
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-second
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:another_thread_was_opened_since_its_tui_started" ]
+  # the first one is still found by the start-time rule
+  _seat t-first
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "slow launch: a thread opened after this one in the same TUI's cwd makes it unknown (the TUI may be there now)" {
+  _under_daemon
+  _thread t-old /work/a 589
+  _thread t-new /work/a 100
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-old
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:another_thread_was_opened_since_its_tui_started" ]
+}
+
+@test "slow launch: a TUI started in another cwd in the window does not count" {
+  _under_daemon
+  _thread t-slow /work/a 589
+  _tui 91001 10:00 /work/a w1:pC
+  _tui 91002 09:55 /work/other w1:pN
+  _seat t-slow
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "a TUI in another cwd is not a match even at the same second" {
@@ -426,4 +482,199 @@ EOT
   [ "$status" -eq 0 ]
   refute grep -q 'nested terminals' <<<"$stderr"
   grep -Fq 'tmux:/tmp/ts:%3' "$(agmsg_spawn_path seatteam alice)"
+}
+
+# --- #2050: inside Codex's sandbox ps is refused; agmsgd records the pane ----------
+# A sandboxed tool shell cannot list processes, so the ancestry walk cannot tell
+# whether it runs under the shared daemon. actas leaves a request instead, and the
+# fill script (what agmsgd runs, outside the sandbox) proves and records the pane.
+
+_minimal_herdr() {   # the labelling fake from test_self_name.bats
+  export ARGV_LOG="$BATS_TEST_TMPDIR/herdr.argv"; : > "$ARGV_LOG"
+  export FAKE_HERDR_STATE="$FAKEBIN/herdr.labels"; : > "$FAKE_HERDR_STATE"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+state='$FAKE_HERDR_STATE'
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  # This fixture exercises naming marks with an initially unnamed agent.
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
+elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  # a one-shot hook, so a test can change state while the record is being written
+  if [ -f "$FAKEBIN/on_rename" ]; then mv "$FAKEBIN/on_rename" "$FAKEBIN/on_rename.running"; bash "$FAKEBIN/on_rename.running"; rm -f "$FAKEBIN/on_rename.running"; fi
+  grep -v "^\$3	" "\$state" > "\$state.n" 2>/dev/null || : > "\$state.n"
+  printf '%s\t%s\n' "\$3" "\$4" >> "\$state.n"; mv "\$state.n" "\$state"
+elif [ "\$1" = pane ] && [ "\$2" = list ]; then
+  rows=""
+  while IFS=\$'\t' read -r pid lbl; do
+    [ -n "\$pid" ] || continue
+    [ -n "\$rows" ] && rows="\$rows,"
+    rows="\$rows{\"pane_id\":\"\$pid\",\"label\":\"\$lbl\"}"
+  done < "\$state"
+  printf '{"id":"1","result":{"panes":[%s]}}\n' "\$rows"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  lbl="\$(awk -F'\t' -v p="\$3" '\$1 == p { print \$2 }' "\$state" 2>/dev/null)"
+  if [ -n "\$lbl" ]; then
+    printf '{"result":{"pane":{"agent_status":"idle","label":"%s","terminal_title":"t"}}}\n' "\$lbl"
+  else
+    printf '{"result":{"pane":{"agent_status":"idle","terminal_title":"t"}}}\n'
+  fi
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+_fill() {   # run the fill script the way agmsgd does: none of the seat's terminal env
+  run env -u HERDR_ENV -u HERDR_PANE_ID -u TMUX -u TMUX_PANE -u CODEX_THREAD_ID \
+    bash "$SKILL_DIR/scripts/internal/codex-pane-fill.sh" "$1"
+}
+
+@test "sandboxed codex actas (ps refused): a request for agmsgd is left, the line says pending, nothing is recorded" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=pending team=seatteam reason=.*recorded from outside the sandbox by agmsgd')" -eq 1 ]
+  refute grep -q '^placement=unrecorded' <<<"$output"
+  req="$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ -f "$req" ]
+  grep -qx 'team=seatteam' "$req"
+  grep -qx 'agent=alice' "$req"
+  grep -qx 'thread=t-aaa' "$req"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill (agmsgd, outside the sandbox): the seat's pane is proven from its thread and recorded; the request is removed" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=recorded reason=herdr:$HERDR_SOCKET_PATH:w1:pC" ]
+  refute test -e "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:w1:pC" "$(agmsg_spawn_path seatteam alice)"
+  # the daemon starter's pane (the seat's inherited w1:p17) was never used
+  refute grep -Fq 'w1:p17' "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: a request for a thread the seat has left is dropped, nothing is recorded" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  # the seat moved on to another thread since it asked
+  sed -i.bak 's/^thread=t-aaa$/thread=t-zzz/' "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  mv "$SKILL_DIR/run/codex-pane-request.t-aaa" "$SKILL_DIR/run/codex-pane-request.t-zzz"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-zzz"
+  [ "$status" -eq 0 ]
+  case "$output" in "state=dropped reason=the seat's role-session no longer names thread t-zzz") ;; *) echo "$output"; return 1 ;; esac
+  refute test -e "$SKILL_DIR/run/codex-pane-request.t-zzz"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: a thread no TUI can be tied to says why, records nothing, and is not retried" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _tui 91002 10:01 /work/a w1:pN
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=unrecorded reason=several_codex_tuis_may_hold_this_thread" ]
+  refute test -e "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+_role_moves_to() {   # <hook file> <thread>: a script that moves the seat's role-session to <thread>
+  printf 'f="%s/run/role-session.seatteam__alice"; sed "s/^session=.*/session=%s/" "$f" > "$f.n" && mv "$f.n" "$f"\n' "$SKILL_DIR" "$2" > "$1"
+}
+
+@test "fill: the seat moves to another thread while its pane is being proven -- dropped, nothing recorded" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _role_moves_to "$PSDIR/on_lsof" t-new
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being proven" ]
+  refute test -e "$PSDIR/on_lsof"            # the hook did run, during the proof
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: the seat moves to another thread while its record is being written -- the compare-and-set writes nothing" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _role_moves_to "$FAKEBIN/on_rename" t-new
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being recorded" ]
+  refute test -e "$FAKEBIN/on_rename"        # the hook did run, during the write
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: the project recorded is the role-session's, not the request's" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  sed -i.bak 's#^project=.*#project=/somewhere/else#' "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$output" = "state=recorded reason=herdr:$HERDR_SOCKET_PATH:w1:pC" ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute grep -Fq /somewhere/else "$(agmsg_spawn_path seatteam alice)"
+  grep -Fq "$BATS_TEST_TMPDIR/proj" "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: a newer actas that wrote the same pane with a new project mid-fill keeps its record (no lost update)" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  rec="$(agmsg_spawn_path seatteam alice)"
+  # the other writer: the seat's new actas moves its role first, then records the same pane for a new project
+  _role_moves_to "$FAKEBIN/on_rename" t-new
+  printf 'mkdir -p "%s"; printf "herdr:%s:w1:pC\\t/new/project\\tcodex\\n" > "%s"\n' "$(dirname "$rec")" "$HERDR_SOCKET_PATH" "$rec" >> "$FAKEBIN/on_rename"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being recorded" ]
+  refute test -e "$FAKEBIN/on_rename"
+  [ "$(cat "$rec")" = "$(printf 'herdr:%s:w1:pC\t/new/project\tcodex' "$HERDR_SOCKET_PATH")" ]
+  grep -qx 'session=t-new' "$SKILL_DIR/run/role-session.seatteam__alice"
 }

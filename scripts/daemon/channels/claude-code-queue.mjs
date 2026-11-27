@@ -442,7 +442,10 @@ export function createClaudeCodeQueueChannel({
       for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       for (const key of book.keys()) {
         if (!registeredKeys.has(key)) {
+          // Logged once, then dropped: a renamed or departed seat is not kept as a
+          // stale row under its old name until agmsgd restarts (#2050).
           seatPoller.changeState(key, () => saveSeat(book, { seat: key, state: "unaddressable", reason: "seat_registration_missing" }));
+          book.delete(key);
         }
       }
       // Continue after an interrupted seat so repeated cycle deadlines cannot

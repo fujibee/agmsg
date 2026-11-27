@@ -619,7 +619,7 @@ test('seat state lives in memory: polling writes nothing to install.db and the s
   await channel.stop();
 });
 
-test('a seat that left the roster is marked unaddressable, not deleted, and a skipped team row goes when its team is readable again', async (t) => {
+test('a seat that left the roster (left or renamed) is dropped, not kept under its old name, and a skipped team row goes when its team is readable again', async (t) => {
   const { state } = channelFixture(t);
   let roster = { state: 'ok', seats: state.options.listSeats().seats, skipped: [] };
   const channel = createClaudeCodeQueueChannel({
@@ -629,7 +629,7 @@ test('a seat that left the roster is marked unaddressable, not deleted, and a sk
   assert.equal(seatBrief(channel, JSON.stringify(['test', 'alice'])).state, 'addressable');
   roster = { state: 'ok', seats: [], skipped: [{ team: 'broken', reason: 'team_roster_unreadable' }] };
   await channel.pollOnce();
-  assert.equal(seatBrief(channel, JSON.stringify(['test', 'alice'])).reason, 'seat_registration_missing');
+  assert.equal(seatBrief(channel, JSON.stringify(['test', 'alice'])), undefined);
   assert.equal(seatBrief(channel, JSON.stringify(['broken', ''])).reason, 'team_roster_unreadable');
   roster = { state: 'ok', seats: [], skipped: [] };
   await channel.pollOnce();

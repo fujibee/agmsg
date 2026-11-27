@@ -290,16 +290,16 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   agmsg_self_proof() { printf 'disproved\tpane_process_not_ancestor\n'; return 1; }
   agmsg_self_rename_on_action team alice claude-code
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
-  [ "$(_mark team alice | cut -f3)" = skipped:unproved:disproved ]
+  [ "$(_mark team alice | cut -f3)" = skipped:unproved:disproved:pane_process_not_ancestor ]
 }
 
-@test "the proof says undetermined -- never poke (#1206)" {
+@test "the proof says undetermined -- never poke, and the mark carries the proof's reason (#1206, #2050)" {
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   export FAKE_TITLE='wrong-name'
   agmsg_self_proof() { printf 'undetermined\towner_absent\n'; return 2; }
   agmsg_self_rename_on_action team alice claude-code
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
-  [ "$(_mark team alice | cut -f3)" = skipped:unproved:undetermined ]
+  [ "$(_mark team alice | cut -f3)" = skipped:unproved:undetermined:owner_absent ]
 }
 
 @test "self-proof.sh is unavailable -- treated as unsupported, never poke (#1206)" {

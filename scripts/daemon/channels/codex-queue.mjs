@@ -608,7 +608,10 @@ export function createCodexQueueChannel({
       const knownKeys = new Set([...registeredKeys, ...pendingKeys]);
       for (const key of book.keys()) {
         if (!knownKeys.has(key)) {
+          // Logged once, then dropped: a renamed or departed seat is not kept as a
+          // stale row under its old name until agmsgd restarts (#2050).
           seatPoller.changeState(key, () => saveSeat(book, { seat: key, state: "unaddressable", reason: "seat_registration_missing" }));
+          book.delete(key);
         }
       }
       // Sequential processing also serializes codex queue writes that share a

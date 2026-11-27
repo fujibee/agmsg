@@ -1471,6 +1471,14 @@ agmsg_terminal_self_env() {
   esac
 }
 
+# The one write of a placement record by the naming path below. A caller that
+# writes on a seat's behalf from outside (scripts/internal/codex-pane-fill.sh,
+# #2050) redefines it after sourcing this file, so that the write is a
+# compare-and-set against the seat's role-session under that record's lock.
+_agmsg_placement_write_record() {   # <record path> <row>
+  agmsg_write_atomic "$1" "$2"
+}
+
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}" retire="${7:-}" instance="${8:-}" replace="${9:-}"
@@ -1889,7 +1897,7 @@ agmsg_terminal_name_self() {
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename): a failed write must not truncate a correct existing
   # record. agmsg_write_atomic adds the trailing newline, so pass the row without.
-  agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$project" "$type")" 2>/dev/null || {
+  _agmsg_placement_write_record "$rec" "$(printf '%s\t%s\t%s' "$ref" "$project" "$type")" 2>/dev/null || {
     echo "agmsg: named the pane but could not write its record ($rec)" >&2; return 1
   }
   # This seat's record is in place: now the record it replaced can go. The

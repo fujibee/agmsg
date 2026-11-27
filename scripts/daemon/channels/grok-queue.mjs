@@ -418,7 +418,10 @@ export function createGrokQueueChannel({
         if (!registeredKeys.has(key)) {
           pendingBackoff.delete(key);
           lastNotifiedMarker.delete(key);
-          saveSeat(book, { seat: key, state: "unaddressable", reason: "seat_registration_missing" });
+          // Logged once, then dropped: a renamed or departed seat is not kept as a
+          // stale row under its old name until agmsgd restarts (#2050).
+          log(`channel: seat ${key} left the roster (seat_registration_missing); its row is dropped`);
+          book.delete(key);
         }
       }
       const start = seats.findIndex(seat => seatKey(seat.team, seat.agent) === resumeAfter) + 1;
