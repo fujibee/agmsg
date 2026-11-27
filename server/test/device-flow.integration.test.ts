@@ -93,10 +93,10 @@ describeDatabase("device flow", () => {
     await admin.end();
   });
 
-  it("leaves team_name out, and still names team_id, when the server has no row for the team yet", async () => {
+  it("leaves both team fields out when the server has no row for the team yet", async () => {
     const unregistered = "018f3f7e-0000-7000-8000-0000000000e9";
     const { ready } = await mint("first-connect", { team_id: unregistered });
-    expect(ready.team_id).toBe(unregistered);
+    expect("team_id" in ready).toBe(false);
     expect("team_name" in ready).toBe(false);
   });
 
