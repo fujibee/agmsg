@@ -5,6 +5,7 @@ import { createApp } from "../src/app.js";
 import { DEVICES_LIMIT_LOCK } from "../src/accounts/device-flow.js";
 import type { Config } from "../src/config.js";
 import { migrate } from "../src/db.js";
+import { testConfig } from "./helpers/config.js";
 
 // The device limit refuses the grant that would pass it, at the moment the device
 // would be minted, and leaves the grant approved so a later poll can succeed.
@@ -25,12 +26,10 @@ describeDatabase("device limit", () => {
   let cookie = "";
   let counter = 0;
 
-  const config: Config = {
+  const config: Config = testConfig({
     profile: "accounts", ownerSecret, publicUrl: origin, deviceClientIds: ["agmsg-cli"],
-    databaseUrl: databaseUrl ?? "", host: "127.0.0.1", port: 0,
-    logLevel: "silent", retentionMaxLiveMessages: null,
-    limits: { devices: 2n, teams: null },
-  };
+    databaseUrl: databaseUrl ?? "", limits: { devices: 2n, teams: null },
+  });
 
   const address = () => `10.1.${Math.floor(counter / 250)}.${(counter += 1) % 250 + 1}`;
   const post = (url: string, payload: unknown, headers = json) =>
