@@ -3031,6 +3031,17 @@ cmd_connect() {
       _remote_adopt_registration "$team" "$cfg" "$endpoint" "$team_id" "$binding_cipher" || exit 1
     elif [ "$http_code" != "200" ]; then
       echo "agmsg: connect failed — $(_remote_endpoint_display "$endpoint")/v1/connect returned HTTP $http_code" >&2
+      # An approved address the data side says is gone (401, 410) can never
+      # work again, however many times it is retried, so the saved approval
+      # goes and the next run asks for a new one. Any other failure -- a server
+      # error, an unreachable data host -- may pass, so the approval is kept.
+      case "$http_code" in
+        401|410)
+          if [ "$device_approved" -eq 1 ]; then
+            rm -f "$(_remote_device_pending_file "$device_origin" "$team")"
+            echo "agmsg: the approved address was refused as no longer valid; the saved approval was dropped. Run the command again to approve again." >&2
+          fi ;;
+      esac
       exit 1
     else
       _remote_write_binding "$cfg" "$endpoint" "$binding_cipher" "$resp_file" || exit 1

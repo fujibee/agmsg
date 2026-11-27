@@ -26,24 +26,43 @@ teardown() {
     [ -f "$pidfile" ] || continue
     pid="$(cat "$pidfile" 2>/dev/null || true)"
     [[ "$pid" =~ ^[1-9][0-9]{0,9}$ ]] || continue
-    kill_if_cmdline "$pid" "remote-sync.mjs"
+    ours_engine "$pid"
   done
-  [ -z "$MOCK_PID" ] || kill_if_cmdline "$MOCK_PID" "mock_remote_server.py"
-  [ -z "$MOCK_PID2" ] || kill_if_cmdline "$MOCK_PID2" "mock_remote_server.py"
+  [ -z "$MOCK_PID" ] || ours_mock "$MOCK_PID"
+  [ -z "$MOCK_PID2" ] || ours_mock "$MOCK_PID2"
   teardown_test_env
 }
 
-# kill_if_cmdline <pid> <fragment>: TERM the pid, then wait for it, only when its
-# current command line (read the way the product reads it) contains <fragment>.
-kill_if_cmdline() {
-  local pid="$1" fragment="$2" cmdline
+# pid_is_ours <pid> <fragment>...: true only when the pid's CURRENT command line
+# contains every fragment. The fragments name what only this test started: its
+# own install's absolute script path, or its own port file. A bare program name
+# would also match another seat's or install's process after a pid is reused.
+pid_is_ours() {
+  local pid="$1" cmdline fragment; shift
   # shellcheck disable=SC1091
   . "$SCRIPTS/lib/compat.sh"
   cmdline="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
-  case "$cmdline" in *"$fragment"*) ;; *) return 0 ;; esac
-  kill "$pid" 2>/dev/null || true
-  wait_for_pid_exit "$pid" || kill -KILL "$pid" 2>/dev/null || true
+  [ -n "$cmdline" ] || return 1
+  for fragment in "$@"; do
+    case "$cmdline" in *"$fragment"*) ;; *) return 1 ;; esac
+  done
+  return 0
 }
+
+# kill_if_ours <pid> <fragment>...: TERM, wait, and KILL only if it is STILL ours
+# when the wait ends (the pid may have been recycled while we waited).
+kill_if_ours() {
+  local pid="$1"
+  pid_is_ours "$@" || return 0
+  kill "$pid" 2>/dev/null || true
+  if ! wait_for_pid_exit "$pid"; then
+    if pid_is_ours "$@"; then kill -KILL "$pid" 2>/dev/null || true; fi
+  fi
+}
+
+# the engine this install started, and the mock this test started
+ours_engine() { kill_if_ours "$1" "$SCRIPTS/internal/remote-sync.mjs"; }
+ours_mock() { kill_if_ours "$1" "mock_remote_server.py" "$TEST_SKILL_DIR/"; }
 
 # start_mock [VAR=value ...]: the fixture on an OS-assigned port, with the
 # given knobs. Sets ENDPOINT.
@@ -52,7 +71,7 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
 
 start_mock() {
   : > "$TEST_SKILL_DIR/server.port"
-  env "$@" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+  env "$@" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 "$TEST_SKILL_DIR/server.port" \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_PID=$!
   wait_for_file_contains "$TEST_SKILL_DIR/server.port" '^[0-9][0-9]*$'
@@ -68,7 +87,7 @@ lacks() { case "$1" in *"$2"*) return 1 ;; esac; return 0; }
 start_second_mock() {
   local port_file="$TEST_SKILL_DIR/server2.port"
   : > "$port_file"
-  env "$@" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+  env "$@" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 "$port_file" \
     </dev/null > "$port_file" 2>"$TEST_SKILL_DIR/server2.log" 3>&- &
   MOCK_PID2=$!
   wait_for_file_contains "$port_file" '^[0-9][0-9]*$'
@@ -88,7 +107,7 @@ stop_engine() {
   pidfile="$TEST_SKILL_DIR/run/remote-sync.$team.pid"
   [ -f "$pidfile" ] || return 0
   pid="$(cat "$pidfile")"
-  kill_if_cmdline "$pid" "remote-sync.mjs"
+  ours_engine "$pid"
   rm -f "$pidfile"
 }
 stop_engine_of() { stop_engine "$1"; }
@@ -255,6 +274,34 @@ recorded_endpoint() {
   case "$(recorded_endpoint)" in "$ENDPOINT2"/t/*) ;; *) return 1 ;; esac
   # The first server's approval is still saved, under its own name.
   [ "$(saved_approvals | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "device connect: an approved address the data side calls invalid is dropped, even once activated, and the next run asks again" {
+  start_mock MOCK_FEATURES=device-approval MOCK_CONNECT_STATUS=500
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  # Activated and saved: the 500 came after the activation took.
+  [ "$(saved_approvals | head -1 | xargs sed -n 3p)" = 1 ]
+  # The credential is revoked behind our back; the re-run reuses the saved record
+  # and is told so.
+  curl -sS "$ENDPOINT/_test/connect-status?value=401" >/dev/null
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  has "$output" "saved approval was dropped"
+  [ -z "$(saved_approvals)" ]
+  # And the way back is open: a new approval.
+  curl -sS "$ENDPOINT/_test/connect-status?value=" >/dev/null
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.codes')" = 2 ]
+}
+
+@test "device connect: a data-side server error keeps the saved approval (not every failure is terminal)" {
+  start_mock MOCK_FEATURES=device-approval MOCK_CONNECT_STATUS=503
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  [ -s "$(saved_approvals)" ]
+  lacks "$output" "dropped"
 }
 
 @test "device connect: an activation the server could not take keeps the approval and the re-run retries it" {
