@@ -72,6 +72,11 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
   }
   assert.notEqual(fixture.primary.teamId, fixture.foreign.teamId, "fixtures must contain two separately owned teams");
   text(fixture.primary.teamName, "fixture.primary.teamName");
+  assert.ok(Object.hasOwn(fixture, "expectedTokenTeam"), "fixture.expectedTokenTeam is required (null for account-scoped approval)");
+  if (fixture.expectedTokenTeam !== null) {
+    keys(fixture.expectedTokenTeam, ["teamId", "teamName"], "expected token team");
+    assert.ok(fixture.expectedTokenTeam.teamId === fixture.primary.teamId && fixture.expectedTokenTeam.teamName === fixture.primary.teamName, "expected token team must match the primary fixture");
+  }
   assert.equal(typeof fixture.approveGrant, "function", "fixture.approveGrant is required");
   assert.equal(typeof fixture.dispose, "function", "fixture.dispose is required");
   assert.ok(fixture.expectedLimits && typeof fixture.expectedLimits === "object" && !Array.isArray(fixture.expectedLimits), "fixture.expectedLimits is required (empty for unlimited)");
@@ -185,6 +190,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       keys(response.body, ["capability_url", "machine_name", "scope", "org"], "approved token", ["team_id", "team_name"]);
       const hasTeam = Object.hasOwn(response.body, "team_id");
       assert.equal(hasTeam, Object.hasOwn(response.body, "team_name"), "token team fields must be present together");
+      assert.equal(hasTeam, fixture.expectedTokenTeam !== null, "token team presence must match the fixture contract");
       if (hasTeam) {
         assert.ok(typeof response.body.team_id === "string" && UUID_V7.test(response.body.team_id), "token team id must be UUIDv7");
         text(response.body.team_name, "token team name");
