@@ -86,12 +86,15 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
         }
       }
     });
-    // When a device last fetched, for the owner's device list. Written on
-    // GET /v1/messages at most once a minute, so a polling client costs one
-    // conditional UPDATE and almost always zero row changes. A failed write
-    // must never fail the fetch it only describes.
-    scope.addHook("preHandler", async (request) => {
-      if (request.method !== "GET" || !(request.routeOptions.url ?? "").endsWith("/v1/messages")) return;
+    // When a device last fetched, for the owner's device list. Written after a
+    // SUCCESSFUL GET /v1/messages only (a refused request, whatever the reason,
+    // records nothing), at most once a minute, so a polling client costs one
+    // conditional UPDATE that almost always changes no row. It runs after the
+    // response is sent, so a slow or failing write can neither delay nor fail the
+    // fetch it describes; a failure is logged by class name only.
+    scope.addHook("onResponse", async (request, reply) => {
+      if (request.method !== "GET" || reply.statusCode !== 200 ||
+          !(request.routeOptions.url ?? "").endsWith("/v1/messages")) return;
       const deviceId = deviceOf.get(request);
       if (!deviceId) return;
       try {

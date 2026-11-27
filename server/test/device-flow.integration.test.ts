@@ -130,6 +130,7 @@ describeDatabase("device flow", () => {
     expect(mine).toMatchObject({ label: "laptop", type: "claude-code", devicePubkey: null, lastFetchAt: null });
     // after a fetch, the list says when
     await app.inject({ method: "GET", url: `${path}/v1/messages?after=0`, headers: { "agmsg-protocol-version": "1" } });
+    await new Promise((resolve) => setTimeout(resolve, 150)); // written after the reply
     const later = await app.inject({ method: "GET", url: "/v1/devices", headers: { authorization: `Bearer ${path.split("/")[2]}` } });
     const fetched = later.json().devices.find((d: { thisMachine: boolean }) => d.thisMachine);
     expect(typeof fetched.lastFetchAt).toBe("string");
