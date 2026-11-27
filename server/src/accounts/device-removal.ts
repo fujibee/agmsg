@@ -36,6 +36,10 @@ export async function removeDevice(
       `UPDATE devices SET revoked_at = clock_timestamp() WHERE device_id = $1`,
       [deviceId],
     );
+    // The same team lock a write takes before it checks the fence, so a write is
+    // either wholly before this removal's fence or wholly after it. A team the
+    // server does not hold yet has no writes to order against.
+    await client.query(`SELECT 1 FROM teams WHERE team_id = $1 FOR UPDATE`, [device.team_id]);
     await fenceEpoch(client, device.team_id, await keyIdOf(client, device.team_id));
     return { ok: true as const, teamId: device.team_id };
   });

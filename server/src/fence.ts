@@ -38,7 +38,7 @@ export async function liftEpochFence(
 
 // The key ids among `keyIds` that are currently fenced for the team.
 export async function fencedKeyIds(
-  pool: Pool,
+  pool: Pick<Pool, "query">,
   teamId: string,
   keyIds: readonly string[],
 ): Promise<string[]> {
@@ -54,13 +54,18 @@ export async function fencedKeyIds(
 // Refuses a write that carries an envelope sealed under a fenced key id.
 // Plaintext (no key id) is never fenced. One indexed lookup, skipped when no
 // envelope names a key.
+//
+// Call it inside the write's own transaction, after the team row is locked:
+// removal takes the same lock before it records a fence, so the check and the
+// store are ordered against it and a write cannot slip in past a fence that was
+// committing.
 export async function assertNotFenced(
-  pool: Pool,
+  db: Pick<Pool, "query">,
   teamId: string,
   keyIds: ReadonlyArray<string | null>,
 ): Promise<void> {
   const named = [...new Set(keyIds.filter((id): id is string => id !== null))];
-  const first = (await fencedKeyIds(pool, teamId, named))[0];
+  const first = (await fencedKeyIds(db, teamId, named))[0];
   if (first === undefined) return;
   throw new ProtocolError(
     409,

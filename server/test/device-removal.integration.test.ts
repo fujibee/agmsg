@@ -155,6 +155,27 @@ describeDatabase("owner removal of a device", () => {
       expect(lifted.json().error?.code).not.toBe("epoch-fenced");
     });
 
+    it("orders a write against a fence that is committing: a write that waits on the team lock is refused", async () => {
+      const staying = await device("race-staying");
+      // A removal part way through: it holds the team lock and has recorded its
+      // fence but not committed. A write arriving now must wait for the lock and
+      // then see the fence; a check made before the lock would let it through.
+      const remover = await pool.connect();
+      try {
+        await remover.query("BEGIN");
+        await remover.query(`SELECT 1 FROM teams WHERE team_id = $1 FOR UPDATE`, [teamA]);
+        await fenceEpoch(remover, teamA, "epoch-race");
+        const write = post(staying.secret, message("epoch-race"));
+        await new Promise((resolve) => setTimeout(resolve, 300)); // the write is now waiting on the lock
+        await remover.query("COMMIT");
+        const refused = await write;
+        expect(refused.statusCode).toBe(409);
+        expect(refused.json().error.code).toBe("epoch-fenced");
+      } finally {
+        remover.release();
+      }
+    });
+
     it("fences nothing for a team with no epoch key, and the removal still succeeds", async () => {
       const target = await device("no-epoch");
       expect((await del(target.deviceId, ownerHeaders())).statusCode).toBe(204);
