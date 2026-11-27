@@ -34,7 +34,8 @@ export async function createFixture({ baseUrl }) {
     const revoked = await device(teams[0], "contract-revoked");
     await pool.query("UPDATE devices SET revoked_at = clock_timestamp() WHERE device_id = $1", [revoked.deviceId]);
     return {
-      primary, foreign, revoked, expectedLimits: {},
+      primary, foreign, revoked,
+      expectedLimits: JSON.parse(process.env.CONTRACT_EXPECTED_LIMITS ?? "{}"),
       async approveGrant({ userCode, decision, teamId }) {
         try {
           const digest = userCodeDigestOf(userCode);
