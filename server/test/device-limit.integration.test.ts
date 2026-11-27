@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { DEVICES_LIMIT_LOCK } from "../src/accounts/device-flow.js";
 import type { Config } from "../src/config.js";
 import { migrate } from "../src/db.js";
 
@@ -102,6 +103,27 @@ describeDatabase("device limit", () => {
     // terminal like without a limit: the grant is consumed, not left waiting
     const next = await poll(again);
     expect(next.json().error).toBe("expired_token");
+  });
+
+  it("makes a duplicate-name mint wait on the same lock, so a revoke cannot open a slot it does not count", async () => {
+    // Another limited mint is in flight (holds the lock). A mint for a name a live
+    // device holds must wait for it too: if it decided before the lock it could
+    // insert past the limit once the name is freed.
+    const dup = await approved("m1");
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock($1)", [DEVICES_LIMIT_LOCK]);
+      let settled = false;
+      const pending = poll(dup).then((answer) => { settled = true; return answer; });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(settled).toBe(false);
+      await holder.query("COMMIT");
+      const answer = await pending;
+      expect(answer.json().error).toBe("machine_exists");
+    } finally {
+      holder.release();
+    }
   });
 
   it("keeps the grant approved: the same machine gets its device once a slot is free", async () => {

@@ -91,7 +91,7 @@ export async function listTeams(
 
 // The advisory lock a mint takes while a device limit is set (an arbitrary,
 // fixed key, distinct from the team limit's lock in storage.ts).
-const DEVICES_LIMIT_LOCK = 4120300148;
+export const DEVICES_LIMIT_LOCK = 4120300148;
 
 export type DecideResult =
   | { ok: true }
@@ -219,19 +219,20 @@ async function mintDevice(
     [grant.teamId, grant.machineName],
   );
   // The device limit counts the devices that hold a slot now: not revoked, and
-  // not a provisional one past its deadline. The count and the insert are
-  // serialized on one lock the commit releases, so two machines polling at the
-  // same moment cannot both take the last slot. Without a limit nothing is added.
-  // A name a live device already holds is not a new device: it falls through to
-  // the insert below, which answers machine_exists (terminal, grant consumed)
-  // exactly as it does without a limit, so a full server does not hide that.
+  // not a provisional one past its deadline. Without a limit nothing is added.
+  // Every limited mint takes the same lock first and decides under it, so no
+  // other mint can land between the checks and the insert; the only changes that
+  // can still happen in that window (a revoke, a deadline passing) lower the
+  // count. A name a live device already holds is not a new device: it skips the
+  // count and falls through to the insert below, which answers machine_exists
+  // (terminal, grant consumed) exactly as it does without a limit.
   if (deviceLimit !== null) {
+    await client.query("SELECT pg_advisory_xact_lock($1)", [DEVICES_LIMIT_LOCK]);
     const held = await client.query(
       `SELECT 1 FROM devices WHERE team_id = $1 AND name = $2 AND revoked_at IS NULL`,
       [grant.teamId, grant.machineName],
     );
     if (held.rowCount === 0) {
-      await client.query("SELECT pg_advisory_xact_lock($1)", [DEVICES_LIMIT_LOCK]);
       const counted = await client.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM devices
           WHERE revoked_at IS NULL
