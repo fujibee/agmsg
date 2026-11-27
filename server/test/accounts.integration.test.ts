@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { insertDevice } from "../src/accounts/capability.js";
 import type { Config } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 import { migrate } from "../src/db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -37,18 +38,11 @@ describeDatabase("accounts profile", () => {
   let revoked: { deviceId: string; secret: string };
   let otherTeam: { deviceId: string; secret: string };
 
-  const config = (profile: "open" | "accounts"): Config => ({
+  const config = (profile: "open" | "accounts"): Config => testConfig({
     profile,
     ownerSecret: profile === "accounts" ? "0123456789abcdef0123456789abcdef" : null,
     publicUrl: profile === "accounts" ? "https://agmsg.test" : null,
-    deviceClientIds: ["agmsg-cli"],
     databaseUrl: databaseUrl ?? "",
-    host: "127.0.0.1",
-    port: 0,
-    logLevel: "silent",
-    retentionMaxLiveMessages: null,
-    escrowBackend: "none",
-    escrowKeyfile: null,
   });
 
   async function addTeam(teamId: string, name: string): Promise<void> {

@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { insertDevice } from "../src/accounts/capability.js";
-import type { Config } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 import { migrate } from "../src/db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -24,11 +24,9 @@ describeDatabase("device flow", () => {
   let cookie = "";
   let addressCounter = 0;
 
-  const config: Config = {
-    profile: "accounts", ownerSecret, publicUrl: origin, deviceClientIds: ["agmsg-cli"],
-    databaseUrl: databaseUrl ?? "", host: "127.0.0.1", port: 0,
-    logLevel: "silent", retentionMaxLiveMessages: null,
-  };
+  const config = testConfig({
+    profile: "accounts", ownerSecret, publicUrl: origin, databaseUrl: databaseUrl ?? "",
+  });
 
   // Each flow comes from its own source address so the per-address limits
   // (which have their own tests) never bleed between cases.

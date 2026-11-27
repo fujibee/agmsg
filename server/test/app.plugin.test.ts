@@ -2,26 +2,14 @@ import Fastify from "fastify";
 import { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp, dataPlane } from "../src/app.js";
-import type { Config } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 
 // The data-plane plugin's contract as an EMBEDDED plugin, plus createApp's
 // unchanged standalone behaviour for the paths the existing integration tests
 // don't touch. These need no database: a body-limit rejection and a 404 both
 // resolve before any handler queries Postgres.
 
-const config: Config = {
-  profile: "open",
-    ownerSecret: null,
-    publicUrl: null,
-    deviceClientIds: ["agmsg-cli"],
-  databaseUrl: "postgres://unused",
-  host: "127.0.0.1",
-  port: 0,
-  logLevel: "silent",
-  retentionMaxLiveMessages: null,
-  escrowBackend: "none",
-  escrowKeyfile: null,
-};
+const config = testConfig();
 
 const jsonHeaders = {
   "content-type": "application/json",
