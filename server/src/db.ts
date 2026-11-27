@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Pool, type PoolClient } from "pg";
 import { v7 as uuidv7 } from "uuid";
@@ -8,14 +8,19 @@ export function createPool(connectionString: string): Pool {
 }
 
 export async function migrate(pool: Pool): Promise<void> {
-  const migrationPath = fileURLToPath(
-    new URL("../migrations/001_initial.sql", import.meta.url),
+  // Every NNN_*.sql in order. Each file is idempotent (IF NOT EXISTS), so the
+  // runner needs no bookkeeping table and is the same in every profile.
+  const directory = fileURLToPath(new URL("../migrations/", import.meta.url));
+  const files = (await readdir(directory))
+    .filter((name) => /^[0-9]{3}_.+\.sql$/u.test(name))
+    .sort();
+  const scripts = await Promise.all(
+    files.map((name) => readFile(`${directory}${name}`, "utf8")),
   );
-  const sql = await readFile(migrationPath, "utf8");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(sql);
+    for (const sql of scripts) await client.query(sql);
     await client.query(
       `INSERT INTO server_metadata (singleton, server_instance_id)
        VALUES (TRUE, $1)

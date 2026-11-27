@@ -1,11 +1,14 @@
 import Fastify, {
   type FastifyInstance,
+  type FastifyReply,
   type FastifyRequest,
 } from "fastify";
 import fp from "fastify-plugin";
 import * as duplicateKeyJson from "json-dup-key-validator";
 import type { Pool } from "pg";
 import { ZodError, z } from "zod";
+import { originFeatures, teamFeatures } from "./accounts/features.js";
+import { registerCapabilityScope, redactSecretPath } from "./accounts/scope.js";
 import type { Config } from "./config.js";
 import { errorBody, DatabaseUnavailableError, ProtocolError } from "./errors.js";
 import {
@@ -32,6 +35,12 @@ import {
 
 const emptyQuerySchema = z.object({}).strict();
 const teamParamsSchema = z.object({ teamId: uuidV7Schema }).strict();
+
+// The route params also carry the capability secret when mounted under
+// /t/:secret; only the team id is this route's own.
+function teamParams(request: FastifyRequest): z.infer<typeof teamParamsSchema> {
+  return teamParamsSchema.parse({ teamId: (request.params as { teamId?: unknown }).teamId });
+}
 const teamLookupQuerySchema = z.object({ name: teamNameSchema }).strict();
 
 function requireProtocol(request: FastifyRequest): void {
@@ -73,10 +82,20 @@ async function scopedTeamId(
   return requestedTeamId(request);
 }
 
-export function createApp(pool: Pool, config: Config): FastifyInstance {
+export type AppOptions = {
+  // Test seam: where the request log goes. Production logs to stdout.
+  logStream?: { write: (line: string) => void };
+};
+
+export function createApp(
+  pool: Pool,
+  config: Config,
+  options: AppOptions = {},
+): FastifyInstance {
   const app = Fastify({
     logger: config.logLevel === "silent" ? false : {
       level: config.logLevel,
+      ...(options.logStream ? { stream: options.logStream } : {}),
       redact: {
         paths: [
           // Nothing here issues or accepts one any more, but a client may
@@ -85,11 +104,43 @@ export function createApp(pool: Pool, config: Config): FastifyInstance {
         ],
         censor: "[REDACTED]",
       },
+      serializers: {
+        // A device's secret is a path segment (/t/<secret>/v1/...), so the
+        // default request record would write a credential into every line.
+        req(request: FastifyRequest) {
+          return {
+            method: request.method,
+            url: redactSecretPath(request.url),
+            host: request.host,
+            remoteAddress: request.ip,
+          };
+        },
+      },
     },
     bodyLimit: MAX_REQUEST_BYTES,
   });
 
-  void app.register(dataPlane, { pool, config });
+  if (config.profile === "accounts") {
+    // No bare /v1 data route exists here: a device reaches the data plane only
+    // through its capability URL. Health stays open at the origin, because it is
+    // the probe a client reads before it has any credential.
+    app.setErrorHandler(protocolErrorHandler);
+    app.addHook("onSend", async (_request, reply, payload) => {
+      reply.header("Agmsg-Protocol-Version", "1");
+      return payload;
+    });
+    // The origin probe is open, so it must not say which teams exist: it ignores
+    // Agmsg-Team-ID entirely, where the open profile uses it as a binding check.
+    app.get("/v1/health", healthHandler(pool, originFeatures("accounts"), false));
+    // Fastify's default 404 writes the requested URL into the log, and under a
+    // capability URL that is the secret. Answer without logging it.
+    app.setNotFoundHandler((_request, reply) => {
+      void reply.status(404).send(errorBody(new ProtocolError(404, "not-found", "no such route")));
+    });
+    void app.register(registerCapabilityScope, { pool, config, dataPlane });
+  } else {
+    void app.register(dataPlane, { pool, config });
+  }
   return app;
 }
 
@@ -146,94 +197,15 @@ async function dataPlaneRoutes(
     return payload;
   });
 
-  app.setErrorHandler((error, _request, reply) => {
-    if (error instanceof ProtocolError) {
-      void reply.status(error.statusCode).send(errorBody(error));
-      return;
-    }
-    if (
-      error instanceof ZodError ||
-      error instanceof SyntaxError ||
-      statusCode(error) === 400 ||
-      statusCode(error) === 415
-    ) {
-      const protocolError = new ProtocolError(
-        400,
-        "invalid-request",
-        "request body, query, or JSON framing is invalid",
-      );
-      void reply.status(400).send(errorBody(protocolError));
-      return;
-    }
-    if (statusCode(error) === 413) {
-      const protocolError = new ProtocolError(
-        413,
-        "request-too-large",
-        "request body exceeds 2 MiB",
-      );
-      void reply.status(413).send(errorBody(protocolError));
-      return;
-    }
-    requestLog(reply, error);
-    const protocolError = new ProtocolError(
-      500,
-      "internal-error",
-      "an internal server error occurred",
-    );
-    void reply.status(500).send(errorBody(protocolError));
-  });
+  app.setErrorHandler(protocolErrorHandler);
 
-  app.get("/v1/health", async (request, reply) => {
-    // Parsed OUTSIDE the try: the catch below turns anything thrown into 503
-    // "database unavailable", so a malformed header validated in there would be
-    // reported as a dead server. Same substitution this branch is fixing on the
-    // client, one layer down.
-    const teamId = request.headers["agmsg-team-id"] === undefined
-      ? undefined
-      : requestedTeamId(request);
-    try {
-      // The team header is OPTIONAL here, and only here.
-      //
-      // /v1/health answers two different questions. "Is this server up" is asked
-      // before any team exists — by an operator checking an endpoint, by a
-      // probe, by a client that has not connected yet — and requiring a team
-      // would make that unanswerable. "Am I still bound to the team I think I
-      // am" is asked by a configured client, which always has one to send.
-      //
-      // So: echo the team back when asked about one, and stay answerable when
-      // not. A client that sends the header and gets no team_id treats that as a
-      // disagreement rather than as consent, which is what makes the optional
-      // side safe — the check lives on the side that knows what it expects.
-      // The team comes back from the DB, never from the header we were handed.
-      // Returning the caller's own value would let it compare its value with
-      // itself and read that as agreement — true even for a team this server has
-      // never had. health() reads the row and omits team_id when there is none,
-      // staying 200 — this route is also how "is the server up" is asked, and a
-      // 404 would be indistinguishable from "no such route".
-      return await health(pool, teamId);
-    } catch (error) {
-      // Narrowed on purpose: this response claims the DATABASE is
-      // unreachable, so only a DatabaseUnavailableError -- thrown solely when
-      // pool.connect() itself failed -- may produce it. Anything else (a
-      // routing bug, a validation failure, a query-level error after a
-      // connection was already established) is a different problem and must
-      // not be reported as the database being down; rethrowing lets the
-      // plugin's own error handler classify and log it instead.
-      if (!(error instanceof DatabaseUnavailableError)) throw error;
-      requestLog(reply, error);
-      return reply.status(503).send({
-        status: "unavailable",
-        protocol: { supported_versions: [1] },
-        database: "unavailable",
-      });
-    }
-  });
+  app.get("/v1/health", healthHandler(pool, originFeatures(config.profile)));
 
   app.get("/v1/capabilities", async (request, reply) => {
     emptyQuerySchema.parse(request.query);
     const teamId = await scopedTeamId(pool, request);
     reply.header("Cache-Control", "no-store");
-    return getCapabilities(pool, teamId);
+    return getCapabilities(pool, teamId, teamFeatures(config.profile));
   });
 
   app.get("/v1/members", async (request) => {
@@ -273,7 +245,7 @@ async function dataPlaneRoutes(
     emptyQuerySchema.parse(request.query);
     const body = connectSchema.parse(request.body);
     reply.header("Cache-Control", "no-store");
-    return connectTeam(pool, body);
+    return connectTeam(pool, body, teamFeatures(config.profile));
   });
 
   // The other half of connect: a second machine takes a team it does not have.
@@ -295,9 +267,9 @@ async function dataPlaneRoutes(
   app.get("/v1/teams/:teamId", async (request, reply) => {
     requireProtocol(request);
     emptyQuerySchema.parse(request.query);
-    const params = teamParamsSchema.parse(request.params);
+    const params = teamParams(request);
     reply.header("Cache-Control", "no-store");
-    return getTeamSnapshot(pool, params.teamId);
+    return getTeamSnapshot(pool, params.teamId, teamFeatures(config.profile));
   });
 
   // History is paged rather than returned whole: a team that has been running
@@ -305,7 +277,7 @@ async function dataPlaneRoutes(
   // because retention can move min_available_seq under it mid-pull.
   app.get("/v1/teams/:teamId/messages", async (request, reply) => {
     requireProtocol(request);
-    const params = teamParamsSchema.parse(request.params);
+    const params = teamParams(request);
     const query = messagesQuerySchema.parse(request.query);
     reply.header("Cache-Control", "no-store");
     return getMessages(pool, params.teamId, parseSequence(query.after), query.limit);
@@ -317,6 +289,95 @@ export const dataPlane = fp(dataPlaneRoutes, {
   name: "agmsg-data-plane",
   fastify: "5.x",
 });
+
+function protocolErrorHandler(
+  error: unknown,
+  _request: unknown,
+  reply: FastifyReply,
+): void {
+  if (error instanceof ProtocolError) {
+    void reply.status(error.statusCode).send(errorBody(error));
+    return;
+  }
+  if (
+    error instanceof ZodError ||
+    error instanceof SyntaxError ||
+    statusCode(error) === 400 ||
+    statusCode(error) === 415
+  ) {
+    const protocolError = new ProtocolError(
+      400,
+      "invalid-request",
+      "request body, query, or JSON framing is invalid",
+    );
+    void reply.status(400).send(errorBody(protocolError));
+    return;
+  }
+  if (statusCode(error) === 413) {
+    const protocolError = new ProtocolError(
+      413,
+      "request-too-large",
+      "request body exceeds 2 MiB",
+    );
+    void reply.status(413).send(errorBody(protocolError));
+    return;
+  }
+  requestLog(reply, error);
+  const protocolError = new ProtocolError(
+    500,
+    "internal-error",
+    "an internal server error occurred",
+  );
+  void reply.status(500).send(errorBody(protocolError));
+}
+
+function healthHandler(pool: Pool, features: readonly string[], bindTeam = true) {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    // Parsed OUTSIDE the try: the catch below turns anything thrown into 503
+    // "database unavailable", so a malformed header validated in there would be
+    // reported as a dead server. Same substitution this branch is fixing on the
+    // client, one layer down.
+    const teamId = !bindTeam || request.headers["agmsg-team-id"] === undefined
+      ? undefined
+      : requestedTeamId(request);
+    try {
+      // The team header is OPTIONAL here, and only here.
+      //
+      // /v1/health answers two different questions. "Is this server up" is asked
+      // before any team exists — by an operator checking an endpoint, by a
+      // probe, by a client that has not connected yet — and requiring a team
+      // would make that unanswerable. "Am I still bound to the team I think I
+      // am" is asked by a configured client, which always has one to send.
+      //
+      // So: echo the team back when asked about one, and stay answerable when
+      // not. A client that sends the header and gets no team_id treats that as a
+      // disagreement rather than as consent, which is what makes the optional
+      // side safe — the check lives on the side that knows what it expects.
+      // The team comes back from the DB, never from the header we were handed.
+      // Returning the caller's own value would let it compare its value with
+      // itself and read that as agreement — true even for a team this server has
+      // never had. health() reads the row and omits team_id when there is none,
+      // staying 200 — this route is also how "is the server up" is asked, and a
+      // 404 would be indistinguishable from "no such route".
+      return await health(pool, teamId, features);
+    } catch (error) {
+      // Narrowed on purpose: this response claims the DATABASE is
+      // unreachable, so only a DatabaseUnavailableError -- thrown solely when
+      // pool.connect() itself failed -- may produce it. Anything else (a
+      // routing bug, a validation failure, a query-level error after a
+      // connection was already established) is a different problem and must
+      // not be reported as the database being down; rethrowing lets the
+      // plugin's own error handler classify and log it instead.
+      if (!(error instanceof DatabaseUnavailableError)) throw error;
+      requestLog(reply, error);
+      return reply.status(503).send({
+        status: "unavailable",
+        protocol: { supported_versions: [1] },
+        database: "unavailable",
+      });
+    }
+  };
+}
 
 function requestLog(reply: { log: { error: (value: unknown) => void } }, error: unknown) {
   // Log a safe, structured record rather than the raw Error: when the plugin is

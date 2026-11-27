@@ -7,6 +7,7 @@ const environmentSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  AGMSG_PROFILE: z.enum(["open", "accounts"]).default("open"),
   AGMSG_RETENTION_MAX_LIVE_MESSAGES: z.string()
     .regex(/^[1-9][0-9]*$/u)
     .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n,
@@ -14,7 +15,12 @@ const environmentSchema = z.object({
     .optional(),
 });
 
+export type Profile = "open" | "accounts";
+
 export type Config = {
+  // "open": no accounts, reaching the server is the permission. "accounts":
+  // devices approved by the owner, data routes only under a capability URL.
+  profile: Profile;
   databaseUrl: string;
   host: string;
   port: number;
@@ -25,6 +31,7 @@ export type Config = {
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Config {
   const parsed = environmentSchema.parse(environment);
   return {
+    profile: parsed.AGMSG_PROFILE,
     databaseUrl: parsed.DATABASE_URL,
     host: parsed.HOST,
     port: parsed.PORT,

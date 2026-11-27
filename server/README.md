@@ -41,6 +41,14 @@ stream. Restrict network access, and use HTTPS whenever traffic leaves
 localhost. Encryption with `age-v1` protects envelope contents from the server,
 but does not replace the network boundary.
 
+## Profiles
+
+`AGMSG_PROFILE=open` (default) is the no-auth profile above. `AGMSG_PROFILE=accounts`
+serves the data routes only under a per-device capability URL
+(`/t/<secret>/v1/...`); see the profiles section of `spec/v1.md`. A device is
+bound to one team, and an unknown or revoked secret is refused without saying
+which.
+
 ## Compose configuration
 
 `compose.yaml` contains local-development database defaults. Replace those
