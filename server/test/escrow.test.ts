@@ -81,6 +81,6 @@ describe("key-escrow feature", () => {
     expect(teamFeatures("accounts", "keyfile")).toContain("key-escrow");
     expect(teamFeatures("accounts", "none")).not.toContain("key-escrow");
     expect(teamFeatures("accounts")).not.toContain("key-escrow");
-    expect(teamFeatures("open", "keyfile")).toEqual([]);
+    expect(teamFeatures("open", "keyfile")).toEqual(["roster-snapshot"]);
   });
 });
