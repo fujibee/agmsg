@@ -203,8 +203,18 @@ describeDatabase("accounts profile", () => {
       expect({ ...known.json(), server_instance_id: "x" }).toEqual({ ...unknown.json(), server_instance_id: "x" });
     });
 
-    // The write happens after the reply is sent, so a test lets it settle.
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+    // The write happens after the reply is sent. A write that must appear is
+    // awaited with a bounded poll (it fails only on a real timeout, never on a
+    // slow machine); a write that must NOT appear is checked after a quiet
+    // period, which can only pass wrongly when slow, never fail wrongly.
+    const waitUntil = async (check: () => Promise<boolean>, ms = 5000): Promise<void> => {
+      const deadline = Date.now() + ms;
+      while (!(await check())) {
+        if (Date.now() > deadline) throw new Error("condition not met in time");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    const quiet = () => new Promise((resolve) => setTimeout(resolve, 300));
 
     it("records when a device last fetched, at most once a minute, only on GET /v1/messages", async () => {
       const lastFetch = async (): Promise<string | null> =>
@@ -213,24 +223,23 @@ describeDatabase("accounts profile", () => {
         )).rows[0]?.t ?? null;
       await pool.query(`UPDATE devices SET last_fetch_at = NULL WHERE device_id = $1`, [live.deviceId]);
       await at(live.secret, "/v1/capabilities");
-      await settle();
+      await quiet();
       expect(await lastFetch()).toBeNull(); // other routes do not count as a fetch
       expect((await at(live.secret, "/v1/messages?after=0")).statusCode).toBe(200);
-      await settle();
+      await waitUntil(async () => (await lastFetch()) !== null);
       const first = await lastFetch();
       expect(first).not.toBeNull();
       await at(live.secret, "/v1/messages?after=0");
-      await settle();
+      await quiet();
       expect(await lastFetch()).toBe(first); // inside the minute: no write
       await pool.query(`UPDATE devices SET last_fetch_at = now() - interval '2 minutes' WHERE device_id = $1`, [live.deviceId]);
       const stale = await lastFetch();
       await at(live.secret, "/v1/messages?after=0");
-      await settle();
-      expect(await lastFetch()).not.toBe(stale); // outside the minute: written again
+      await waitUntil(async () => (await lastFetch()) !== stale); // outside the minute: written again
       // a refused request records nothing
       const before = await pool.query<{ t: string | null }>(`SELECT last_fetch_at::text AS t FROM devices WHERE device_id = $1`, [revoked.deviceId]);
       await at(revoked.secret, "/v1/messages?after=0");
-      await settle();
+      await quiet();
       const after = await pool.query<{ t: string | null }>(`SELECT last_fetch_at::text AS t FROM devices WHERE device_id = $1`, [revoked.deviceId]);
       expect(after.rows[0]?.t).toBe(before.rows[0]?.t);
     });
@@ -243,7 +252,7 @@ describeDatabase("accounts profile", () => {
         await at(live.secret, "/v1/messages?after=0", { "agmsg-team-id": teamB }),
       ];
       expect(refused.map((r) => r.statusCode)).toEqual([426, 400, 404]);
-      await settle();
+      await quiet();
       const row = await pool.query<{ t: string | null }>(`SELECT last_fetch_at::text AS t FROM devices WHERE device_id = $1`, [live.deviceId]);
       expect(row.rows[0]?.t).toBeNull();
     });
@@ -260,7 +269,7 @@ describeDatabase("accounts profile", () => {
       try {
         const response = await logged.inject({ method: "GET", url: `/t/${live.secret}/v1/messages?after=0`, headers: wire });
         expect(response.statusCode).toBe(200);
-        await new Promise((resolve) => setTimeout(resolve, 100)); // onResponse runs after the reply
+        await waitUntil(async () => lines.join("").includes("last-fetch-write-failed")); // runs after the reply
       } finally {
         await logged.close();
         await pool.query(`DROP TRIGGER refuse_fetch_write ON devices`);

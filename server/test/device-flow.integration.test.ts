@@ -130,11 +130,18 @@ describeDatabase("device flow", () => {
     expect(mine).toMatchObject({ label: "laptop", type: "claude-code", devicePubkey: null, lastFetchAt: null });
     // after a fetch, the list says when
     await app.inject({ method: "GET", url: `${path}/v1/messages?after=0`, headers: { "agmsg-protocol-version": "1" } });
-    await new Promise((resolve) => setTimeout(resolve, 150)); // written after the reply
-    const later = await app.inject({ method: "GET", url: "/v1/devices", headers: { authorization: `Bearer ${path.split("/")[2]}` } });
-    const fetched = later.json().devices.find((d: { thisMachine: boolean }) => d.thisMachine);
-    expect(typeof fetched.lastFetchAt).toBe("string");
-    expect(Number.isNaN(Date.parse(fetched.lastFetchAt))).toBe(false);
+    // written after the reply: poll, bounded, rather than sleeping a fixed time
+    let fetched: { lastFetchAt: string | null } | undefined;
+    for (const deadline = Date.now() + 5000; Date.now() < deadline;) {
+      const later = await app.inject({ method: "GET", url: "/v1/devices", headers: { authorization: `Bearer ${path.split("/")[2]}` } });
+      fetched = later.json().devices.find((d: { thisMachine: boolean }) => d.thisMachine);
+      if (fetched?.lastFetchAt) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (!fetched) throw new Error("device missing from its list");
+    const stamp = fetched.lastFetchAt;
+    expect(typeof stamp).toBe("string");
+    expect(Number.isNaN(Date.parse(stamp ?? ""))).toBe(false);
   });
 
   it("keeps a code single-use, and a consumed grant cannot be collected twice", async () => {
