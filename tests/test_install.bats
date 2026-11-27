@@ -3003,6 +3003,22 @@ CYG
   [ "$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')" = "$unchanged_digest" ]
 }
 
+@test "install manifest records files as a JSON array, whatever SQLite does with a subquery's subtype (#1933)" {
+  local scripts="$FAKE_HOME/manifest-scripts" manifest="$FAKE_HOME/manifest.json"
+  mkdir -p "$scripts"
+  printf 'one\n' > "$scripts/one.sh"
+  run bash -c '. "$1/scripts/lib/install-manifest.sh"; agmsg_install_manifest_write "$2" "$3" 1.5.1 test-install 1 1' \
+    _ "$REPO_ROOT" "$scripts" "$manifest"
+  [ "$status" -eq 0 ]
+  # SQLite 3.54 turns an unwrapped scalar subquery's JSON into a string; json_type tells the two apart.
+  [ "$(sqlite3 :memory: "SELECT json_type(readfile('$(rf "$manifest")'), '\$.files');")" = array ]
+  # An older SQLite keeps the subtype by itself, so the wrapper that makes it version-independent is checked
+  # in the source too: every json_group_array subquery that goes into json_object is inside json(...).
+  local bad
+  bad="$(grep -nE "\(SELECT json_group_array" "$REPO_ROOT/scripts/lib/install-manifest.sh" | grep -v "json((SELECT json_group_array" || true)"
+  [ -z "$bad" ] || { echo "unwrapped json_group_array subquery: $bad" >&2; return 1; }
+}
+
 @test "install manifest batches safe names and checks its probe before publishing" {
   local scripts="$FAKE_HOME/manifest-scripts" safe_scripts="$FAKE_HOME/safe-manifest-scripts"
   local manifest="$FAKE_HOME/manifest.json"

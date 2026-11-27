@@ -299,8 +299,8 @@ agmsg_install_manifest_write() {   # <scripts_dir> <manifest_path> <version> <in
         'bootstrap_version', $bootstrap_version,
         'created_at', '$(_agmsg_install_manifest_sqlesc "$created_at")',
         'digest_algo', 'sha256',
-        'files', (SELECT json_group_array(json_object('path', path, 'digest', digest))
-                    FROM (SELECT path, digest FROM files ORDER BY path))
+        'files', json((SELECT json_group_array(json_object('path', path, 'digest', digest))
+                    FROM (SELECT path, digest FROM files ORDER BY path)))
       );"
     fi
   } > "$sql" || write_rc=1
