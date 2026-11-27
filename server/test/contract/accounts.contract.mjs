@@ -317,15 +317,24 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       assert.ok(response.body.team_id === fixture.primary.teamId, "capability binding must name the requested team");
       text(response.body.server_instance_id, "server instance id");
       assert.ok(Array.isArray(response.body.features) && response.body.features.every(name => typeof name === "string"), "capabilities must expose string feature names");
-      for (const feature of ["devices", "roster-snapshot", "limits"]) assert.ok(response.body.features.includes(feature), `missing feature: ${feature}`);
-      keys(response.body.limits, Object.keys(fixture.expectedLimits), "finite configured limits");
-      for (const [name, value] of Object.entries(response.body.limits)) {
+      const requiredFeatures = ["devices", "roster-snapshot"];
+      if (Object.keys(fixture.expectedLimits).length > 0) requiredFeatures.push("limits");
+      for (const feature of requiredFeatures) assert.ok(response.body.features.includes(feature), `missing feature: ${feature}`);
+      // Additional feature names remain compatible.
+    });
+
+    it("advertises exactly the configured finite limits and omits unlimited values", async () => {
+      const response = await data(primary.url, "/capabilities", fixture.primary.teamId);
+      assert.equal(response.status, 200);
+      const unlimited = Object.keys(fixture.expectedLimits).length === 0;
+      const values = unlimited && !Object.hasOwn(response.body, "limits") ? {} : response.body.limits;
+      keys(values, Object.keys(fixture.expectedLimits), "finite configured limits");
+      for (const [name, value] of Object.entries(values)) {
         assert.ok(["devices", "teams", "live_messages"].includes(name), "unexpected configured limit name");
         assert.ok(typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value), "limit values must be decimal strings");
         assert.ok(value === fixture.expectedLimits[name], "configured limit value differs from the fixture");
       }
-      // Additional feature names are compatible. Retention's live_messages
-      // value describes eviction, not a new limit-reached refusal.
+      // Retention's live_messages value describes eviction, not refusal.
     });
   });
 }
