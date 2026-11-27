@@ -26,8 +26,11 @@ function unauthenticated(): ProtocolError {
   return new ProtocolError(401, "unauthenticated", "capability URL is not valid");
 }
 
-function teamNotFound(teamId: string): ProtocolError {
-  return new ProtocolError(404, "team-not-found", "team is not provisioned", {}, { teamId });
+// Carries no team id: a body that echoed the requested id would differ between
+// a team that exists and one that does not, which is the one thing this answer
+// must not do.
+function teamNotFound(): ProtocolError {
+  return new ProtocolError(404, "team-not-found", "team is not provisioned");
 }
 
 type Options = {
@@ -51,13 +54,13 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
       // another team is a cross-team request, refused like an unknown team.
       const named = request.headers["agmsg-team-id"];
       if (named !== undefined && named !== device.teamId) {
-        void reply.status(404).send(errorBody(teamNotFound(String(named))));
+        void reply.status(404).send(errorBody(teamNotFound()));
         return reply;
       }
       request.headers["agmsg-team-id"] = device.teamId;
       const pathTeam = (request.params as { teamId?: string }).teamId;
       if (pathTeam !== undefined && pathTeam !== device.teamId) {
-        void reply.status(404).send(errorBody(teamNotFound(pathTeam)));
+        void reply.status(404).send(errorBody(teamNotFound()));
         return reply;
       }
     });
@@ -74,7 +77,7 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
       if (route.endsWith("/v1/connect")) {
         const body = request.body as { team_id?: unknown } | null;
         if (body?.team_id !== request.headers["agmsg-team-id"]) {
-          void reply.status(404).send(errorBody(teamNotFound(String(body?.team_id))));
+          void reply.status(404).send(errorBody(teamNotFound()));
           return reply;
         }
       }

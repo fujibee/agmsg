@@ -159,6 +159,8 @@ describeDatabase("accounts profile", () => {
       expect(none.statusCode).toBe(404);
       expect(other.json().error.code).toBe(none.json().error.code);
       expect(other.json().error.message).toBe(none.json().error.message);
+      // the whole body, not just the code: nothing may echo which team was asked for
+      expect(other.body).toBe(none.body);
       expect(other.body).not.toContain("team-b");
 
       const pathOther = await at(live.secret, `/v1/teams/${teamB}`);
@@ -166,6 +168,7 @@ describeDatabase("accounts profile", () => {
       expect(pathOther.statusCode).toBe(404);
       expect(pathNone.statusCode).toBe(404);
       expect(pathOther.json().error.code).toBe(pathNone.json().error.code);
+      expect(pathOther.body).toBe(pathNone.body);
     });
 
     it("keeps one team per secret: the other team's device sees only its own", async () => {
