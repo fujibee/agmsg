@@ -33,6 +33,9 @@ function teamNotFound(): ProtocolError {
   return new ProtocolError(404, "team-not-found", "team is not provisioned");
 }
 
+// The device each request resolved to, for the hooks after onRequest.
+const deviceOf = new WeakMap<FastifyRequest, string>();
+
 type Options = {
   pool: Pool;
   config: Config;
@@ -58,6 +61,7 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
         return reply;
       }
       request.headers["agmsg-team-id"] = device.teamId;
+      deviceOf.set(request, device.deviceId);
       const pathTeam = (request.params as { teamId?: string }).teamId;
       if (pathTeam !== undefined && pathTeam !== device.teamId) {
         void reply.status(404).send(errorBody(teamNotFound()));
@@ -80,6 +84,28 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
           void reply.status(404).send(errorBody(teamNotFound()));
           return reply;
         }
+      }
+    });
+    // When a device last fetched, for the owner's device list. Written after a
+    // SUCCESSFUL GET /v1/messages only (a refused request, whatever the reason,
+    // records nothing), at most once a minute, so a polling client costs one
+    // conditional UPDATE that almost always changes no row. It runs after the
+    // response is sent, so a slow or failing write can neither delay nor fail the
+    // fetch it describes; a failure is logged by class name only.
+    scope.addHook("onResponse", async (request, reply) => {
+      if (request.method !== "GET" || reply.statusCode !== 200 ||
+          !(request.routeOptions.url ?? "").endsWith("/v1/messages")) return;
+      const deviceId = deviceOf.get(request);
+      if (!deviceId) return;
+      try {
+        await pool.query(
+          `UPDATE devices SET last_fetch_at = clock_timestamp()
+            WHERE device_id = $1
+              AND (last_fetch_at IS NULL OR last_fetch_at < clock_timestamp() - interval '1 minute')`,
+          [deviceId],
+        );
+      } catch (error) {
+        request.log.warn({ event: "last-fetch-write-failed", error_name: error instanceof Error ? error.name : typeof error });
       }
     });
     void scope.register(dataPlane, { pool, config });
