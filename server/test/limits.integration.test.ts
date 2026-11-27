@@ -31,6 +31,9 @@ describeDatabase("static limits", () => {
 
   const config = (teams: bigint | null, liveMessages: bigint | null = null): Config => ({
     profile: "open",
+    ownerSecret: null,
+    publicUrl: null,
+    deviceClientIds: [],
     databaseUrl: databaseUrl ?? "",
     host: "127.0.0.1",
     port: 8788,
