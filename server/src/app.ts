@@ -11,6 +11,7 @@ import { originFeatures, teamFeatures } from "./accounts/features.js";
 import { registerDeviceRoutes } from "./accounts/routes.js";
 import { registerCapabilityScope, redactSecretPath } from "./accounts/scope.js";
 import type { Config } from "./config.js";
+import { limitsFor } from "./limits.js";
 import { errorBody, DatabaseUnavailableError, ProtocolError } from "./errors.js";
 import {
   MAX_REQUEST_BYTES,
@@ -166,6 +167,7 @@ async function dataPlaneRoutes(
   opts: { pool: Pool; config: Config },
 ): Promise<void> {
   const { pool, config } = opts;
+  const limits = limitsFor(config);
   app.removeContentTypeParser("application/json");
   app.addContentTypeParser(
     "application/json",
@@ -207,7 +209,7 @@ async function dataPlaneRoutes(
     emptyQuerySchema.parse(request.query);
     const teamId = await scopedTeamId(pool, request);
     reply.header("Cache-Control", "no-store");
-    return getCapabilities(pool, teamId, teamFeatures(config.profile, config.escrowBackend));
+    return getCapabilities(pool, teamId, teamFeatures(config.profile, config.escrowBackend, limits), limits);
   });
 
   app.get("/v1/members", async (request) => {
@@ -247,7 +249,7 @@ async function dataPlaneRoutes(
     emptyQuerySchema.parse(request.query);
     const body = connectSchema.parse(request.body);
     reply.header("Cache-Control", "no-store");
-    return connectTeam(pool, body, teamFeatures(config.profile, config.escrowBackend));
+    return connectTeam(pool, body, teamFeatures(config.profile, config.escrowBackend, limits), limits);
   });
 
   // The other half of connect: a second machine takes a team it does not have.
@@ -271,7 +273,7 @@ async function dataPlaneRoutes(
     emptyQuerySchema.parse(request.query);
     const params = teamParams(request);
     reply.header("Cache-Control", "no-store");
-    return getTeamSnapshot(pool, params.teamId, teamFeatures(config.profile, config.escrowBackend));
+    return getTeamSnapshot(pool, params.teamId, teamFeatures(config.profile, config.escrowBackend, limits), limits);
   });
 
   // History is paged rather than returned whole: a team that has been running

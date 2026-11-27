@@ -1,6 +1,13 @@
 import { z } from "zod";
 import { ESCROW_BACKENDS, type EscrowBackendName } from "./escrow.js";
 
+// A canonical positive decimal that fits a signed BIGINT: the form every count
+// and sequence on the wire already uses.
+const positiveCount = (what: string) => z.string()
+  .regex(/^[1-9][0-9]*$/u)
+  .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n,
+    `${what} exceeds signed BIGINT`);
+
 const environmentSchema = z.object({
   DATABASE_URL: z.string().min(1),
   HOST: z.string().default("127.0.0.1"),
@@ -16,11 +23,10 @@ const environmentSchema = z.object({
   // Comma-separated client ids that may ask for a device code. Public
   // identifiers, not secrets; the default is the agmsg command-line client.
   AGMSG_DEVICE_CLIENT_IDS: z.string().optional(),
-  AGMSG_RETENTION_MAX_LIVE_MESSAGES: z.string()
-    .regex(/^[1-9][0-9]*$/u)
-    .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n,
-      "retention maximum exceeds signed BIGINT")
-    .optional(),
+  AGMSG_RETENTION_MAX_LIVE_MESSAGES: positiveCount("retention maximum").optional(),
+  // Static limits. Unset means unlimited; a limit is a refusal, never a silent cap.
+  AGMSG_LIMIT_DEVICES: positiveCount("device limit").optional(),
+  AGMSG_LIMIT_TEAMS: positiveCount("team limit").optional(),
   AGMSG_ESCROW_BACKEND: z.enum(ESCROW_BACKENDS).default("none"),
   AGMSG_ESCROW_KEYFILE: z.string().min(1).optional(),
 });
@@ -44,6 +50,8 @@ export type Config = {
   retentionMaxLiveMessages: bigint | null;
   escrowBackend: EscrowBackendName;
   escrowKeyfile: string | null;
+  // null = unlimited.
+  limits: { devices: bigint | null; teams: bigint | null };
 };
 
 const MIN_SECRET_LENGTH = 32;
@@ -108,5 +116,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Config
       : BigInt(parsed.AGMSG_RETENTION_MAX_LIVE_MESSAGES),
     escrowBackend: parsed.AGMSG_ESCROW_BACKEND,
     escrowKeyfile: parsed.AGMSG_ESCROW_KEYFILE ?? null,
+    limits: {
+      devices: parsed.AGMSG_LIMIT_DEVICES === undefined
+        ? null : BigInt(parsed.AGMSG_LIMIT_DEVICES),
+      teams: parsed.AGMSG_LIMIT_TEAMS === undefined
+        ? null : BigInt(parsed.AGMSG_LIMIT_TEAMS),
+    },
   };
 }

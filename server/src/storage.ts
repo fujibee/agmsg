@@ -9,6 +9,11 @@ import {
   type ReadStateSyncInput,
 } from "./protocol.js";
 import { inTransaction } from "./db.js";
+import { limitReached, limitsCapability, NO_LIMITS, type Limits } from "./limits.js";
+
+// The advisory lock a connect takes while a team limit is set (an arbitrary,
+// fixed key; nothing else in this server takes advisory locks).
+const TEAMS_LIMIT_LOCK = 4120300147;
 
 type TeamRow = {
   team_id: string;
@@ -813,6 +818,7 @@ export async function capabilitySnapshot(
   teamId: string,
   lockTeam = false,
   features: readonly string[] = [],
+  limits: Limits = NO_LIMITS,
 ): Promise<Record<string, unknown>> {
   const serverId = await serverInstanceId(client);
   const team = await teamRow(client, teamId, lockTeam);
@@ -855,6 +861,8 @@ export async function capabilitySnapshot(
     effective_from_seq: historyResult.rows.at(-1)?.effective_from_seq,
     max_blob_bytes: String(team.max_blob_bytes),
     policy_history: historyResult.rows,
+    // The finite limits the operator set; nothing here while none is.
+    ...limitsCapability(limits),
   };
 }
 
@@ -862,8 +870,9 @@ export async function getCapabilities(
   pool: Pool,
   teamId: string,
   features: readonly string[] = [],
+  limits: Limits = NO_LIMITS,
 ): Promise<Record<string, unknown>> {
-  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId, false, features), {
+  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId, false, features, limits), {
     readOnly: true,
     repeatableRead: true,
   });
@@ -877,9 +886,17 @@ export async function connectTeam(
   pool: Pool,
   input: ConnectInput,
   features: readonly string[] = [],
+  limits: Limits = NO_LIMITS,
 ): Promise<Record<string, unknown>> {
   return inTransaction(pool, async (client) => {
       const serverId = await serverInstanceId(client);
+      // Two connects for different teams must not both pass a count that only one
+      // fits under, so with a limit the check and the insert are serialized on one
+      // lock that the commit releases.
+      const teamsLimit = limits.teams;
+      if (teamsLimit !== null) {
+        await client.query("SELECT pg_advisory_xact_lock($1)", [TEAMS_LIMIT_LOCK]);
+      }
       // The team and its opening policy row.
       // team_policy_history is required: capabilitySnapshot (and so
       // GET /v1/capabilities) reads it, and a team without it is out of bounds.
@@ -921,6 +938,17 @@ export async function connectTeam(
           { serverInstanceId: serverId, teamId: input.team_id },
         );
       }
+      // The new team is already inserted, so it counts: more than the limit
+      // means this one was the team past it, and the rollback removes it. After
+      // the conflict check, so a repeat connect is still told it already exists.
+      if (teamsLimit !== null) {
+        const counted = await client.query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM teams");
+        if (BigInt(counted.rows[0]?.n ?? "0") > teamsLimit) {
+          throw limitReached("teams", teamsLimit,
+            { serverInstanceId: serverId, teamId: input.team_id });
+        }
+      }
       await client.query(
         `INSERT INTO team_policy_history
          (team_id, policy_revision, effective_from_seq,
@@ -942,7 +970,7 @@ export async function connectTeam(
           [input.team_id, member.member_id, member.name],
         );
       }
-    return capabilitySnapshot(client, input.team_id, false, features);
+    return capabilitySnapshot(client, input.team_id, false, features, limits);
   });
 }
 
@@ -1041,8 +1069,9 @@ export async function getTeamSnapshot(
   pool: Pool,
   teamId: string,
   features: readonly string[] = [],
+  limits: Limits = NO_LIMITS,
 ): Promise<Record<string, unknown>> {
-  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId, false, features), {
+  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId, false, features, limits), {
     readOnly: true,
     repeatableRead: true,
   });
