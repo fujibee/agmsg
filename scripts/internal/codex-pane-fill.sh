@@ -55,11 +55,39 @@ case "$thread" in ''|*[!A-Za-z0-9-]*) report dropped thread_malformed; exit 0 ;;
 
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/role-session.sh" || { report unrecorded role_session_unavailable; exit 0; }
-recorded="$(agmsg_role_session_get "$team" "$agent" session)"
-[ "$recorded" = "$thread" ] || { report dropped "the seat's role-session no longer names thread $thread"; exit 0; }
-[ "$(agmsg_role_session_get "$team" "$agent" type)" = codex ] || { report dropped seat_is_not_codex; exit 0; }
-codex_home="$(agmsg_role_session_get "$team" "$agent" codex_home)"
-if [ -n "$codex_home" ]; then export CODEX_HOME="$codex_home"; fi
+# What the seat's role-session says, as one value. It is read before the proof,
+# again right before the record is written, and again after it: the seat may
+# move to another thread (a new actas, a /clear) while this runs, and a request
+# from its old thread must not leave its old TUI's pane as its record.
+_agmsg_role_session_path_into "$team" "$agent"
+role_path="$_AGMSG_ROLE_SESSION_PATH"
+# One read of the record, shell builtins only, into $SNAP and the R_* fields.
+role_snapshot() {
+  local l
+  R_session="" R_type="" R_project="" R_owner="" R_codex_home=""
+  if [ -f "$role_path" ]; then
+    while IFS= read -r l || [ -n "$l" ]; do
+      case "$l" in
+        session=*) [ -n "$R_session" ] || R_session="${l#session=}" ;;
+        type=*) [ -n "$R_type" ] || R_type="${l#type=}" ;;
+        project=*) [ -n "$R_project" ] || R_project="${l#project=}" ;;
+        owner=*) [ -n "$R_owner" ] || R_owner="${l#owner=}" ;;
+        codex_home=*) [ -n "$R_codex_home" ] || R_codex_home="${l#codex_home=}" ;;
+      esac
+    done <"$role_path"
+  fi
+  SNAP="session=$R_session;type=$R_type;project=$R_project;owner=$R_owner;codex_home=$R_codex_home;"
+}
+role_snapshot; snap="$SNAP"
+case "$snap" in
+  "session=$thread;type=codex;"*) ;;
+  "session=$thread;"*) report dropped seat_is_not_codex; exit 0 ;;
+  *) report dropped "the seat's role-session no longer names thread $thread"; exit 0 ;;
+esac
+# The project and the Codex profile come from the role-session, not the request.
+project="$R_project"
+[ -n "$project" ] || { report dropped role_session_has_no_project; exit 0; }
+if [ -n "$R_codex_home" ]; then export CODEX_HOME="$R_codex_home"; fi
 
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/codex-own-pane.sh" || { report unrecorded codex_own_pane_unavailable; exit 0; }
@@ -87,17 +115,40 @@ EOF
 . "$SCRIPT_DIR/lib/terminal-registry.sh" 2>/dev/null || { report unrecorded terminal_registry_unavailable; exit 0; }
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/placement-report.sh" 2>/dev/null || { report unrecorded placement_report_unavailable; exit 0; }
+rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
+[ -n "$rec" ] || { report unrecorded placement_path_unavailable; exit 0; }
+role_snapshot; [ "$SNAP" = "$snap" ] || { report dropped "the seat's role-session changed while its pane was being proven"; exit 0; }
+# The seat's own record as it was, so a write that turns out stale can be undone.
+before=""; had_before=0
+[ -f "$rec" ] && { before="$(cat "$rec")"; had_before=1; }
 out="$(agmsg_placement_report "" "$team" "$agent" "$project" codex record "" "" replace_claim 2>&1)" || true
 case "$out" in
   *placement=unrecorded*) report unrecorded "${out#*reason=}"; exit 0 ;;
 esac
 # A quiet return is not a write: read the record back before saying so.
 pane="${HERDR_PANE_ID:-${TMUX_PANE:-}}"
-rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
 ref=""
-[ -n "$rec" ] && [ -f "$rec" ] && IFS="$(printf '\t')" read -r ref _ <"$rec"
+[ -f "$rec" ] && IFS="$(printf '\t')" read -r ref _ <"$rec"
 case "$ref" in
-  *":$pane") report recorded "$ref" ;;
-  *) report unrecorded "the pane ($pane) was proven but no record for it was written${out:+: $out}" ;;
+  *":$pane") ;;
+  *) report unrecorded "the pane ($pane) was proven but no record for it was written${out:+: $out}"; exit 0 ;;
 esac
+# The role-session cannot be held locked across the write (the naming path takes
+# that lock itself), so it is read once more after it. Changed: the record just
+# written may be the old thread's pane, so it is undone -- the seat's previous
+# record put back, or none -- unless something else has replaced it meanwhile.
+# The worst outcome is then "no record yet", which the seat's own next actas
+# fills, never the old TUI's pane standing as its record.
+role_snapshot
+if [ "$SNAP" != "$snap" ]; then
+  now=""; [ -f "$rec" ] && now="$(cat "$rec")"
+  case "$now" in
+    "$ref"*)
+      if [ "$had_before" -eq 1 ]; then agmsg_write_atomic "$rec" "$before" 2>/dev/null || rm -f "$rec"
+      else rm -f "$rec"; fi ;;
+  esac
+  report dropped "the seat's role-session changed while its pane was being recorded; the record was undone"
+  exit 0
+fi
+report recorded "$ref"
 exit 0

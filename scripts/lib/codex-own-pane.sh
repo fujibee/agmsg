@@ -23,9 +23,9 @@
 #           and its thread's created_at, with MCP servers starting). Then the
 #           ONE codex TUI in the thread's cwd that started up to
 #           _AGMSG_COP_SLOW_START seconds before the thread is taken, but only
-#           if no other thread in that cwd was created between that TUI's start
-#           and this thread (the TUI's first thread is this one). Two TUIs in
-#           that window are never told apart.
+#           if no other thread in that cwd was created since that TUI started,
+#           before this one or after it (a later one may be where the TUI is
+#           now). Two TUIs in that window are never told apart.
 #      Exactly one distinct process across both must remain. Neither kind proves
 #      the TUI STILL holds the thread (a `/clear` moves it to a new thread and
 #      leaves the argv behind), so two candidates are never resolved by picking
@@ -235,16 +235,18 @@ EOF
     *) echo "no several_codex_tuis_may_hold_this_thread"; return 0 ;;
   esac
   start="${slow#* }"
-  # Is this thread that TUI's first? Another thread in the cwd created since the
-  # TUI started, or a table that cannot be read, means it may not be.
+  # Is this thread the only one that TUI can have opened? Another thread in the
+  # cwd created since the TUI started -- before this one, or after it (the TUI
+  # may have moved on to it) -- or a table that cannot be read, means it may
+  # not be the one the TUI holds.
   [ -n "$db" ] || { echo "no codex_state_db_unreadable"; return 0; }
   q="$(printf '%s' "$tcwd" | sed "s/'/''/g")"
   others="$(sqlite3 -cmd '.timeout 1000' "$db" \
-    "pragma query_only=1; select count(*) from threads where cwd='$q' and id<>'$1' and created_at>=$((start - AGMSG_CODEX_START_SKEW)) and created_at<=$created" 2>/dev/null)" || others=""
+    "pragma query_only=1; select count(*) from threads where cwd='$q' and id<>'$1' and created_at>=$((start - AGMSG_CODEX_START_SKEW))" 2>/dev/null)" || others=""
   case "$others" in
     0) echo "ok ${slow%% *}" ;;
     ''|*[!0-9]*) echo "no codex_state_db_unreadable" ;;
-    *) echo "no thread_is_not_the_first_since_its_tui_started" ;;
+    *) echo "no another_thread_was_opened_since_its_tui_started" ;;
   esac
 }
 

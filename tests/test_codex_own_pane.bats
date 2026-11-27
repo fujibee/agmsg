@@ -51,6 +51,8 @@ EOF
   cat > "$FAKEBIN/lsof" <<'EOF'
 #!/usr/bin/env bash
 # lsof -a -p <pid> -d cwd -Fn
+# a one-shot hook, so a test can change state while the proof is running
+if [ -f "$PSDIR/on_lsof" ]; then h="$PSDIR/on_lsof.running"; mv "$PSDIR/on_lsof" "$h"; bash "$h"; rm -f "$h"; fi
 f="$PSDIR/cwd/$3"; [ -f "$f" ] || exit 1
 printf 'p%s\nn%s\n' "$3" "$(cat "$f")"
 EOF
@@ -175,11 +177,21 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   _tui 91001 10:00 /work/a w1:pC
   _seat t-second
   run agmsg_terminal_self_env
-  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:thread_is_not_the_first_since_its_tui_started" ]
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:another_thread_was_opened_since_its_tui_started" ]
   # the first one is still found by the start-time rule
   _seat t-first
   run agmsg_terminal_self_env
   case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "slow launch: a thread opened after this one in the same TUI's cwd makes it unknown (the TUI may be there now)" {
+  _under_daemon
+  _thread t-old /work/a 589
+  _thread t-new /work/a 100
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-old
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:another_thread_was_opened_since_its_tui_started" ]
 }
 
 @test "slow launch: a TUI started in another cwd in the window does not count" {
@@ -490,6 +502,8 @@ elif [ "\$1" = agent ] && [ "\$2" = get ]; then
   # This fixture exercises naming marks with an initially unnamed agent.
   printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  # a one-shot hook, so a test can change state while the record is being written
+  if [ -f "$FAKEBIN/on_rename" ]; then mv "$FAKEBIN/on_rename" "$FAKEBIN/on_rename.running"; bash "$FAKEBIN/on_rename.running"; rm -f "$FAKEBIN/on_rename.running"; fi
   grep -v "^\$3	" "\$state" > "\$state.n" 2>/dev/null || : > "\$state.n"
   printf '%s\t%s\n' "\$3" "\$4" >> "\$state.n"; mv "\$state.n" "\$state"
 elif [ "\$1" = pane ] && [ "\$2" = list ]; then
@@ -588,4 +602,58 @@ _fill() {   # run the fill script the way agmsgd does: none of the seat's termin
   refute test -e "$SKILL_DIR/run/codex-pane-request.t-aaa"
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+_role_moves_to() {   # <hook file> <thread>: a script that moves the seat's role-session to <thread>
+  printf 'f="%s/run/role-session.seatteam__alice"; sed "s/^session=.*/session=%s/" "$f" > "$f.n" && mv "$f.n" "$f"\n' "$SKILL_DIR" "$2" > "$1"
+}
+
+@test "fill: the seat moves to another thread while its pane is being proven -- dropped, nothing recorded" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _role_moves_to "$PSDIR/on_lsof" t-new
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being proven" ]
+  refute test -e "$PSDIR/on_lsof"            # the hook did run, during the proof
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: the seat moves to another thread while its record is being written -- the write is undone" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _role_moves_to "$FAKEBIN/on_rename" t-new
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being recorded; the record was undone" ]
+  refute test -e "$FAKEBIN/on_rename"        # the hook did run, during the write
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: the project recorded is the role-session's, not the request's" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  sed -i.bak 's#^project=.*#project=/somewhere/else#' "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$output" = "state=recorded reason=herdr:$HERDR_SOCKET_PATH:w1:pC" ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute grep -Fq /somewhere/else "$(agmsg_spawn_path seatteam alice)"
+  grep -Fq "$BATS_TEST_TMPDIR/proj" "$(agmsg_spawn_path seatteam alice)"
 }
