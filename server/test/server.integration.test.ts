@@ -718,7 +718,7 @@ describeDatabase("remote storage HTTP API v1", () => {
       });
     } finally {
       // read_frontiers/read_exact no longer cascade off a members delete
-      // (migration 002), so this seeded read_exact data must be cleared
+      // (migration 003), so this seeded read_exact data must be cleared
       // explicitly or it leaks into every later test against this team.
       await pool.query(
         `DELETE FROM read_exact WHERE team_id=$1 AND member_id IN (

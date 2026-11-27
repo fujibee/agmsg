@@ -415,7 +415,7 @@ export async function syncReadState(
     // member_id is opaque read-state identity here, the same as wire_id
     // below: a late joiner may sync read state before its own member row
     // has propagated, so this no longer requires membership to exist first
-    // (migration 002 drops the matching foreign keys for the same reason).
+    // (migration 003 drops the matching foreign keys for the same reason).
     for (const update of input.updates) {
       if (BigInt(update.server_seq) > current) {
         throw new ProtocolError(
