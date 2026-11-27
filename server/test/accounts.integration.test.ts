@@ -185,6 +185,22 @@ describeDatabase("accounts profile", () => {
       expect(connect.statusCode).toBe(404);
     });
 
+    it("serves the team's own path and history under its secret", async () => {
+      const own = await at(live.secret, `/v1/teams/${teamA}`);
+      expect(own.statusCode).toBe(200);
+      expect(own.json().team_id).toBe(teamA);
+      const history = await at(live.secret, `/v1/teams/${teamA}/messages`);
+      expect(history.statusCode).toBe(200);
+    });
+
+    it("does not reveal which teams exist through the open health probe", async () => {
+      const known = await app.inject({ method: "GET", url: "/v1/health", headers: { ...wire, "agmsg-team-id": teamA } });
+      const unknown = await app.inject({ method: "GET", url: "/v1/health", headers: { ...wire, "agmsg-team-id": missing } });
+      expect(known.statusCode).toBe(200);
+      expect(known.json().team_id).toBeUndefined();
+      expect({ ...known.json(), server_instance_id: "x" }).toEqual({ ...unknown.json(), server_instance_id: "x" });
+    });
+
     it("never writes a secret into the request log", async () => {
       const lines: string[] = [];
       const logged = createApp(pool, { ...config("accounts"), logLevel: "info" }, {
@@ -193,6 +209,8 @@ describeDatabase("accounts profile", () => {
       await logged.ready();
       await logged.inject({ method: "GET", url: `/t/${live.secret}/v1/capabilities`, headers: wire });
       await logged.inject({ method: "GET", url: `/t/${revoked.secret}/v1/capabilities`, headers: wire });
+      await logged.inject({ method: "GET", url: `/t/${live.secret}/v1/no-such-route`, headers: wire });
+      await logged.inject({ method: "GET", url: `/t/${live.secret}/v1/teams/not-a-uuid`, headers: wire });
       await logged.close();
       const text = lines.join("");
       expect(text).toContain("/t/[REDACTED]/v1/capabilities");

@@ -35,6 +35,12 @@ import {
 
 const emptyQuerySchema = z.object({}).strict();
 const teamParamsSchema = z.object({ teamId: uuidV7Schema }).strict();
+
+// The route params also carry the capability secret when mounted under
+// /t/:secret; only the team id is this route's own.
+function teamParams(request: FastifyRequest): z.infer<typeof teamParamsSchema> {
+  return teamParamsSchema.parse({ teamId: (request.params as { teamId?: unknown }).teamId });
+}
 const teamLookupQuerySchema = z.object({ name: teamNameSchema }).strict();
 
 function requireProtocol(request: FastifyRequest): void {
@@ -123,7 +129,14 @@ export function createApp(
       reply.header("Agmsg-Protocol-Version", "1");
       return payload;
     });
-    app.get("/v1/health", healthHandler(pool, originFeatures("accounts")));
+    // The origin probe is open, so it must not say which teams exist: it ignores
+    // Agmsg-Team-ID entirely, where the open profile uses it as a binding check.
+    app.get("/v1/health", healthHandler(pool, originFeatures("accounts"), false));
+    // Fastify's default 404 writes the requested URL into the log, and under a
+    // capability URL that is the secret. Answer without logging it.
+    app.setNotFoundHandler((_request, reply) => {
+      void reply.status(404).send(errorBody(new ProtocolError(404, "not-found", "no such route")));
+    });
     void app.register(registerCapabilityScope, { pool, config, dataPlane });
   } else {
     void app.register(dataPlane, { pool, config });
@@ -254,7 +267,7 @@ async function dataPlaneRoutes(
   app.get("/v1/teams/:teamId", async (request, reply) => {
     requireProtocol(request);
     emptyQuerySchema.parse(request.query);
-    const params = teamParamsSchema.parse(request.params);
+    const params = teamParams(request);
     reply.header("Cache-Control", "no-store");
     return getTeamSnapshot(pool, params.teamId, teamFeatures(config.profile));
   });
@@ -264,7 +277,7 @@ async function dataPlaneRoutes(
   // because retention can move min_available_seq under it mid-pull.
   app.get("/v1/teams/:teamId/messages", async (request, reply) => {
     requireProtocol(request);
-    const params = teamParamsSchema.parse(request.params);
+    const params = teamParams(request);
     const query = messagesQuerySchema.parse(request.query);
     reply.header("Cache-Control", "no-store");
     return getMessages(pool, params.teamId, parseSequence(query.after), query.limit);
@@ -318,13 +331,13 @@ function protocolErrorHandler(
   void reply.status(500).send(errorBody(protocolError));
 }
 
-function healthHandler(pool: Pool, features: readonly string[]) {
+function healthHandler(pool: Pool, features: readonly string[], bindTeam = true) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     // Parsed OUTSIDE the try: the catch below turns anything thrown into 503
     // "database unavailable", so a malformed header validated in there would be
     // reported as a dead server. Same substitution this branch is fixing on the
     // client, one layer down.
-    const teamId = request.headers["agmsg-team-id"] === undefined
+    const teamId = !bindTeam || request.headers["agmsg-team-id"] === undefined
       ? undefined
       : requestedTeamId(request);
     try {
