@@ -1822,7 +1822,7 @@ async function send(config, path, init, authHeaders) {
     // and collapsing them too would erase the hosted edge's snake_case codes
     // -- re-creating the "sync stopped with no reason in the log" failure the
     // errorCode() bridge exists to prevent.
-    const safeCode = /^[a-z][a-z0-9-]{0,63}$/.test(code) ? code : "unknown-error";
+    const safeCode = /^[a-z][a-z0-9_-]{0,63}$/.test(code) ? code : "unknown-error";
     const detail = refusalDetail(body);
     const error = new Error(`HTTP ${response.status} ${safeCode}${detail ? ` ${detail}` : ""}`);
     error.status = response.status; error.code = code; error.body = body;
