@@ -530,7 +530,7 @@ _uninstall_prompt_fixture() {
   before="$(_uninstall_tree_snapshot)"
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" </dev/null
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Aborted. Nothing was changed."* ]]
+  grep -qF "Aborted. Nothing was changed." <<<"$output"
   after="$(_uninstall_tree_snapshot)"
   [ "$before" = "$after" ]
 }
@@ -541,12 +541,12 @@ _uninstall_prompt_fixture() {
   before="$(_uninstall_tree_snapshot)"
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" <<<"n"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Aborted. Nothing was changed."* ]]
+  grep -qF "Aborted. Nothing was changed." <<<"$output"
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" --keep-data <<<"n"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Aborted. Nothing was changed."* ]]
+  grep -qF "Aborted. Nothing was changed." <<<"$output"
   # --keep-data has no data question to ask.
-  [[ "$output" != *"Also remove its DB"* ]]
+  refute grep -qF "Also remove its DB" <<<"$output"
   after="$(_uninstall_tree_snapshot)"
   [ "$before" = "$after" ]
 }
@@ -555,7 +555,7 @@ _uninstall_prompt_fixture() {
   _uninstall_prompt_fixture
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" <<<$'y\nn'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Also remove its DB (message history) and teams?"* ]]
+  grep -qF "Also remove its DB (message history) and teams?" <<<"$output"
   [ ! -e "$SK/scripts" ]
   [ ! -f "$FAKE_HOME/.claude/commands/agmsg.md" ]
   refute grep -qF "$SK/" "$PROJECT/.claude/settings.local.json"
@@ -570,7 +570,7 @@ _uninstall_prompt_fixture() {
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/.codex" bash "$SK/uninstall.sh" <<<$'y\ny'
   [ "$status" -eq 0 ]
   [ "$(grep -o "(y/n)" <<<"$output" | wc -l | tr -d " ")" -eq 2 ]
-  [[ "$output" != *"including DB and teams"* ]]
+  refute grep -qF "including DB and teams" <<<"$output"
   [ ! -e "$SK/scripts" ]
   [ ! -e "$SK/teams" ]
   [ ! -e "$FAKE_HOME/.agmsg/agmsg/teams" ]
