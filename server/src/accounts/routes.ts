@@ -155,9 +155,11 @@ export async function registerDeviceRoutes(
           machine_name: result.machineName,
           scope: "login",
           // The approval binds one team, so the machine learns it here and needs
-          // no name lookup under its capability URL.
+          // no name lookup under its capability URL. A team the machine named
+          // before this server has a row for it (first connect) has no name yet,
+          // and the field is then left out rather than invented.
           team_id: result.teamId,
-          team_name: result.teamName,
+          ...(result.teamName === null ? {} : { team_name: result.teamName }),
           // Opaque. The single owner account stands where a hosted service
           // names the organisation.
           org: result.accountId,

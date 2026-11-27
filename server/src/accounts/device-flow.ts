@@ -143,7 +143,7 @@ export type PollResult =
   // count device codes that matched no grant at all.
   | { status: "expired_token"; unknown: true }
   | { status: "slow_down"; interval: number }
-  | { status: "ready"; secret: string; machineName: string; teamId: string; teamName: string; accountId: string };
+  | { status: "ready"; secret: string; machineName: string; teamId: string; teamName: string | null; accountId: string };
 
 export async function pollToken(
   pool: Pool,
@@ -188,7 +188,7 @@ export async function pollToken(
       secret: minted.secret,
       machineName: grant.machine_name,
       teamId: grant.team_id,
-      teamName: named.rows[0]?.team_name ?? "",
+      teamName: named.rows[0]?.team_name ?? null,
       accountId: input.accountId,
     };
   });
