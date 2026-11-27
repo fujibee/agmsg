@@ -8,6 +8,7 @@ import { expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { migrate } from "../src/db.js";
+import { testConfig } from "./helpers/config.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const execFileAsync = promisify(execFile);
@@ -46,7 +47,7 @@ it.skipIf(!databaseUrl).each(configurations)("runs the $name shared accounts con
     await migrate(pool);
     const port = await unusedPort();
     const baseUrl = `http://127.0.0.1:${port}`;
-    const config = loadConfig({
+    const config = testConfig(loadConfig({
       DATABASE_URL: databaseUrl,
       AGMSG_PROFILE: "accounts",
       AGMSG_OWNER_SECRET: randomBytes(32).toString("hex"),
@@ -54,7 +55,7 @@ it.skipIf(!databaseUrl).each(configurations)("runs the $name shared accounts con
       LOG_LEVEL: "silent",
       PORT: String(port),
       ...environment,
-    });
+    }));
     app = createApp(pool, config);
     await app.listen({ host: "127.0.0.1", port });
     const directory = fileURLToPath(new URL("../", import.meta.url));
