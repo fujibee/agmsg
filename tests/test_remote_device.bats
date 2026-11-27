@@ -18,6 +18,8 @@ setup() {
 }
 
 teardown() {
+  # Let a stand-in that waits on this file finish, whatever the test did.
+  : > "$BATS_TEST_TMPDIR/go" 2>/dev/null || true
   # Only a process whose command line still names what this test started is
   # signalled: a pid read from a file, or kept from a launch, may have been
   # reused by something else since.
@@ -410,6 +412,37 @@ recorded_endpoint() {
   [ "$status" -eq 0 ]
   [ "$(device_state | jq -r '.codes')" = 2 ]
   stop_engine cloned
+}
+
+@test "device pull: the engine's progress reaches the terminal while the pull is still running" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none
+  # Stand in for the engine's bootstrap: print a progress line, wait to be told
+  # to go on, then fail. A pull that held the engine's output until it ended
+  # would show nothing until then.
+  local real="$SCRIPTS/remote-sync.sh" go="$BATS_TEST_TMPDIR/go"
+  mv "$real" "$real.real"
+  cat > "$real" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = pull-bootstrap ]; then
+  echo "PROGRESS-MARKER-1" >&2
+  while [ ! -e "$go" ]; do sleep 0.2; done
+  exit 1
+fi
+exec bash "$real.real" "\$@"
+STUB
+  chmod +x "$real"
+  bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned \
+    > "$BATS_TEST_TMPDIR/pull.out" 2>&1 3>&- &
+  local pull_pid=$! waited=0
+  until grep -q PROGRESS-MARKER-1 "$BATS_TEST_TMPDIR/pull.out" 2>/dev/null; do
+    sleep 0.5; waited=$((waited + 1))
+    [ "$waited" -lt 40 ]
+  done
+  # Seen while the stand-in is still waiting: it is streamed, not held.
+  [ ! -e "$go" ]
+  kill -0 "$pull_pid"
+  touch "$go"
+  wait "$pull_pid" || true
 }
 
 @test "device pull: a name lookup the data side refuses as invalid drops the approval too" {

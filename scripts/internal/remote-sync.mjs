@@ -5100,6 +5100,13 @@ if (process.argv[1] &&
   main().catch(async (error) => {
     await event("fatal", { message: error.message, code: error.code ?? null });
     process.stderr.write(`${error.message}\n`);
+    // A caller that has to tell "the server no longer accepts this address"
+    // (401, 410) from a failure that may pass names a file here, and gets the
+    // status code and nothing else: no URL, no message text.
+    const failureFile = process.env.AGMSG_REMOTE_FAILURE_FILE;
+    if (failureFile && [401, 410].includes(error.status)) {
+      try { writeFileSync(failureFile, `${error.status}\n`); } catch { /* best effort */ }
+    }
     process.exitCode = 1;
   });
 }

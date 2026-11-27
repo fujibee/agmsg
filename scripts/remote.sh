@@ -926,15 +926,26 @@ _remote_device_approve() {
   REMOTE_DEVICE_ADDRESS="$address"
 }
 
-# _remote_device_drop_if_refused <engine-stderr-file>
-# Called after the engine failed a call made with an approved address. The engine
-# names a refusal in its message ("HTTP 401 ..."); a 401 or 410 means the data
-# side no longer accepts the address, so the saved approval is dropped and the
-# next run approves again. Anything else (a server error, an unreachable host)
-# leaves it. Active only inside a device pull, which sets REMOTE_DEVICE_DROP_*.
-_remote_device_drop_if_refused() {
+# _remote_device_failure_file -> prints a fresh temp file for the engine to name a
+# refusal in, or nothing outside a device pull (the manual path gains no work).
+_remote_device_failure_file() {
   [ -n "${REMOTE_DEVICE_DROP_ORIGIN:-}" ] || return 0
-  grep -Eq 'HTTP (401|410)( |$)' "$1" 2>/dev/null || return 0
+  mktemp "${TMPDIR:-/tmp}/agmsg-engine-failure.XXXXXX"
+}
+
+# _remote_device_drop_if_refused <failure-file>
+# Called after the engine failed a call made with an approved address. The engine
+# writes the status code (and only that) to the file when the data side refused
+# the address as no longer valid: 401 or 410. Then the saved approval is dropped
+# and the next run approves again. Any other failure (a server error, an
+# unreachable host) leaves it. The engine's own messages are untouched: they
+# stream to the terminal as they always did.
+_remote_device_drop_if_refused() {
+  local file="${1:-}" code=""
+  [ -n "$file" ] && [ -s "$file" ] || return 0
+  [ -n "${REMOTE_DEVICE_DROP_ORIGIN:-}" ] || return 0
+  IFS= read -r code < "$file" || true
+  case "$code" in 401|410) ;; *) return 0 ;; esac
   rm -f "$(_remote_device_pending_file "$REMOTE_DEVICE_DROP_ORIGIN" "$REMOTE_DEVICE_DROP_TEAM")"
   echo "agmsg: the approved address was refused as no longer valid; the saved approval was dropped. Run the command again to approve again." >&2
 }
@@ -1585,15 +1596,12 @@ _remote_resolve_team_id() {
   # this function should not depend on how it is invoked for its own error
   # report to exist.
   status=0
-  local errfile
-  errfile="$(mktemp "${TMPDIR:-/tmp}/agmsg-resolve-err.XXXXXX")"
-  out="$(AGMSG_REMOTE_ENDPOINT="$endpoint" "$SCRIPT_DIR/remote-sync.sh" resolve-team \
-    --name "$name" 2>"$errfile")" || status=$?
-  # What the engine said still reaches the operator, exactly as when stderr was
-  # not redirected; it is read here as well, once.
-  cat "$errfile" >&2 || true
-  [ "$status" -eq 0 ] || _remote_device_drop_if_refused "$errfile"
-  rm -f "$errfile"
+  local failure_file
+  failure_file="$(_remote_device_failure_file)"
+  out="$(AGMSG_REMOTE_FAILURE_FILE="$failure_file" AGMSG_REMOTE_ENDPOINT="$endpoint" \
+    "$SCRIPT_DIR/remote-sync.sh" resolve-team --name "$name")" || status=$?
+  if [ "$status" -ne 0 ]; then _remote_device_drop_if_refused "$failure_file"; fi
+  [ -z "$failure_file" ] || rm -f "$failure_file"
   if [ "$status" -ne 0 ]; then
     echo "agmsg: could not look up '$name'" >&2
     return 1
@@ -1733,20 +1741,20 @@ cmd_pull() {
 
   local result pulled_id pulled_name imported pulled_sid pulled_protocol pulled_caps \
     pulled_age_v1 pulled_cipher binding_cipher
-  local bootstrap_err bootstrap_status=0
-  bootstrap_err="$(mktemp "${TMPDIR:-/tmp}/agmsg-bootstrap-err.XXXXXX")"
+  local failure_file bootstrap_status=0
+  failure_file="$(_remote_device_failure_file)"
   result="$(AGMSG_SYNC_CONNECTION_DIR="$CONNECTION_ROOT" \
     AGMSG_SYNC_LOCAL_ROSTER_FILE="$cfg" \
     AGMSG_REMOTE_ENDPOINT="$endpoint" \
+    AGMSG_REMOTE_FAILURE_FILE="$failure_file" \
     "$SCRIPT_DIR/remote-sync.sh" pull-bootstrap \
-      --team "$team" --team-id "$team_id" 2>"$bootstrap_err")" || bootstrap_status=$?
-  cat "$bootstrap_err" >&2 || true
+      --team "$team" --team-id "$team_id")" || bootstrap_status=$?
   if [ "$bootstrap_status" -ne 0 ]; then
-    _remote_device_drop_if_refused "$bootstrap_err"
-    rm -f "$bootstrap_err"
+    _remote_device_drop_if_refused "$failure_file"
+    [ -z "$failure_file" ] || rm -f "$failure_file"
     echo "agmsg: pull failed" >&2; exit 1
   fi
-  rm -f "$bootstrap_err"
+  [ -z "$failure_file" ] || rm -f "$failure_file"
   result="$(printf '%s\n' "$result" | grep '"pull_bootstrap_result"' | tail -1)"
   [ -n "$result" ] || { echo "agmsg: pull produced no result" >&2; exit 1; }
 
