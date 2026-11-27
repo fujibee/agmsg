@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import type { Config } from "../config.js";
 import { ProtocolError, errorBody } from "../errors.js";
 import { resolveSecret } from "./capability.js";
+import { fencedKeyIds } from "./fence.js";
 
 // <origin>/t/<secret>/v1/... is how a device reaches the data plane in the
 // accounts profile. This scope resolves the secret to one live device and one

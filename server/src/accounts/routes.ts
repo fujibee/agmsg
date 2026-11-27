@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import type { Config } from "../config.js";
 import { resolveSecret } from "./capability.js";
+import { removeDevice } from "./device-removal.js";
 import { userCodeDigestOf } from "./codes.js";
 import {
   AdmissionError, activateSecret, decideGrant, findPendingGrant, issueGrant,
@@ -290,6 +291,25 @@ export async function registerDeviceRoutes(
       ));
     }
     return sendPage(reply, outcome.status, messagePage("Not done", `The request was refused (${outcome.reason}).`));
+  });
+
+  // The owner removes a device (step 1, see device-removal.ts). The secret stops
+  // at once with the same answer as an unknown one; unknown, already removed and
+  // not-ours are all 404. No body is accepted beyond an empty object.
+  app.delete("/v1/devices/:id", async (request, reply) => {
+    noStore(reply);
+    if (!sameOrigin(request)) return reply.status(403).send({ error: "forbidden" });
+    if (!(await ownerOf(request))) return reply.status(401).send({ error: "unauthenticated" });
+    if (!actionLimiter.hit(`act:${request.ip}`, DEVICE_LIMITS.actionsPerAddressPerHour, Date.now())) {
+      return reply.status(429).send({ error: "slow_down" });
+    }
+    if (!z.object({}).strict().safeParse(request.body ?? {}).success) {
+      return reply.status(400).send({ error: "bad_request" });
+    }
+    const id = uuid.safeParse((request.params as { id?: string }).id);
+    if (!id.success) return reply.status(404).send({ error: "not_found" });
+    const removed = await removeDevice(pool, id.data);
+    return removed.ok ? reply.status(204).send() : reply.status(404).send({ error: "not_found" });
   });
 
   app.post("/v1/device/approve", async (request, reply) => {

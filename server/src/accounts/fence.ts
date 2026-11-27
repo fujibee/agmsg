@@ -48,3 +48,17 @@ export async function fencedKeyIds(
   );
   return rows.map((row) => row.key_id);
 }
+
+// The key id of a team's current epoch, or null when it has none. Wired to the
+// escrow seam's accessor once that lands; until then no team has an epoch key
+// the server knows, so removal fences nothing and the route stays correct.
+export async function currentEpochKeyId(_client: PoolClient, _teamId: string): Promise<string | null> {
+  return null;
+}
+
+export class EpochFencedError extends Error {
+  constructor(readonly teamId: string, readonly keyId: string) {
+    super("writes under this key epoch are paused while the key is rotated after a device was removed");
+    this.name = "EpochFencedError";
+  }
+}
