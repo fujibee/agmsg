@@ -778,6 +778,8 @@ _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 _remote_device_approve() {
   local origin="${1%/}" team="$2" pending machine body out code doc err interval deadline \
     device_code user_code uri uri_complete address secret expires
+  # The team name becomes part of a file name below.
+  agmsg_validate_team_name "$team" || return 1
   pending="$(_remote_device_pending_file "$team")"
   if [ -s "$pending" ]; then
     echo "  using the address approved earlier for team '$team'" >&2
