@@ -208,6 +208,21 @@ export const connectSchema = z
 
 export type ConnectInput = z.infer<typeof connectSchema>;
 
+// POST /v1/roster-snapshot. The server never reads inside `blob` -- it is
+// sealed by the client the same way a message is -- so there is nothing here
+// to validate beyond shape and size. `epoch` travels in the clear alongside
+// the seal: a new machine needs to know which key epoch to fetch before it
+// can open the blob at all.
+export const rosterSnapshotSchema = z
+  .object({
+    sequence: sequenceSchema,
+    epoch: z.number().int().min(0).max(0xffff_ffff),
+    blob: z.string().refine(canonicalBlob),
+  })
+  .strict();
+
+export type RosterSnapshotInput = z.infer<typeof rosterSnapshotSchema>;
+
 function u32(value: number): Buffer {
   const buffer = Buffer.allocUnsafe(4);
   buffer.writeUInt32BE(value);

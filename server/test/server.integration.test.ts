@@ -403,6 +403,7 @@ describeDatabase("remote storage HTTP API v1", () => {
       policy_revision: "0",
       effective_from_seq: "1",
       policy_history: [{ policy_revision: "0", effective_from_seq: "1" }],
+      features: ["roster-snapshot"],
     });
 
     const members = await app.inject({
@@ -419,6 +420,129 @@ describeDatabase("remote storage HTTP API v1", () => {
           registrations: [{ registration_id: registrationId, type: "codex" }],
         },
       ],
+    });
+  });
+
+  it("has no roster snapshot until one is written", async () => {
+    const empty = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({ sequence: null, epoch: null, blob: null });
+  });
+
+  it("writes and reads back a roster snapshot, and refuses an older one", async () => {
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "5", epoch: 0, blob: "c2VhbGVkLXJvc3Rlci12MQ==" },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.json()).toMatchObject({ sequence: "5", epoch: 0 });
+
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toMatchObject({
+      sequence: "5",
+      epoch: 0,
+      blob: "c2VhbGVkLXJvc3Rlci12MQ==",
+    });
+
+    // The same sequence resent (an at-least-once retry) overwrites in place.
+    const resent = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "5", epoch: 1, blob: "c2VhbGVkLXJvc3Rlci12MQ==" },
+    });
+    expect(resent.statusCode).toBe(200);
+
+    const olderRejected = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "4", epoch: 1, blob: "c2VhbGVkLXJvc3Rlci1zdGFsZQ==" },
+    });
+    expect(olderRejected.statusCode).toBe(409);
+    expect(olderRejected.json().error).toMatchObject({
+      code: "roster-snapshot-stale",
+      details: { stored_sequence: "5", rejected_sequence: "4" },
+    });
+
+    // The rejected write must not have replaced the stored one.
+    const unchanged = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(unchanged.json()).toMatchObject({ sequence: "5", epoch: 1 });
+
+    const newer = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "6", epoch: 1, blob: "c2VhbGVkLXJvc3Rlci12Mg==" },
+    });
+    expect(newer.statusCode).toBe(200);
+    const afterNewer = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(afterNewer.json()).toMatchObject({ sequence: "6", epoch: 1 });
+  });
+
+  it("isolates roster snapshots across teams", async () => {
+    const otherTeam = "018f3f7e-0000-7000-8000-0000000000b1";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'other-roster-team')`, [otherTeam]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none','age-v1']::TEXT[])`,
+      [otherTeam],
+    );
+    const otherHeaders = { ...headers, "agmsg-team-id": otherTeam };
+
+    const otherEmpty = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers: otherHeaders,
+    });
+    expect(otherEmpty.json()).toMatchObject({ sequence: null });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers: otherHeaders,
+      payload: { sequence: "1", epoch: 0, blob: "b3RoZXItdGVhbS1yb3N0ZXI=" },
+    });
+    expect(write.statusCode).toBe(200);
+
+    // The other team's write must not be visible under the original team.
+    const original = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(original.json()).toMatchObject({ sequence: "6", epoch: 1 });
+
+    const otherRead = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers: otherHeaders,
+    });
+    expect(otherRead.json()).toMatchObject({
+      sequence: "1",
+      epoch: 0,
+      blob: "b3RoZXItdGVhbS1yb3N0ZXI=",
     });
   });
 
