@@ -30,9 +30,16 @@ CREATE TABLE IF NOT EXISTS team_key_epochs (
     CHECK (octet_length(wrapped_key) BETWEEN 1 AND 8192),
   CONSTRAINT team_key_epochs_key_id_shape
     CHECK (key_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
-  -- Epoch N is the snapshot's epoch_revision N-1.
+  -- Epoch N is the snapshot's epoch_revision N-1, written as a decimal string.
+  -- A CHECK passes when its expression is NULL, and `->>` gives NULL for a
+  -- missing field, a JSON null and a non-object, so each of those is closed
+  -- explicitly: the type tests, and a coalesce so the comparison is never NULL.
   CONSTRAINT team_key_epochs_snapshot_revision
-    CHECK (snapshot ->> 'epoch_revision' = (epoch - 1)::TEXT)
+    CHECK (
+      jsonb_typeof(snapshot) = 'object'
+      AND jsonb_typeof(snapshot -> 'epoch_revision') = 'string'
+      AND coalesce(snapshot ->> 'epoch_revision' = (epoch - 1)::TEXT, FALSE)
+    )
 );
 
 -- One row per unwrap, whatever the outcome. No foreign keys, on purpose: an

@@ -22,7 +22,7 @@ function row(overrides: Record<string, unknown> = {}) {
     wrapped_key: Buffer.from("opaque"),
     recipient: "age1example",
     key_id: "team-key",
-    snapshot: JSON.stringify({ epoch_revision: epoch - 1 }),
+    snapshot: JSON.stringify({ epoch_revision: String(epoch - 1) }),
     ...overrides,
   };
 }
@@ -96,9 +96,17 @@ describeDatabase("key escrow", () => {
       ["empty wrap", { epoch: 3, wrapped_key: Buffer.alloc(0) }, /team_key_epochs_wrapped_size/u],
       ["huge wrap", { epoch: 3, wrapped_key: Buffer.alloc(8193) }, /team_key_epochs_wrapped_size/u],
       ["bad key id", { epoch: 3, key_id: "Bad Id" }, /team_key_epochs_key_id_shape/u],
-      ["snapshot of another epoch", { epoch: 3, snapshot: JSON.stringify({ epoch_revision: 5 }) },
+      ["snapshot of another epoch", { epoch: 3, snapshot: JSON.stringify({ epoch_revision: "5" }) },
         /team_key_epochs_snapshot_revision/u],
-      ["epoch 0", { epoch: 0, snapshot: JSON.stringify({ epoch_revision: -1 }) }, /check/u],
+      ["snapshot without a revision", { epoch: 10, snapshot: JSON.stringify({}) },
+        /team_key_epochs_snapshot_revision/u],
+      ["snapshot with a null revision", { epoch: 10, snapshot: JSON.stringify({ epoch_revision: null }) },
+        /team_key_epochs_snapshot_revision/u],
+      ["snapshot that is not an object", { epoch: 10, snapshot: JSON.stringify("1") },
+        /team_key_epochs_snapshot_revision/u],
+      ["snapshot with a numeric revision", { epoch: 10, snapshot: JSON.stringify({ epoch_revision: 9 }) },
+        /team_key_epochs_snapshot_revision/u],
+      ["epoch 0", { epoch: 0, snapshot: JSON.stringify({ epoch_revision: "-1" }) }, /check/u],
     ];
     for (const [label, overrides, pattern] of cases) {
       await expect(insert(row(overrides)), label).rejects.toThrow(pattern);
