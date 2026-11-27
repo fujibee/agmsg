@@ -3064,7 +3064,8 @@ export async function configure(args) {
       (cipherProfile === "age-v1" && minimumSecurity !== "e2ee-required")) {
     throw new Error(`${cipherProfile} requires its explicit matching minimum-security mode`);
   }
-  const serverUrl = new URL(args.server).toString().replace(/\/$/, "");
+  // An address that is itself a credential arrives in the environment, not in argv.
+  const serverUrl = new URL(args.server ?? process.env.AGMSG_REMOTE_ENDPOINT).toString().replace(/\/$/, "");
   const binding = await readConnectedBinding(team);
   if (serverUrl !== binding.endpoint || args["team-id"] !== binding.remote_team_id) {
     throw new Error("configure binding does not match remote.sh connect");
@@ -4654,7 +4655,8 @@ export async function pullBootstrap(args, dependencies = {}) {
   const team = requireName(args.team, "team");
   const teamId = args["team-id"] ?? "";
   if (!UUID_V7.test(teamId)) throw new Error("team-id must be a canonical UUIDv7");
-  const serverUrl = args.endpoint ?? "";
+  // An address that is itself a credential arrives in the environment, not in argv.
+  const serverUrl = args.endpoint ?? process.env.AGMSG_REMOTE_ENDPOINT ?? "";
   if (!serverUrl) throw new Error("endpoint is required");
   const limit = Number(args.limit ?? 1000);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("limit must be 1..1000");
@@ -4760,7 +4762,8 @@ export async function pullBootstrap(args, dependencies = {}) {
 // before any config exists, so it validates its own answer rather than going
 // through the binding checks the rest of the client relies on.
 export async function resolveTeam(args) {
-  const serverUrl = args.endpoint ?? "";
+  // An address that is itself a credential arrives in the environment, not in argv.
+  const serverUrl = args.endpoint ?? process.env.AGMSG_REMOTE_ENDPOINT ?? "";
   if (!serverUrl) throw new Error("endpoint is required");
   const name = args.name ?? "";
   if (!name) throw new Error("name is required");

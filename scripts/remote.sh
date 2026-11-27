@@ -159,7 +159,9 @@ _remote_ensure_team() {
 _remote_validate_endpoint() {
   local node
   node="$(agmsg_resolve_node)"
-  "$node" "$SCRIPT_DIR/internal/validate-endpoint.mjs" "$1"
+  # The address goes in on stdin, never in argv: an approved address is a
+  # capability, and a process list is readable by every user on the machine.
+  printf '%s' "$1" | "$node" "$SCRIPT_DIR/internal/validate-endpoint.mjs" --stdin
 }
 
 # An endpoint, safe to print. Keeps the scheme, host and port; DROPS everything
@@ -764,27 +766,80 @@ _remote_server_lists_feature() {
   [ "$found" = "1" ]
 }
 
-# _remote_device_pending_file <team> -> path of the saved, not-yet-used data address
-_remote_device_pending_file() { printf '%s' "$CRED_ROOT/device-address.$1"; }
+# _remote_device_pending_file <origin> <team> -> path of the saved approval for that
+# server and team. Keyed by both: an address approved by one server must never
+# be offered to another, and the data host need not be the host that approved.
+_remote_device_pending_file() {
+  local key
+  key="$(printf '%s' "${1%/}" | agmsg_sha1)"
+  printf '%s' "$CRED_ROOT/device-address.$2.${key:0:16}"
+}
+
+# _remote_device_pending_write <file> <address> <position> <activated>
+# Three lines: the address, the position the push starts after (empty when the
+# caller did not ask for "from now"), and 1 once the server has activated the
+# address. Written whole to a 0600 file and moved into place.
+_remote_device_pending_write() {
+  local file="$1" tmp
+  mkdir -p "$CRED_ROOT" || return 1
+  tmp="$file.tmp.$$"
+  ( umask 077; printf '%s\n%s\n%s\n' "$2" "$3" "$4" > "$tmp" ) || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+
+# _remote_device_activate <origin> <address> -> 0 when the server activated it
+# Idempotent on the server, so it is safe to repeat after a failure. A refusal
+# that says the address is gone (401, 410) returns 2: the saved copy is dead.
+_remote_device_activate() {
+  local origin="${1%/}" address="$2" secret out code
+  secret="${address##*/t/}"; secret="${secret%%/*}"
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
+  code="$(_remote_http_json_call POST "$origin/v1/device/activate" - "$out" "$secret")" || code="000"
+  rm -f "$out"
+  case "$code" in
+    200|204) return 0 ;;
+    401|410) echo "agmsg: the approved address is no longer valid (HTTP $code); run the command again for a new approval" >&2; return 2 ;;
+    *) echo "agmsg: approved, but the server did not activate the address (HTTP $code); the approval is kept, run the command again" >&2; return 1 ;;
+  esac
+}
 
 # _remote_device_field <doc> <json path> -> value or empty
 _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 
-# _remote_device_approve <origin> <team> -> prints the data address on stdout
+# _remote_device_approve <origin> <team> <position> -> sets REMOTE_DEVICE_ADDRESS
+# and REMOTE_DEVICE_POSITION (no subshell: the callers need both)
 #
-# Runs the approval and activates the address. A failure after approval and
-# before the caller has used the address keeps the address in a 0600 file, so
-# the next run does not ask the user to approve again.
+# Runs the approval and activates the address. The address is saved durably,
+# with the start position, BEFORE it is activated or used, and kept until the
+# binding holds it: a failure in between (the registration, a lost response, an
+# activation the server could not take) leaves the saved copy, and the next run
+# retries from there instead of asking the user to approve again.
 _remote_device_approve() {
-  local origin="${1%/}" team="$2" pending machine body out code doc err interval deadline \
-    device_code user_code uri uri_complete address secret expires
+  local origin="${1%/}" team="$2" position="${3:-}" pending machine body out code doc err interval deadline \
+    device_code user_code uri uri_complete address expires saved_pos activated rc
+  REMOTE_DEVICE_ADDRESS=""
+  REMOTE_DEVICE_POSITION="$position"
   # The team name becomes part of a file name below.
   agmsg_validate_team_name "$team" || return 1
-  pending="$(_remote_device_pending_file "$team")"
+  pending="$(_remote_device_pending_file "$origin" "$team")"
   if [ -s "$pending" ]; then
-    echo "  using the address approved earlier for team '$team'" >&2
-    cat "$pending"
-    return 0
+    { IFS= read -r address; IFS= read -r saved_pos; IFS= read -r activated; } < "$pending" || true
+    if [ -n "$address" ]; then
+      echo "  using the approval made earlier for team '$team'" >&2
+      if [ "$activated" != "1" ]; then
+        rc=0
+        _remote_device_activate "$origin" "$address" || rc=$?
+        if [ "$rc" -eq 2 ]; then rm -f "$pending"; fi
+        [ "$rc" -eq 0 ] || return 1
+        _remote_device_pending_write "$pending" "$address" "$saved_pos" 1 || return 1
+      fi
+      REMOTE_DEVICE_ADDRESS="$address"
+      # The first attempt's position wins: a message written after it, even in
+      # an earlier failed run, is newer than the command and must be sent.
+      [ -z "$saved_pos" ] || [ -z "$position" ] || REMOTE_DEVICE_POSITION="$saved_pos"
+      return 0
+    fi
   fi
   machine="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
   machine="$(printf '%s' "$machine" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
@@ -861,20 +916,14 @@ _remote_device_approve() {
     return 1
   fi
   # Durably saved BEFORE it is activated or used: the server shows it once.
-  mkdir -p "$CRED_ROOT"
-  ( umask 077; printf '%s' "$address" > "$pending" ) || {
+  _remote_device_pending_write "$pending" "$address" "$position" 0 || {
     echo "agmsg: could not save the approved address; nothing was changed" >&2; return 1; }
-  chmod 600 "$pending" 2>/dev/null || true
-  secret="${address##*/t/}"; secret="${secret%%/*}"
-  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
-  code="$(_remote_http_json_call POST "$origin/v1/device/activate" - "$out" "$secret")" || code="000"
-  rm -f "$out"
-  case "$code" in
-    200|204) ;;
-    *) echo "agmsg: approved, but the server did not activate the address (HTTP $code); run the command again" >&2
-       rm -f "$pending"; return 1 ;;
-  esac
-  printf '%s' "$address"
+  rc=0
+  _remote_device_activate "$origin" "$address" || rc=$?
+  if [ "$rc" -eq 2 ]; then rm -f "$pending"; fi
+  [ "$rc" -eq 0 ] || return 1
+  _remote_device_pending_write "$pending" "$address" "$position" 1 || return 1
+  REMOTE_DEVICE_ADDRESS="$address"
 }
 
 # --- start from now -----------------------------------------------------------
@@ -1523,8 +1572,8 @@ _remote_resolve_team_id() {
   # this function should not depend on how it is invoked for its own error
   # report to exist.
   status=0
-  out="$("$SCRIPT_DIR/remote-sync.sh" resolve-team \
-    --endpoint "$endpoint" --name "$name")" || status=$?
+  out="$(AGMSG_REMOTE_ENDPOINT="$endpoint" "$SCRIPT_DIR/remote-sync.sh" resolve-team \
+    --name "$name")" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "agmsg: could not look up '$name'" >&2
     return 1
@@ -1580,10 +1629,11 @@ cmd_pull() {
   # address the rest of pull uses unchanged. A machine pulling holds no history
   # of this team (the guard below refuses otherwise), so there is nothing to
   # start from.
-  local device_pulled=0
+  local device_pulled=0 device_origin=""
   if _remote_server_lists_feature "$endpoint" device-approval; then
-    endpoint="$(_remote_device_approve "$endpoint" "$team")" || exit 1
-    endpoint="${endpoint%/}"
+    device_origin="$endpoint"
+    _remote_device_approve "$endpoint" "$team" "" || exit 1
+    endpoint="${REMOTE_DEVICE_ADDRESS%/}"
     _remote_validate_endpoint "$endpoint" || exit 1
     device_pulled=1
   fi
@@ -1663,8 +1713,9 @@ cmd_pull() {
     pulled_age_v1 pulled_cipher binding_cipher
   result="$(AGMSG_SYNC_CONNECTION_DIR="$CONNECTION_ROOT" \
     AGMSG_SYNC_LOCAL_ROSTER_FILE="$cfg" \
+    AGMSG_REMOTE_ENDPOINT="$endpoint" \
     "$SCRIPT_DIR/remote-sync.sh" pull-bootstrap \
-      --team "$team" --team-id "$team_id" --endpoint "$endpoint")" || {
+      --team "$team" --team-id "$team_id")" || {
     echo "agmsg: pull failed" >&2; exit 1; }
   result="$(printf '%s\n' "$result" | grep '"pull_bootstrap_result"' | tail -1)"
   [ -n "$result" ] || { echo "agmsg: pull produced no result" >&2; exit 1; }
@@ -1785,7 +1836,7 @@ cmd_pull() {
   fi
   # The binding is recorded, so the saved copy of the approved address has done
   # its job.
-  [ "$device_pulled" -eq 0 ] || rm -f "$(_remote_device_pending_file "$team")"
+  [ "$device_pulled" -eq 0 ] || rm -f "$(_remote_device_pending_file "$device_origin" "$team")"
 
   if [ "$cannot_read" -ne 0 ]; then
     echo "Pulled '$pulled_name' into local team '$team' ($imported message(s))."
@@ -2069,9 +2120,8 @@ EOF
   local endpoint remote_team_id configure_out reprocess_out reprocess_result imported blocking
   endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
   remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
-  configure_out="$(bash "$SCRIPT_DIR/remote-sync.sh" configure \
+  configure_out="$(AGMSG_REMOTE_ENDPOINT="$endpoint" bash "$SCRIPT_DIR/remote-sync.sh" configure \
     --team "$team" \
-    --server "$endpoint" \
     --team-id "$remote_team_id" \
     --minimum-security e2ee-required \
     --cipher age-v1 \
@@ -2792,9 +2842,8 @@ _remote_configure_keyed_team() {
     return 1
   fi
   snapshot_sha="$(agmsg_sha256 < "$snapshot_file")"
-  if ! bash "$SCRIPT_DIR/remote-sync.sh" configure \
+  if ! AGMSG_REMOTE_ENDPOINT="$endpoint" bash "$SCRIPT_DIR/remote-sync.sh" configure \
       --team "$team" \
-      --server "$endpoint" \
       --team-id "$remote_team_id" \
       --minimum-security e2ee-required \
       --cipher age-v1 \
@@ -2857,7 +2906,7 @@ cmd_connect() {
   # into the data address the rest of this command uses unchanged. A team that
   # is already connected is left as it is -- a manual end-to-end key in
   # particular is not moved here -- and the command says so.
-  local device_approved=0 live_endpoint live_disconnected history_pos="" use_device=0
+  local device_approved=0 device_origin="" live_endpoint live_disconnected history_pos="" use_device=0
   live_endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
   live_disconnected="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
   if [ "$e2ee" -eq 0 ] && _remote_server_lists_feature "$endpoint" device-approval; then
@@ -2879,8 +2928,10 @@ cmd_connect() {
        && { [ -z "$live_disconnected" ] || [ "$live_disconnected" = "null" ]; }; then
       echo "Team '$team' is already connected; it stays as it is (a manual end-to-end key is not moved by device approval)." >&2
     else
-      endpoint="$(_remote_device_approve "$endpoint" "$team")" || exit 1
-      endpoint="${endpoint%/}"
+      device_origin="$endpoint"
+      _remote_device_approve "$endpoint" "$team" "$history_pos" || exit 1
+      endpoint="${REMOTE_DEVICE_ADDRESS%/}"
+      [ "$with_history" -ne 0 ] || history_pos="$REMOTE_DEVICE_POSITION"
       _remote_validate_endpoint "$endpoint" || exit 1
       device_approved=1
     fi
@@ -2992,7 +3043,7 @@ cmd_connect() {
   local remote_team_name
   remote_team_name="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_name')"
   # The address is recorded in the binding now; the saved copy has done its job.
-  [ "$device_approved" -eq 0 ] || rm -f "$(_remote_device_pending_file "$team")"
+  [ "$device_approved" -eq 0 ] || rm -f "$(_remote_device_pending_file "$device_origin" "$team")"
 
   if [ "$e2ee" -eq 0 ] && ! _remote_binding_allows_cipher "$cfg" none; then
     echo "agmsg: this remote does not allow $binding_cipher; no sync engine was started." >&2

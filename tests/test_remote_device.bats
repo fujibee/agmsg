@@ -14,22 +14,35 @@ setup() {
   MOCK_PYTHON3="$(command -v python3)"
   bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
   MOCK_PID=""
+  MOCK_PID2=""
 }
 
 teardown() {
+  # Only a process whose command line still names what this test started is
+  # signalled: a pid read from a file, or kept from a launch, may have been
+  # reused by something else since.
   local pidfile pid
   for pidfile in "$TEST_SKILL_DIR"/run/remote-sync.*.pid; do
     [ -f "$pidfile" ] || continue
     pid="$(cat "$pidfile" 2>/dev/null || true)"
     [[ "$pid" =~ ^[1-9][0-9]{0,9}$ ]] || continue
-    kill "$pid" 2>/dev/null || true
-    wait_for_pid_exit "$pid" || kill -KILL "$pid" 2>/dev/null || true
+    kill_if_cmdline "$pid" "remote-sync.mjs"
   done
-  if [ -n "$MOCK_PID" ]; then
-    kill "$MOCK_PID" 2>/dev/null || true
-    wait "$MOCK_PID" 2>/dev/null || true
-  fi
+  [ -z "$MOCK_PID" ] || kill_if_cmdline "$MOCK_PID" "mock_remote_server.py"
+  [ -z "$MOCK_PID2" ] || kill_if_cmdline "$MOCK_PID2" "mock_remote_server.py"
   teardown_test_env
+}
+
+# kill_if_cmdline <pid> <fragment>: TERM the pid, then wait for it, only when its
+# current command line (read the way the product reads it) contains <fragment>.
+kill_if_cmdline() {
+  local pid="$1" fragment="$2" cmdline
+  # shellcheck disable=SC1091
+  . "$SCRIPTS/lib/compat.sh"
+  cmdline="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case "$cmdline" in *"$fragment"*) ;; *) return 0 ;; esac
+  kill "$pid" 2>/dev/null || true
+  wait_for_pid_exit "$pid" || kill -KILL "$pid" 2>/dev/null || true
 }
 
 # start_mock [VAR=value ...]: the fixture on an OS-assigned port, with the
@@ -51,27 +64,34 @@ start_mock() {
 has() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }
 lacks() { case "$1" in *"$2"*) return 1 ;; esac; return 0; }
 
+# start_second_mock [VAR=value ...]: another server; sets ENDPOINT2.
+start_second_mock() {
+  local port_file="$TEST_SKILL_DIR/server2.port"
+  : > "$port_file"
+  env "$@" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+    </dev/null > "$port_file" 2>"$TEST_SKILL_DIR/server2.log" 3>&- &
+  MOCK_PID2=$!
+  wait_for_file_contains "$port_file" '^[0-9][0-9]*$'
+  ENDPOINT2="http://127.0.0.1:$(cat "$port_file")"
+}
+
+# saved_approvals: the saved approval files of the test's install.
+saved_approvals() { ls "$TEST_SKILL_DIR"/run/remote-credentials/device-address.* 2>/dev/null || true; }
+
 device_state() { curl -sS "$ENDPOINT/_test/device-state"; }
 
-# stop_engine: the connect started a background engine; take it down so the
-# test, not the clock, decides when a push happens.
+# stop_engine [team]: the connect started a background engine; take it down so
+# the test, not the clock, decides when a push happens. Verified before
+# signalling, like the teardown.
 stop_engine() {
-  local pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid" pid
+  local team="${1:-testteam}" pidfile pid
+  pidfile="$TEST_SKILL_DIR/run/remote-sync.$team.pid"
   [ -f "$pidfile" ] || return 0
   pid="$(cat "$pidfile")"
-  kill "$pid" 2>/dev/null || true
-  wait_for_pid_exit "$pid" || true
+  kill_if_cmdline "$pid" "remote-sync.mjs"
   rm -f "$pidfile"
 }
-
-stop_engine_of() {
-  local pidfile="$TEST_SKILL_DIR/run/remote-sync.$1.pid" pid
-  [ -f "$pidfile" ] || return 0
-  pid="$(cat "$pidfile")"
-  kill "$pid" 2>/dev/null || true
-  wait_for_pid_exit "$pid" || true
-  rm -f "$pidfile"
-}
+stop_engine_of() { stop_engine "$1"; }
 
 push_once() { bash "$SCRIPTS/remote-sync.sh" once --team testteam >/dev/null 2>&1 || true; }
 
@@ -134,7 +154,7 @@ recorded_endpoint() {
   [ "$(device_state | jq -r '.last_code_body.client_id')" = "agmsg-cli" ]
   [ "$(device_state | jq -r '.last_code_body.scope')" = "login" ]
   # The saved copy has done its job once the binding holds the address.
-  [ ! -e "$TEST_SKILL_DIR/run/remote-credentials/device-address.testteam" ]
+  [ -z "$(saved_approvals)" ]
 }
 
 @test "device connect: the history is not uploaded unless asked, and a message written while approving is" {
@@ -179,7 +199,7 @@ recorded_endpoint() {
   has "$output" "denied"
   has "$output" "nothing was changed"
   [ -z "$(recorded_endpoint)" ]
-  [ ! -e "$TEST_SKILL_DIR/run/remote-credentials/device-address.testteam" ]
+  [ -z "$(saved_approvals)" ]
   run bash "$SCRIPTS/send.sh" testteam alice alice "still local"
   [ "$status" -eq 0 ]
 }
@@ -189,7 +209,8 @@ recorded_endpoint() {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 1 ]
   [ -z "$(recorded_endpoint)" ]
-  local saved="$TEST_SKILL_DIR/run/remote-credentials/device-address.testteam"
+  local saved
+  saved="$(saved_approvals)"
   [ -s "$saved" ]
   # Readable by this user only.
   case "$(uname)" in
@@ -203,7 +224,94 @@ recorded_endpoint() {
   [ "$status" -eq 0 ]
   has "$output" "Connected: team 'testteam'"
   [ "$(device_state | jq -r '.codes')" = 1 ]
-  [ ! -e "$saved" ]
+  [ -z "$(saved_approvals)" ]
+}
+
+@test "device connect: a message written after a failed first attempt is still sent by the re-run" {
+  start_mock MOCK_FEATURES=device-approval MOCK_CONNECT_STATUS=500
+  bash "$SCRIPTS/send.sh" testteam alice alice "written before the command" >/dev/null
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  bash "$SCRIPTS/send.sh" testteam alice alice "written after the first attempt" >/dev/null
+  curl -sS "$ENDPOINT/_test/connect-status?value=" >/dev/null
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  stop_engine
+  push_once
+  [ "$(count_pushed "written after the first attempt")" = 1 ]
+  [ "$(count_pushed "written before the command")" = 0 ]
+}
+
+@test "device connect: an approval made at one server is never offered to another" {
+  start_mock MOCK_FEATURES=device-approval MOCK_CONNECT_STATUS=500
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  local first="$ENDPOINT"
+  start_second_mock MOCK_FEATURES=device-approval
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT2" testteam
+  [ "$status" -eq 0 ]
+  # The second server was asked for its own approval, and the team is bound to it.
+  [ "$(curl -sS "$ENDPOINT2/_test/device-state" | jq -r '.codes')" = 1 ]
+  case "$(recorded_endpoint)" in "$ENDPOINT2"/t/*) ;; *) return 1 ;; esac
+  # The first server's approval is still saved, under its own name.
+  [ "$(saved_approvals | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "device connect: an activation the server could not take keeps the approval and the re-run retries it" {
+  start_mock MOCK_FEATURES=device-approval MOCK_DEVICE_ACTIVATE_STATUS=503
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  has "$output" "approval is kept"
+  [ -s "$(saved_approvals)" ]
+  [ -z "$(recorded_endpoint)" ]
+  curl -sS "$ENDPOINT/_test/activate-status?value=" >/dev/null
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  # Not asked to approve again; the activation that failed was retried and took.
+  [ "$(device_state | jq -r '.codes')" = 1 ]
+  [ "$(device_state | jq -r '.failed_activations')" = 1 ]
+  [ "$(device_state | jq -r '.activations')" = 1 ]
+  [ -z "$(saved_approvals)" ]
+}
+
+@test "device connect: the approved address is on no process command line" {
+  start_mock MOCK_FEATURES=device-approval
+  # Node is the one program the address is handed to; record every argv it gets.
+  local real_node wrapper="$BATS_TEST_TMPDIR/node-argv"
+  real_node="$(command -v node)"
+  printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' \
+    "$BATS_TEST_TMPDIR/node-argv.log" "$real_node" > "$wrapper"
+  chmod +x "$wrapper"
+  : > "$BATS_TEST_TMPDIR/node-argv.log"
+  AGMSG_NODE="$wrapper" run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  # Non-vacuity: node was run, and with arguments.
+  [ -s "$BATS_TEST_TMPDIR/node-argv.log" ]
+  lacks "$(cat "$BATS_TEST_TMPDIR/node-argv.log")" "mocksecret"
+  stop_engine
+}
+
+@test "device pull: the approved address is on no node command line" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none
+  local real_node wrapper="$BATS_TEST_TMPDIR/node-argv"
+  real_node="$(command -v node)"
+  printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' \
+    "$BATS_TEST_TMPDIR/node-argv.log" "$real_node" > "$wrapper"
+  chmod +x "$wrapper"
+  : > "$BATS_TEST_TMPDIR/node-argv.log"
+  AGMSG_NODE="$wrapper" run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 0 ]
+  [ -s "$BATS_TEST_TMPDIR/node-argv.log" ]
+  lacks "$(cat "$BATS_TEST_TMPDIR/node-argv.log")" "mocksecret"
+  stop_engine cloned
+}
+
+@test "remote.sh hands no endpoint to another program on its command line" {
+  # The shell side of the same rule, which a node wrapper cannot see: a
+  # remote-sync.sh call that names the endpoint in its arguments. The endpoint
+  # may be an approved address, which is a credential.
+  run grep -nE '(--endpoint|--server)[ =]"?\$\{?endpoint' "$SCRIPTS/remote.sh"
+  [ "$status" -eq 1 ]
 }
 
 @test "device connect: a storage driver that cannot start from now stops before anything is asked" {
@@ -240,7 +348,7 @@ recorded_endpoint() {
   [ "$(device_state | jq -r '.codes')" = 1 ]
   [ "$(device_state | jq -r '.activations')" = 1 ]
   [ -f "$TEST_SKILL_DIR/teams/cloned/config.json" ]
-  [ ! -e "$TEST_SKILL_DIR/run/remote-credentials/device-address.cloned" ]
+  [ -z "$(saved_approvals)" ]
   stop_engine_of cloned
 }
 
