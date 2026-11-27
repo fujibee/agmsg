@@ -5,6 +5,7 @@ import { insertDevice } from "../src/accounts/capability.js";
 import { createApp } from "../src/app.js";
 import type { Config } from "../src/config.js";
 import { migrate } from "../src/db.js";
+import { currentEpochKeyId } from "../src/escrow-store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDatabase = databaseUrl ? describe : describe.skip;
@@ -138,6 +139,22 @@ describeDatabase("key escrow", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json().features.includes("key-escrow")).toBe(expected);
       await app.close();
+    }
+  });
+
+  it("reports the key id of the highest epoch, and null for a team with none", async () => {
+    const other = "018f3f7e-0000-7000-8000-0000000000e2";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'team-f')`, [other]);
+    const client = await pool.connect();
+    try {
+      expect(await currentEpochKeyId(client, other)).toBeNull();
+      await insert(row({ team_id: other, epoch: 1, key_id: "first" }));
+      expect(await currentEpochKeyId(client, other)).toBe("first");
+      await insert(row({ team_id: other, epoch: 2, key_id: "second" }));
+      expect(await currentEpochKeyId(client, other)).toBe("second");
+      expect(await currentEpochKeyId(client, randomUUID())).toBeNull();
+    } finally {
+      client.release();
     }
   });
 });
