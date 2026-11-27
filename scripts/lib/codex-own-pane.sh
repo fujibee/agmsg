@@ -18,6 +18,14 @@
 #           the thread's cwd and whose start time is within
 #           AGMSG_CODEX_START_SKEW seconds of the thread's created_at in
 #           Codex's state_*.sqlite. A fresh launch creates its thread at start.
+#        c. only when (a) and (b) find nothing: a launch can take longer than
+#           the skew to create its thread (measured: 11 s between a TUI's start
+#           and its thread's created_at, with MCP servers starting). Then the
+#           ONE codex TUI in the thread's cwd that started up to
+#           _AGMSG_COP_SLOW_START seconds before the thread is taken, but only
+#           if no other thread in that cwd was created between that TUI's start
+#           and this thread (the TUI's first thread is this one). Two TUIs in
+#           that window are never told apart.
 #      Exactly one distinct process across both must remain. Neither kind proves
 #      the TUI STILL holds the thread (a `/clear` moves it to a new thread and
 #      leaves the argv behind), so two candidates are never resolved by picking
@@ -49,6 +57,9 @@ _AGMSG_CODEX_OWN_PANE_SH=1
 : "${AGMSG_CODEX_TRUSTED_TTL:=300}"   # how long "env is believable" is remembered
 : "${AGMSG_CODEX_PANE_TTL:=300}"      # how long a proven pane is remembered
 : "${AGMSG_CODEX_UNKNOWN_TTL:=15}"    # how long "cannot prove it" is remembered
+# The slowest launch measured waited 11 s before its thread existed. A fixed
+# bound, not a setting: it is not read from the environment.
+_AGMSG_COP_SLOW_START=60
 
 # Is this process under a `--managed-daemon` app-server?
 #   0  yes        1  no (the walk reached the top of the tree)
@@ -181,8 +192,8 @@ _agmsg_cop_no_other_resume() {   # <thread> <remembered pid>
 
 # thread -> the one TUI pid. Prints "ok <pid>" or "no <reason>"; always returns 0
 # (it runs in a command substitution, so a variable could not carry the reason).
-_agmsg_cop_find_tui() {   # <thread> <thread-cwd> <created_at>
-  local tcwd="$2" created="$3" scan now kind a b c leaves p pids="" count=0 only=""
+_agmsg_cop_find_tui() {   # <thread> <thread-cwd> <created_at> [<state db>]
+  local tcwd="$2" created="$3" db="${4:-}" scan now kind a b c leaves p pids="" count=0 only="" slow="" nslow=0 start q others
   now="$(date +%s)"
   scan="$(_agmsg_cop_scan "$1")"
   [ -n "$scan" ] || { echo "no no_codex_process_listed"; return 0; }
@@ -202,9 +213,38 @@ $scan
 EOF
   for p in $(printf '%s\n' $pids | sort -u); do count=$((count + 1)); only="$p"; done
   case "$count" in
-    1) echo "ok $only" ;;
-    0) echo "no no_codex_tui_holds_this_thread" ;;
-    *) echo "no several_codex_tuis_may_hold_this_thread" ;;
+    1) echo "ok $only"; return 0 ;;
+    0) ;;
+    *) echo "no several_codex_tuis_may_hold_this_thread"; return 0 ;;
+  esac
+  # c. a slow launch: the one TUI in this cwd started shortly before the thread.
+  while read -r kind a b; do
+    [ "$kind" = T ] || continue
+    start=$((now - b))
+    [ "$start" -le "$((created + AGMSG_CODEX_START_SKEW))" ] \
+      && [ "$((created - start))" -le "$_AGMSG_COP_SLOW_START" ] || continue
+    c="$(_agmsg_cop_cwd_of "$a")" || continue
+    [ "$(_agmsg_cop_real "$c")" = "$(_agmsg_cop_real "$tcwd")" ] || continue
+    nslow=$((nslow + 1)); slow="$a $start"
+  done <<EOF
+$scan
+EOF
+  case "$nslow" in
+    0) echo "no no_codex_tui_holds_this_thread"; return 0 ;;
+    1) ;;
+    *) echo "no several_codex_tuis_may_hold_this_thread"; return 0 ;;
+  esac
+  start="${slow#* }"
+  # Is this thread that TUI's first? Another thread in the cwd created since the
+  # TUI started, or a table that cannot be read, means it may not be.
+  [ -n "$db" ] || { echo "no codex_state_db_unreadable"; return 0; }
+  q="$(printf '%s' "$tcwd" | sed "s/'/''/g")"
+  others="$(sqlite3 -cmd '.timeout 1000' "$db" \
+    "pragma query_only=1; select count(*) from threads where cwd='$q' and id<>'$1' and created_at>=$((start - AGMSG_CODEX_START_SKEW)) and created_at<=$created" 2>/dev/null)" || others=""
+  case "$others" in
+    0) echo "ok ${slow%% *}" ;;
+    ''|*[!0-9]*) echo "no codex_state_db_unreadable" ;;
+    *) echo "no thread_is_not_the_first_since_its_tui_started" ;;
   esac
 }
 
@@ -269,7 +309,7 @@ agmsg_codex_own_pane() {
     case "$created" in ''|*[!0-9]*) reason="thread_not_in_codex_state_db"; created="" ;; esac
   fi
   if [ -z "$reason" ] && [ -n "$created" ]; then
-    found="$(_agmsg_cop_find_tui "$tid" "$tcwd" "$created")"
+    found="$(_agmsg_cop_find_tui "$tid" "$tcwd" "$created" "$db")"
     if [ "${found%% *}" = ok ]; then
       pid="${found#ok }"
       env="$(_agmsg_cop_env_of "$pid")" || env=""

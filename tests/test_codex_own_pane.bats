@@ -148,6 +148,50 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_holds_this_thread" ]
 }
 
+@test "a slow launch (thread made 11 s after its TUI started) is found when that TUI is the only one" {
+  _under_daemon
+  _thread t-slow /work/a 589
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-slow
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "slow launch: two TUIs started in the window before the thread are not told apart" {
+  _under_daemon
+  _thread t-slow /work/a 560
+  _tui 91001 10:00 /work/a w1:pC
+  _tui 91002 09:40 /work/a w1:pN
+  _seat t-slow
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:several_codex_tuis_may_hold_this_thread" ]
+}
+
+@test "slow launch: a thread that is not the TUI's first (another one came before it) is unknown" {
+  _under_daemon
+  _thread t-first /work/a 599
+  _thread t-second /work/a 570
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-second
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:thread_is_not_the_first_since_its_tui_started" ]
+  # the first one is still found by the start-time rule
+  _seat t-first
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "slow launch: a TUI started in another cwd in the window does not count" {
+  _under_daemon
+  _thread t-slow /work/a 589
+  _tui 91001 10:00 /work/a w1:pC
+  _tui 91002 09:55 /work/other w1:pN
+  _seat t-slow
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "a TUI in another cwd is not a match even at the same second" {
   _under_daemon
   _thread t-aaa /work/a 600
