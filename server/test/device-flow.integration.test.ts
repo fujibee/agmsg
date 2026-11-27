@@ -28,6 +28,7 @@ describeDatabase("device flow", () => {
     profile: "accounts", ownerSecret, publicUrl: origin, deviceClientIds: ["agmsg-cli"],
     databaseUrl: databaseUrl ?? "", host: "127.0.0.1", port: 0,
     logLevel: "silent", retentionMaxLiveMessages: null,
+    escrowBackend: "none", escrowKeyfile: null,
   };
 
   // Each flow comes from its own source address so the per-address limits

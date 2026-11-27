@@ -36,6 +36,9 @@ describeDatabase("key escrow", () => {
 
   const config = (escrowBackend: "none" | "keyfile"): Config => ({
     profile: "accounts",
+    ownerSecret: null,
+    publicUrl: null,
+    deviceClientIds: ["agmsg-cli"],
     databaseUrl: databaseUrl ?? "",
     host: "127.0.0.1",
     port: 0,
