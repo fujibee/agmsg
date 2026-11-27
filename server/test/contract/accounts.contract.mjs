@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { after, describe, it } from "node:test";
 
 const CLIENT = "agmsg-cli";
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SECRET = /^agsy_[0-9a-f]{8}_[A-Za-z0-9_-]{43}$/;
 const USER_CODE = /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
 const CODE_KEYS = ["device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in", "interval"];
@@ -70,6 +71,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
     }
   }
   assert.notEqual(fixture.primary.teamId, fixture.foreign.teamId, "fixtures must contain two separately owned teams");
+  text(fixture.primary.teamName, "fixture.primary.teamName");
   assert.equal(typeof fixture.approveGrant, "function", "fixture.approveGrant is required");
   assert.equal(typeof fixture.dispose, "function", "fixture.dispose is required");
   assert.ok(fixture.expectedLimits && typeof fixture.expectedLimits === "object" && !Array.isArray(fixture.expectedLimits), "fixture.expectedLimits is required (empty for unlimited)");
@@ -180,7 +182,14 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       const tokenBody = { device_code: grant.device_code, client_id: CLIENT };
       const response = await control("/v1/device/token", { method: "POST", body: tokenBody });
       assert.equal(response.status, 200);
-      keys(response.body, ["capability_url", "machine_name", "scope", "org"], "approved token");
+      keys(response.body, ["capability_url", "machine_name", "scope", "org"], "approved token", ["team_id", "team_name"]);
+      const hasTeam = Object.hasOwn(response.body, "team_id");
+      assert.equal(hasTeam, Object.hasOwn(response.body, "team_name"), "token team fields must be present together");
+      if (hasTeam) {
+        assert.ok(typeof response.body.team_id === "string" && UUID_V7.test(response.body.team_id), "token team id must be UUIDv7");
+        text(response.body.team_name, "token team name");
+        assert.ok(response.body.team_id === fixture.primary.teamId && response.body.team_name === fixture.primary.teamName, "token team must match the approved fixture team");
+      }
       assert.ok(response.body.machine_name === machineName, "token must retain the requested machine label");
       assert.ok(response.body.scope === "login", "token scope must remain login");
       text(response.body.org, "token org");

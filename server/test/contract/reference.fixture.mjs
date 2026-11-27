@@ -30,6 +30,7 @@ export async function createFixture({ baseUrl }) {
       return { capabilityUrl: `${origin.origin}/t/${result.secret}`, teamId, deviceId: result.deviceId, devicePubkey: null, label };
     }
     const primary = await device(teams[0], "contract-primary");
+    primary.teamName = "contract-0";
     const foreign = await device(teams[1], "contract-foreign");
     const revoked = await device(teams[0], "contract-revoked");
     await pool.query("UPDATE devices SET revoked_at = clock_timestamp() WHERE device_id = $1", [revoked.deviceId]);

@@ -32,6 +32,7 @@ export async function createFixture({ baseUrl }) {
     primary: {
       capabilityUrl: "http://127.0.0.1:8788/t/<active-secret>",
       teamId: "<first-team-uuid-v7>",
+      teamName: "<first-team-name>",
       deviceId: "<registered-device-id>",
       devicePubkey: "<public-age-recipient>",
       label: "contract-primary",
@@ -66,6 +67,7 @@ Fixture requirements:
 - `primary` and `foreign` are activated capabilities across separate ownership boundaries. Their teams must already exist, and each capability must identify a live device. `devicePubkey` is the expected public key or `null` before key registration; non-null public keys must differ. The first team must be readable through `primary` and denied through the foreign ownership boundary. When enabling the deferred registration tests, use each team's original claimant with distinct registered public keys.
 - `revoked` is a capability/device pair revoked through the normal implementation helper. It must no longer appear in `primary`'s active-device listing. The capability's activation route must report the known revoked record, rather than an unknown secret.
 - `approveGrant` runs outside the shared HTTP contract: owner sign-in differs by deployment. It receives a code that the suite just issued to `agmsg-cli`, the decision (`approve` or `deny`), and the first team's ID. It must complete the corresponding durable grant transition before returning. Do not change the machine name fixed at issuance.
+- Token success always contains `capability_url`, `machine_name`, `scope`, and `org`. A team-bound approval may additionally return `team_id` and `team_name`, together; the shared assertions require a UUIDv7 matching `primary.teamId` and a nonempty name matching `primary.teamName`. An account-scoped approval may omit both. Each implementation's own tests pin whether its response includes the pair; the shared file never infers that from a host name.
 - The approved login must be able to mint one additional machine and read the first team after activation. Capacity-exhaustion and subscription refusal cases are tested separately from this successful-login fixture.
 - `dispose` is always called after the registered suite, including failing tests. If fixture creation fails before returning, the factory must clean up its own partial setup.
 - `expectedLimits` lists only configured finite limits, with decimal-string values: for example `{ devices: "8", teams: "8", live_messages: "1000" }`. Use `{}` when all are unlimited. `live_messages` describes oldest-message eviction, not refusal. Devices/team exhaustion is tested by the reference server's separate integration cases.
