@@ -1823,7 +1823,8 @@ async function send(config, path, init, authHeaders) {
     // -- re-creating the "sync stopped with no reason in the log" failure the
     // errorCode() bridge exists to prevent.
     const safeCode = /^[a-z][a-z0-9-]{0,63}$/.test(code) ? code : "unknown-error";
-    const error = new Error(`HTTP ${response.status} ${safeCode}`);
+    const detail = refusalDetail(body);
+    const error = new Error(`HTTP ${response.status} ${safeCode}${detail ? ` ${detail}` : ""}`);
     error.status = response.status; error.code = code; error.body = body;
     throw error;
   }
@@ -1862,6 +1863,23 @@ async function send(config, path, init, authHeaders) {
 // the edge emits the nested shape, DELETE the string branch — leaving it is how
 // "two shapes" quietly becomes the contract and a third implementation picks
 // whichever it likes.
+// The server's own explanation of a refusal (error.message), reduced to one
+// line of printable ASCII-or-text, at most 500 characters. It is server text, so
+// it is untrusted: control and escape characters are removed, whitespace runs
+// collapse to one space, and nothing is added to it. A body without a string
+// message gives "" and the caller's line stays as it was.
+export function refusalDetail(body) {
+  const message = body?.error?.message;
+  if (typeof message !== "string") return "";
+  const clean = message
+    .replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return [...clean].slice(0, 500).join("");
+}
+
 export function errorCode(body) {
   const error = body?.error;
   if (typeof error === "string" && error.length > 0) return error;

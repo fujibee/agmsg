@@ -1965,6 +1965,32 @@ test("send collapses an out-of-shape server error code in the message, keeping c
       });
       await assert.rejects(request({ ...config, server_url: "https://sync.example" }, "/v1/messages"),
         (error) => error.message === "HTTP 413 unknown-error" && error.code === "payload_too_large");
+      // The server's own explanation follows the code. It is server text: one
+      // line, no control or escape bytes, at most 500 characters, nothing added.
+      const messageOf = async (status, body) => {
+        responseStub = async () => new Response(JSON.stringify(body), {
+          status, headers: { "Agmsg-Protocol-Version": "1" },
+        });
+        try { await request({ ...config, server_url: "https://sync.example" }, "/v1/messages"); }
+        catch (error) { return error.message; }
+        return "no error";
+      };
+      assert.equal(
+        await messageOf(413, { error: { code: "over-capacity", message: "The team holds 100 of 100 messages. Nothing was stored. Remove old messages or raise the limit." } }),
+        "HTTP 413 over-capacity The team holds 100 of 100 messages. Nothing was stored. Remove old messages or raise the limit.");
+      // No message, or not a string: today's line, unchanged.
+      assert.equal(await messageOf(404, { error: { code: "not-found" } }), "HTTP 404 not-found");
+      assert.equal(await messageOf(404, { error: { code: "not-found", message: 7 } }), "HTTP 404 not-found");
+      assert.equal(await messageOf(400, { error: "payload_too_large" }), "HTTP 400 unknown-error");
+      // Control and escape bytes, line breaks and long text are cleaned.
+      const dirty = await messageOf(400, { error: { code: "bad-request",
+        message: "first\u001b[2Jline\nsecond\u0007\u001b]0;title\u0007 third\r\n\t\u0000end" } });
+      assert.equal(dirty, "HTTP 400 bad-request firstline second third end");
+      assert.doesNotMatch(dirty, /[\u0000-\u001f\u007f]/);
+      const long = await messageOf(400, { error: { code: "bad-request", message: "x".repeat(900) } });
+      assert.equal(long, `HTTP 400 bad-request ${"x".repeat(500)}`);
+      // A message with nothing printable left adds nothing.
+      assert.equal(await messageOf(400, { error: { code: "bad-request", message: "\u001b[2J\n\t" } }), "HTTP 400 bad-request");
     });
   } finally {
     responseStub = previousResponseStub;
