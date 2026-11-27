@@ -89,6 +89,10 @@ export async function listTeams(
   return rows.map((row) => ({ teamId: row.team_id, teamName: row.team_name }));
 }
 
+// The advisory lock a mint takes while a device limit is set (an arbitrary,
+// fixed key, distinct from the team limit's lock in storage.ts).
+const DEVICES_LIMIT_LOCK = 4120300148;
+
 export type DecideResult =
   | { ok: true }
   | { ok: false; reason: "not_found" | "already_decided" | "team_required" | "team_mismatch" | "unknown_team" };
@@ -139,6 +143,9 @@ export async function decideGrant(
 
 export type PollResult =
   | { status: "authorization_pending" | "access_denied" | "expired_token" | "machine_exists" }
+  // The server's device limit is reached. The grant stays approved, so the same
+  // machine succeeds on a later poll once a device is removed or the limit raised.
+  | { status: "limit_reached"; value: bigint }
   // The same answer as expired_token on the wire; `unknown` lets the caller
   // count device codes that matched no grant at all.
   | { status: "expired_token"; unknown: true }
@@ -148,6 +155,7 @@ export type PollResult =
 export async function pollToken(
   pool: Pool,
   input: { deviceCode: string; clientId: string; accountId: string },
+  deviceLimit: bigint | null = null,
 ): Promise<PollResult> {
   return inTransaction(pool, async (client) => {
     const { rows } = await client.query<{
@@ -178,7 +186,10 @@ export async function pollToken(
     const minted = await mintDevice(client, {
       grantId: grant.grant_id, teamId: grant.team_id, machineName: grant.machine_name,
       deviceType: grant.device_type,
-    });
+    }, deviceLimit);
+    if (minted === "limit") {
+      return { status: "limit_reached" as const, value: deviceLimit ?? 0n };
+    }
     if (!minted) return { status: "machine_exists" as const };
     return {
       status: "ready" as const,
@@ -197,7 +208,8 @@ export async function pollToken(
 async function mintDevice(
   client: PoolClient,
   grant: { grantId: string; teamId: string; machineName: string; deviceType: string },
-): Promise<{ secret: string } | null> {
+  deviceLimit: bigint | null,
+): Promise<{ secret: string } | "limit" | null> {
   // A provisional device that never activated is dead past its deadline and
   // must not keep holding the name.
   await client.query(
@@ -206,6 +218,19 @@ async function mintDevice(
         AND activated_at IS NULL AND activate_deadline <= clock_timestamp()`,
     [grant.teamId, grant.machineName],
   );
+  // The device limit counts the devices that hold a slot now: not revoked, and
+  // not a provisional one past its deadline. The count and the insert are
+  // serialized on one lock the commit releases, so two machines polling at the
+  // same moment cannot both take the last slot. Without a limit nothing is added.
+  if (deviceLimit !== null) {
+    await client.query("SELECT pg_advisory_xact_lock($1)", [DEVICES_LIMIT_LOCK]);
+    const counted = await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM devices
+        WHERE revoked_at IS NULL
+          AND NOT (activated_at IS NULL AND activate_deadline <= clock_timestamp())`,
+    );
+    if (BigInt(counted.rows[0]?.n ?? "0") >= deviceLimit) return "limit";
+  }
   const minted = mintSecret();
   const deviceId = uuidv7();
   await client.query("SAVEPOINT mint");

@@ -75,7 +75,7 @@ silently.
 | Variable | Limit | Where it applies |
 | --- | --- | --- |
 | `AGMSG_LIMIT_TEAMS` | teams on the server | `POST /v1/connect` refuses the team that would pass it |
-| `AGMSG_LIMIT_DEVICES` | devices | read and listed; enforced where devices are approved |
+| `AGMSG_LIMIT_DEVICES` | devices (not revoked, and not a provisional one past its activation deadline) | `POST /v1/device/token` refuses to mint the device that would pass it; the approved grant stays, so a later poll succeeds once a device is removed |
 | `AGMSG_RETENTION_MAX_LIVE_MESSAGES` | live messages per team | retains the oldest instead of refusing (see Retention) |
 
 A limit that is set is enforced in every profile (`AGMSG_PROFILE=open` as well

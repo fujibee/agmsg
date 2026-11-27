@@ -141,13 +141,20 @@ export async function registerDeviceRoutes(
     }
     const result = await pollToken(pool, {
       deviceCode: body.data.device_code, clientId: body.data.client_id, accountId,
-    });
+    }, config.limits.devices);
     if ("unknown" in result) {
       unknownCodeLimiter.hit(`unk:${request.ip}`, DEVICE_LIMITS.unknownDeviceCodesPerAddressPerHour, now);
     }
     switch (result.status) {
       case "slow_down":
         return reply.status(400).send({ error: "slow_down", interval: result.interval });
+      case "limit_reached":
+        // The stated refusal, in this endpoint's flat error shape: the limit and
+        // its value are named. 403 like every limit-reached; the grant is not
+        // consumed, so a later poll succeeds once a device is removed.
+        return reply.status(403).send({
+          error: "limit-reached", limit: "devices", value: result.value.toString(),
+        });
       case "ready":
         // The secret's only appearance. The machine stores the URL, then activates.
         return reply.status(200).send({
