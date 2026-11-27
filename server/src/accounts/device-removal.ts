@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { inTransaction } from "../db.js";
-import { currentEpochKeyId, fenceEpoch } from "./fence.js";
+import { fenceEpoch } from "../fence.js";
 
 // Step 1 of removing a device, always succeeding once the device exists: mark
 // it revoked, so its capability secret stops at once, and fence its team's
@@ -8,6 +8,13 @@ import { currentEpochKeyId, fenceEpoch } from "./fence.js";
 // can still read. Step 2 (a new epoch, wrapped and published) belongs to key
 // rotation and lifts the fence in the transaction that publishes it. A failure
 // in step 2 never undoes this step.
+
+// The key id of a team's current epoch, or null when it has none. Wired to the
+// escrow seam's accessor once that lands; until then no team has an epoch key
+// the server knows, so removal fences nothing and the route stays correct.
+export async function currentEpochKeyId(_client: PoolClient, _teamId: string): Promise<string | null> {
+  return null;
+}
 
 export type RemovalResult = { ok: true; teamId: string } | { ok: false };
 

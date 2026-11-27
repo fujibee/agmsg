@@ -12,6 +12,7 @@ import { registerDeviceRoutes } from "./accounts/routes.js";
 import { registerCapabilityScope, redactSecretPath } from "./accounts/scope.js";
 import type { Config } from "./config.js";
 import { limitsFor } from "./limits.js";
+import { assertNotFenced } from "./fence.js";
 import { errorBody, DatabaseUnavailableError, ProtocolError } from "./errors.js";
 import {
   MAX_REQUEST_BYTES,
@@ -226,6 +227,7 @@ async function dataPlaneRoutes(
   app.post("/v1/messages", { bodyLimit: MAX_REQUEST_BYTES }, async (request) => {
     const teamId = await scopedTeamId(pool, request);
     const body = postMessagesSchema.parse(request.body);
+    await assertNotFenced(pool, teamId, body.messages.map((m) => m.envelope.key_id));
     return postMessages(pool, teamId, body.messages,
       config.retentionMaxLiveMessages, (notice) => {
         app.log.info({ event: "retention.applied", ...notice },

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { insertDevice } from "../src/accounts/capability.js";
 import { removeDevice } from "../src/accounts/device-removal.js";
-import { liftEpochFence } from "../src/accounts/fence.js";
+import { fenceEpoch, liftEpochFence } from "../src/fence.js";
 import type { Config } from "../src/config.js";
 import { inTransaction, migrate } from "../src/db.js";
 
@@ -162,11 +162,18 @@ describeDatabase("owner removal of a device", () => {
       expect(rows.rowCount).toBe(0);
     });
 
-    it("does not touch the open profile's data plane", async () => {
+    it("holds in the open profile too, where it is part of the data plane", async () => {
       const open = createApp(pool, { ...config, profile: "open", ownerSecret: null, publicUrl: null });
       await open.ready();
+      await inTransaction(pool, (client) => fenceEpoch(client, teamA, "epoch-open"));
+      const headers = { ...wire, "agmsg-team-id": teamA, "content-type": "application/json" };
+      const fenced = await open.inject({ method: "POST", url: "/v1/messages", headers, payload: message("epoch-open") });
+      expect(fenced.statusCode).toBe(409);
+      expect(fenced.json().error.code).toBe("epoch-fenced");
+      expect(fenced.json().error.details).toEqual({ team_id: teamA, key_id: "epoch-open" });
+      const plain = await open.inject({ method: "POST", url: "/v1/messages", headers, payload: message(null) });
+      expect(plain.json().error?.code).not.toBe("epoch-fenced");
       const table = open.printRoutes({ commonPrefix: false });
-      expect(table).not.toMatch(/epoch|fence/u);
       expect(table).not.toMatch(/devices/u);
       await open.close();
     });

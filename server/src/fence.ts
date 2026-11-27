@@ -1,10 +1,12 @@
 import type { Pool, PoolClient } from "pg";
+import { ProtocolError } from "./errors.js";
 
-// After an owner removes a device, the key the removed device could read is no
-// longer secret from it. Until the key is rotated, writes sealed under that
-// epoch are refused with a stated error (epoch-fenced) rather than accepted
-// into a stream the removed device may still read. Rotation (publishing the next
-// epoch) lifts the fence in the same transaction.
+// The epoch fence, part of the data plane in every profile. When a device that
+// could read a team's key is removed, the key is no longer secret from it. Until
+// the key is rotated, writes sealed under that epoch are refused with a stated
+// error (epoch-fenced) rather than accepted into a stream the removed device may
+// still read. Rotation (publishing the next epoch) lifts the fence in the same
+// transaction. A team with no fence rows behaves exactly as it did before.
 
 // Records the fence for a team's current epoch. A team with no epoch key (a
 // plaintext team, or one with no escrow) has nothing to fence and records none.
@@ -49,16 +51,21 @@ export async function fencedKeyIds(
   return rows.map((row) => row.key_id);
 }
 
-// The key id of a team's current epoch, or null when it has none. Wired to the
-// escrow seam's accessor once that lands; until then no team has an epoch key
-// the server knows, so removal fences nothing and the route stays correct.
-export async function currentEpochKeyId(_client: PoolClient, _teamId: string): Promise<string | null> {
-  return null;
-}
-
-export class EpochFencedError extends Error {
-  constructor(readonly teamId: string, readonly keyId: string) {
-    super("writes under this key epoch are paused while the key is rotated after a device was removed");
-    this.name = "EpochFencedError";
-  }
+// Refuses a write that carries an envelope sealed under a fenced key id.
+// Plaintext (no key id) is never fenced. One indexed lookup, skipped when no
+// envelope names a key.
+export async function assertNotFenced(
+  pool: Pool,
+  teamId: string,
+  keyIds: ReadonlyArray<string | null>,
+): Promise<void> {
+  const named = [...new Set(keyIds.filter((id): id is string => id !== null))];
+  const first = (await fencedKeyIds(pool, teamId, named))[0];
+  if (first === undefined) return;
+  throw new ProtocolError(
+    409,
+    "epoch-fenced",
+    "writes under this key epoch are paused while the key is rotated after a device was removed; try again shortly",
+    { team_id: teamId, key_id: first },
+  );
 }
