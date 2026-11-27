@@ -26,6 +26,7 @@ describeDatabase("remote storage HTTP API v1", () => {
   let app: ReturnType<typeof createApp>;
 
   const config: Config = {
+    profile: "open",
     databaseUrl: databaseUrl ?? "",
     host: "127.0.0.1",
     port: 8787,

@@ -812,6 +812,7 @@ export async function capabilitySnapshot(
   client: PoolClient,
   teamId: string,
   lockTeam = false,
+  features: readonly string[] = [],
 ): Promise<Record<string, unknown>> {
   const serverId = await serverInstanceId(client);
   const team = await teamRow(client, teamId, lockTeam);
@@ -841,6 +842,10 @@ export async function capabilitySnapshot(
   const current = BigInt(team.current_seq);
   return {
     ...common(serverId, team),
+    // Post-connect features this server offers this team (see featuresFor).
+    // A client uses a listed feature and otherwise keeps the manual path;
+    // it ignores names it does not know.
+    features: [...features],
     current_seq: team.current_seq,
     next_sequence_boundary:
       current === MAX_SEQUENCE ? null : (current + 1n).toString(),
@@ -856,8 +861,9 @@ export async function capabilitySnapshot(
 export async function getCapabilities(
   pool: Pool,
   teamId: string,
+  features: readonly string[] = [],
 ): Promise<Record<string, unknown>> {
-  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId), {
+  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId, false, features), {
     readOnly: true,
     repeatableRead: true,
   });
@@ -870,6 +876,7 @@ export async function getCapabilities(
 export async function connectTeam(
   pool: Pool,
   input: ConnectInput,
+  features: readonly string[] = [],
 ): Promise<Record<string, unknown>> {
   return inTransaction(pool, async (client) => {
       const serverId = await serverInstanceId(client);
@@ -935,7 +942,7 @@ export async function connectTeam(
           [input.team_id, member.member_id, member.name],
         );
       }
-    return capabilitySnapshot(client, input.team_id);
+    return capabilitySnapshot(client, input.team_id, false, features);
   });
 }
 
@@ -1033,8 +1040,9 @@ export async function resolveTeamsByName(
 export async function getTeamSnapshot(
   pool: Pool,
   teamId: string,
+  features: readonly string[] = [],
 ): Promise<Record<string, unknown>> {
-  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId), {
+  return inTransaction(pool, (client) => capabilitySnapshot(client, teamId, false, features), {
     readOnly: true,
     repeatableRead: true,
   });
@@ -1076,7 +1084,9 @@ export async function getMembers(
 export async function health(
   pool: Pool,
   teamId?: string,
+  features: readonly string[] = [],
 ): Promise<{
+  features: string[];
   status: "ok";
   server_instance_id: string;
   protocol: { supported_versions: number[] };
@@ -1095,6 +1105,9 @@ export async function health(
   try {
     const serverId = await serverInstanceId(client);
     const base = {
+      // Origin-level features, readable before any team exists (the only
+      // unauthenticated place a client can ask). Empty means none.
+      features: [...features],
       status: "ok" as const,
       server_instance_id: serverId,
       protocol: { supported_versions: [1] },

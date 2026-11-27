@@ -52,6 +52,7 @@ describeDatabase("Stage-1 polling sync client", () => {
     // the team it owns. Pre-creating it here (the pairing-era assumption) would
     // make that first connect a 409.
     const config: Config = {
+      profile: "open",
       databaseUrl: databaseUrl ?? "",
       host: "127.0.0.1", port: 8787, logLevel: "silent",
       retentionMaxLiveMessages: null,

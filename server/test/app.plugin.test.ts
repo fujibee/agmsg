@@ -10,6 +10,7 @@ import type { Config } from "../src/config.js";
 // resolve before any handler queries Postgres.
 
 const config: Config = {
+  profile: "open",
   databaseUrl: "postgres://unused",
   host: "127.0.0.1",
   port: 0,
