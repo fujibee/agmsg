@@ -94,6 +94,16 @@ describeDatabase("device limit", () => {
     expect(left.rowCount).toBe(0);
   });
 
+  it("still answers machine_exists for a name a live device holds, even when the server is full", async () => {
+    const again = await approved("m1");
+    const answer = await poll(again);
+    expect(answer.statusCode).toBe(400);
+    expect(answer.json().error).toBe("machine_exists");
+    // terminal like without a limit: the grant is consumed, not left waiting
+    const next = await poll(again);
+    expect(next.json().error).toBe("expired_token");
+  });
+
   it("keeps the grant approved: the same machine gets its device once a slot is free", async () => {
     const waiting = await approved("m4");
     expect((await poll(waiting)).statusCode).toBe(403);

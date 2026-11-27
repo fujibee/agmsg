@@ -222,14 +222,23 @@ async function mintDevice(
   // not a provisional one past its deadline. The count and the insert are
   // serialized on one lock the commit releases, so two machines polling at the
   // same moment cannot both take the last slot. Without a limit nothing is added.
+  // A name a live device already holds is not a new device: it falls through to
+  // the insert below, which answers machine_exists (terminal, grant consumed)
+  // exactly as it does without a limit, so a full server does not hide that.
   if (deviceLimit !== null) {
-    await client.query("SELECT pg_advisory_xact_lock($1)", [DEVICES_LIMIT_LOCK]);
-    const counted = await client.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM devices
-        WHERE revoked_at IS NULL
-          AND NOT (activated_at IS NULL AND activate_deadline <= clock_timestamp())`,
+    const held = await client.query(
+      `SELECT 1 FROM devices WHERE team_id = $1 AND name = $2 AND revoked_at IS NULL`,
+      [grant.teamId, grant.machineName],
     );
-    if (BigInt(counted.rows[0]?.n ?? "0") >= deviceLimit) return "limit";
+    if (held.rowCount === 0) {
+      await client.query("SELECT pg_advisory_xact_lock($1)", [DEVICES_LIMIT_LOCK]);
+      const counted = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM devices
+          WHERE revoked_at IS NULL
+            AND NOT (activated_at IS NULL AND activate_deadline <= clock_timestamp())`,
+      );
+      if (BigInt(counted.rows[0]?.n ?? "0") >= deviceLimit) return "limit";
+    }
   }
   const minted = mintSecret();
   const deviceId = uuidv7();
