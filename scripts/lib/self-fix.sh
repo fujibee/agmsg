@@ -31,6 +31,8 @@
 # OUTPUT. One line per seat this session holds, then the writer's lines:
 #   fix seat=<team>/<agent> state=proved locator=<kind:instance:pane> via=<proof|emit_observe>
 #   fix seat=<team>/<agent> state=<disproved|undetermined|unsupported> reason=<r> via=<...> (written nothing)
+#     (the locate_token_emitted_call_fix_again line also says to write the token
+#     line in the reply before running fix again, #2053)
 #   fix none:<no_seat_for_this_session|arguments_refused|...>
 # Exit: 0 when every held seat was written; 2 when at least one was not; 1 on refusal.
 
@@ -535,6 +537,13 @@ agmsg_fix_run() {
     if [ "$st" = proved ]; then
       printf 'fix seat=%s/%s state=proved locator=%s via=%s\n' "$team" "$agent" "$payload" "$via"
       agmsg_self_write "$team" "$agent" "$payload" "$owner" || failed=1
+    elif [ "$payload" = locate_token_emitted_call_fix_again ]; then
+      # The next fix looks for the token on this pane's screen. A CLI that
+      # folds tool output (Claude Code) never shows the token line there, so
+      # an agent that only runs fix again emits a new, equally hidden token
+      # each time (#2053). Say what puts it on the screen.
+      printf 'fix seat=%s/%s state=%s reason=%s via=%s (written nothing; write the AGMSG_LOCATE_TOKEN line above in your reply, verbatim, then run fix again)\n' "$team" "$agent" "$st" "$payload" "$via"
+      failed=1
     else
       printf 'fix seat=%s/%s state=%s reason=%s via=%s (written nothing)\n' "$team" "$agent" "$st" "$payload" "$via"
       failed=1
