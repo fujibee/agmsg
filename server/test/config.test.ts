@@ -53,3 +53,21 @@ describe("accounts profile configuration", () => {
     }
   });
 });
+
+describe("static limits", () => {
+  const base = { DATABASE_URL: "postgresql://example/agmsg" };
+
+  it("are unlimited when unset", () => {
+    expect(loadConfig(base).limits).toEqual({ devices: null, teams: null });
+  });
+
+  it("read the device and team limits as canonical positive integers", () => {
+    expect(loadConfig({ ...base, AGMSG_LIMIT_DEVICES: "3", AGMSG_LIMIT_TEAMS: "5" })
+      .limits).toEqual({ devices: 3n, teams: 5n });
+    for (const name of ["AGMSG_LIMIT_DEVICES", "AGMSG_LIMIT_TEAMS"]) {
+      for (const value of ["", "0", "01", "-1", "1.5", "ten", "9223372036854775808"]) {
+        expect(() => loadConfig({ ...base, [name]: value })).toThrow();
+      }
+    }
+  });
+});

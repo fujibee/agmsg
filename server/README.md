@@ -66,6 +66,25 @@ export AGMSG_RETENTION_MAX_LIVE_MESSAGES=100000
 docker compose up -d --build
 ```
 
+## Limits
+
+Unset means unlimited, which is the default. A configured limit is refused with
+`403 limit-reached` whose body names the limit and its value; nothing is capped
+silently.
+
+| Variable | Limit | Where it applies |
+| --- | --- | --- |
+| `AGMSG_LIMIT_TEAMS` | teams on the server | `POST /v1/connect` refuses the team that would pass it |
+| `AGMSG_LIMIT_DEVICES` | devices | read and listed; enforced where devices are approved |
+| `AGMSG_RETENTION_MAX_LIVE_MESSAGES` | live messages per team | retains the oldest instead of refusing (see Retention) |
+
+A limit that is set is enforced in every profile (`AGMSG_PROFILE=open` as well
+as `accounts`); a configured value is never silently ignored.
+
+Each value is a canonical positive integer that fits a signed BIGINT. The
+limits that are set appear under `limits` in `GET /v1/capabilities`; see
+`spec/v1.md`.
+
 ## Run from source
 
 Node.js 22 and PostgreSQL 17 are the reference versions. Create an empty
