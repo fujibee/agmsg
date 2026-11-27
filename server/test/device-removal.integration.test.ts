@@ -131,6 +131,37 @@ describeDatabase("owner removal of a device", () => {
     expect((await del(target.deviceId, { ...ownerHeaders(), "content-type": "application/json" }, {})).statusCode).toBe(204);
   });
 
+  it("fences the team's highest stored epoch when the owner removes a device over HTTP", async () => {
+    // Production wiring: no key-id accessor is injected, so removal reads the
+    // escrow store. Its own team keeps the fence away from the other cases.
+    const teamC = "018f3f7e-0000-7000-8000-0000000000c3";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'team-c')`, [teamC]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none', 'age-v1']::TEXT[])`,
+      [teamC],
+    );
+    for (const [epoch, keyId] of [[1, "key-old"], [2, "key-mid"], [3, "key-top"]] as const) {
+      await pool.query(
+        `INSERT INTO team_key_epochs (team_id, epoch, wrap_kind, key_ref, wrapped_key, recipient, key_id, snapshot)
+         VALUES ($1, $2, 'keyfile', 'ref', '\\x01', 'age1recipient', $3, $4::jsonb)`,
+        [teamC, epoch, keyId, JSON.stringify({ epoch_revision: String(epoch - 1) })],
+      );
+    }
+    const gone = await insertDevice(pool, { teamId: teamC, name: "gone", deviceType: "codex", active: true });
+    const kept = await insertDevice(pool, { teamId: teamC, name: "kept", deviceType: "codex", active: true });
+    expect((await post(kept.secret, message("key-top"))).statusCode).toBe(200);
+
+    expect((await del(gone.deviceId, ownerHeaders())).statusCode).toBe(204);
+
+    const fenced = await post(kept.secret, message("key-top"));
+    expect(fenced.statusCode).toBe(409);
+    expect(fenced.json().error.code).toBe("epoch-fenced");
+    // only the highest epoch is fenced; an older key still writes
+    expect((await post(kept.secret, message("key-mid"))).statusCode).toBe(200);
+  });
+
   describe("the epoch fence", () => {
     it("pauses writes sealed under the removed device's epoch, with a stated error, until rotation lifts it", async () => {
       const gone = await device("fenced-gone");
