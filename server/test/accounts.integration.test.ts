@@ -219,7 +219,9 @@ describeDatabase("accounts profile", () => {
       expect(text).toContain("/t/[REDACTED]/v1/capabilities");
       expect(text).not.toContain(live.secret);
       expect(text).not.toContain(revoked.secret);
-      expect(text).not.toContain(live.secret.split("_")[2] ?? "x");
+      // the whole 43-character secret body, not a piece of it (the body can itself
+      // contain an underscore, so splitting on "_" would test a fragment)
+      expect(text).not.toContain(live.secret.slice(live.secret.indexOf("_", 5) + 1));
     });
   });
 });
