@@ -411,24 +411,10 @@ export async function syncReadState(
     const floor = BigInt(team.min_available_seq);
     const current = BigInt(team.current_seq);
 
-    const memberIds = input.updates.map((update) => update.member_id);
-    if (memberIds.length > 0) {
-      const members = await client.query<{ member_id: string }>(
-        `SELECT member_id::text FROM members
-          WHERE team_id = $1 AND member_id = ANY($2::uuid[])`,
-        [teamId, memberIds],
-      );
-      if (members.rows.length !== memberIds.length) {
-        throw new ProtocolError(
-          400,
-          "invalid-request",
-          "read-state update contains an inactive member",
-          {},
-          binding,
-        );
-      }
-    }
-
+    // member_id is opaque read-state identity here, the same as wire_id
+    // below: a late joiner may sync read state before its own member row
+    // has propagated, so this no longer requires membership to exist first
+    // (migration 002 drops the matching foreign keys for the same reason).
     for (const update of input.updates) {
       if (BigInt(update.server_seq) > current) {
         throw new ProtocolError(

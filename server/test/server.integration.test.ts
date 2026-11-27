@@ -494,6 +494,43 @@ describeDatabase("remote storage HTTP API v1", () => {
     expect(future.json().error.code).toBe("invalid-request");
   });
 
+  it("accepts read state for a member not yet present in members (late joiner)", async () => {
+    const unknownMemberId = "018f3f7e-0000-7000-8000-0000000000aa";
+    const present = await pool.query<{ member_id: string }>(
+      "SELECT member_id::text FROM members WHERE team_id=$1 AND member_id=$2",
+      [teamId, unknownMemberId],
+    );
+    expect(present.rows).toHaveLength(0);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: {
+        updates: [
+          { member_id: unknownMemberId, server_seq: "1", exact_wire_ids: [] },
+        ],
+        page_after: null,
+        page_limit: 10,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const stored = await pool.query<{ server_seq: string }>(
+      "SELECT server_seq::text FROM read_frontiers WHERE team_id=$1 AND member_id=$2",
+      [teamId, unknownMemberId],
+    );
+    expect(stored.rows[0]?.server_seq).toBe("1");
+
+    // This describe block shares one team/pool across tests; later tests
+    // assert exact read-state item lists for this team, so clean up the
+    // state this test introduced rather than leaving it to leak forward.
+    await pool.query(
+      "DELETE FROM read_frontiers WHERE team_id=$1 AND member_id=$2",
+      [teamId, unknownMemberId],
+    );
+  });
+
   it("attributes a team-wide exact overflow to a causal request member", async () => {
     const coveredWire = "750e8400-e29b-41d4-a716-446655440008";
     const causalWire = "750e8400-e29b-41d4-a716-446655440009";
@@ -556,6 +593,15 @@ describeDatabase("remote storage HTTP API v1", () => {
         details: { member_id: causalMember, team_exact_count: "65537" },
       });
     } finally {
+      // read_frontiers/read_exact no longer cascade off a members delete
+      // (migration 002), so this seeded read_exact data must be cleared
+      // explicitly or it leaks into every later test against this team.
+      await pool.query(
+        `DELETE FROM read_exact WHERE team_id=$1 AND member_id IN (
+           SELECT member_id FROM members WHERE team_id=$1 AND name LIKE 'limit-%'
+         )`,
+        [teamId],
+      );
       await pool.query(
         `DELETE FROM members WHERE team_id=$1 AND name LIKE 'limit-%'`,
         [teamId],
