@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { Config } from "../src/config.js";
 import { migrate } from "../src/db.js";
+import { testConfig } from "./helpers/config.js";
 
 // A configured team limit refuses the connect that would pass it, with a stated
 // error, and leaves nothing behind. No limit configured changes nothing.
@@ -29,20 +30,12 @@ describeDatabase("static limits", () => {
   let admin: Pool;
   let pool: Pool;
 
-  const config = (teams: bigint | null, liveMessages: bigint | null = null): Config => ({
-    profile: "open",
-    ownerSecret: null,
-    publicUrl: null,
-    deviceClientIds: [],
-    databaseUrl: databaseUrl ?? "",
-    host: "127.0.0.1",
-    port: 8788,
-    logLevel: "silent",
-    retentionMaxLiveMessages: liveMessages,
-    escrowBackend: "none",
-    escrowKeyfile: null,
-    limits: { devices: null, teams },
-  });
+  const config = (teams: bigint | null, liveMessages: bigint | null = null): Config =>
+    testConfig({
+      databaseUrl: databaseUrl ?? "",
+      retentionMaxLiveMessages: liveMessages,
+      limits: { devices: null, teams },
+    });
 
   const connect = (app: ReturnType<typeof createApp>, n: number) =>
     app.inject({ method: "POST", url: "/v1/connect", headers, payload: team(n) });
