@@ -174,6 +174,9 @@ recorded_endpoint() {
   # It asked for the machine name and the registered client, nothing else.
   [ "$(device_state | jq -r '.last_code_body.client_id')" = "agmsg-cli" ]
   [ "$(device_state | jq -r '.last_code_body.scope')" = "login" ]
+  # The grant names the team being connected, so the owner has nothing to choose
+  # and a server that holds no team yet can still approve.
+  [ "$(device_state | jq -r '.last_code_body.team_id')" = "$(jq -r '.team_id' "$TEST_SKILL_DIR/teams/testteam/config.json")" ]
   # The saved copy has done its job once the binding holds the address.
   [ -z "$(saved_approvals)" ]
 }
@@ -478,6 +481,19 @@ STUB
   [ "$status" -eq 1 ]
   lacks "$output" "dropped"
   [ -s "$(saved_approvals)" ]
+}
+
+@test "device pull: the team id is sent when it is known, and left out when it is not" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.last_code_body.team_id')" = "$PULL_TEAM_ID" ]
+  stop_engine cloned
+  # By name there is nothing to send before the approval: the owner chooses.
+  rm -rf "$TEST_SKILL_DIR/teams/cloned"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" named
+  [ "$(device_state | jq -r '.last_code_body | has("team_id")')" = false ]
+  stop_engine named
 }
 
 @test "device pull: a server without the feature gets the manual pull" {

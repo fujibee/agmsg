@@ -807,7 +807,7 @@ _remote_device_activate() {
 # _remote_device_field <doc> <json path> -> value or empty
 _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 
-# _remote_device_approve <origin> <team> <position> -> sets REMOTE_DEVICE_ADDRESS
+# _remote_device_approve <origin> <team> <position> [<team-id>] -> sets REMOTE_DEVICE_ADDRESS
 # and REMOTE_DEVICE_POSITION (no subshell: the callers need both)
 #
 # Runs the approval and activates the address. The address is saved durably,
@@ -816,7 +816,7 @@ _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 # activation the server could not take) leaves the saved copy, and the next run
 # retries from there instead of asking the user to approve again.
 _remote_device_approve() {
-  local origin="${1%/}" team="$2" position="${3:-}" pending machine body out code doc err interval deadline \
+  local origin="${1%/}" team="$2" position="${3:-}" team_id_arg="${4:-}" pending machine body out code doc err interval deadline \
     device_code user_code uri uri_complete address expires saved_pos activated rc
   REMOTE_DEVICE_ADDRESS=""
   REMOTE_DEVICE_POSITION="$position"
@@ -846,8 +846,17 @@ _remote_device_approve() {
   [ -n "$machine" ] || machine="machine"
   body="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-body.XXXXXX")"
   out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
-  printf '{"client_id":"%s","scope":"login","machine_name":"%s"}' \
-    "$_REMOTE_DEVICE_CLIENT_ID" "$machine" > "$body"
+  # The team the machine joins, when it is already known (connect knows its own
+  # team id; pull knows it only when given --team-id). A grant issued for a team
+  # needs no choice from the owner, which is what lets a first connect succeed
+  # on a server that holds no team yet. Without one the owner chooses.
+  if [ -n "$team_id_arg" ]; then
+    printf '{"client_id":"%s","scope":"login","machine_name":"%s","team_id":"%s"}' \
+      "$_REMOTE_DEVICE_CLIENT_ID" "$machine" "$team_id_arg" > "$body"
+  else
+    printf '{"client_id":"%s","scope":"login","machine_name":"%s"}' \
+      "$_REMOTE_DEVICE_CLIENT_ID" "$machine" > "$body"
+  fi
   code="$(_remote_http_json_call POST "$origin/v1/device/code" "$body" "$out")" || code="000"
   if [ "$code" != "200" ]; then
     err="$(_remote_device_field "$(cat "$out")" '$.error')"
@@ -1662,7 +1671,7 @@ cmd_pull() {
     device_origin="$endpoint"
     REMOTE_DEVICE_DROP_ORIGIN="$endpoint"
     REMOTE_DEVICE_DROP_TEAM="$team"
-    _remote_device_approve "$endpoint" "$team" "" || exit 1
+    _remote_device_approve "$endpoint" "$team" "" "$team_id" || exit 1
     endpoint="${REMOTE_DEVICE_ADDRESS%/}"
     _remote_validate_endpoint "$endpoint" || exit 1
     device_pulled=1
@@ -2967,7 +2976,7 @@ cmd_connect() {
       echo "Team '$team' is already connected; it stays as it is (a manual end-to-end key is not moved by device approval)." >&2
     else
       device_origin="$endpoint"
-      _remote_device_approve "$endpoint" "$team" "$history_pos" || exit 1
+      _remote_device_approve "$endpoint" "$team" "$history_pos" "$team_id" || exit 1
       endpoint="${REMOTE_DEVICE_ADDRESS%/}"
       [ "$with_history" -ne 0 ] || history_pos="$REMOTE_DEVICE_POSITION"
       _remote_validate_endpoint "$endpoint" || exit 1
