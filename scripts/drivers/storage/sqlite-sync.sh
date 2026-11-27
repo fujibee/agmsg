@@ -712,7 +712,10 @@ _sqlite_sync_rewind_to_legacy() {
              COALESCE((SELECT MIN(seq)-1 FROM events
                         WHERE type='message_sent' AND team='$tl' AND seq<0),
                       push_cursor))
-     WHERE local_team='$tl';" >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
+     WHERE local_team='$tl'
+       AND NOT EXISTS (SELECT 1 FROM storage_metadata
+                        WHERE key='sync_start_after:'||server_instance_id||':'||
+                                  remote_team_id||':'||protocol_version);" >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
 }
 
 _sqlite_sync_ensure_binding() {
@@ -721,6 +724,44 @@ _sqlite_sync_ensure_binding() {
     (local_team,server_instance_id,remote_team_id,protocol_version,driver_generation)
     VALUES('$(_sqlite_lit "$team")','$server','$remote',$protocol,'$generation');" \
     >/dev/null 2>&1
+}
+
+# The highest local message position this team holds, as a decimal (0 when it
+# has none). Read before a connection is approved, so that "start from now" can
+# mean "from the moment the command began" and not "from the moment the
+# approval arrived": a message written while the user is still approving is
+# newer than the command and is sent.
+storage_sync_history_position() {
+  local team="$1" db tl pos
+  _sqlite_sync_schema "$team" || return $?
+  db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
+  pos="$(agmsg_sqlite "$db" "SELECT COALESCE(MAX(seq),0) FROM events
+          WHERE type='message_sent' AND team='$tl';" 2>/dev/null)" || { _sqlite_sync_why; return 13; }
+  case "$pos" in ''|*[!0-9-]*) _sqlite_sync_why; return 13 ;; esac
+  printf '%s\n' "$pos"
+}
+
+# Starts this binding's push after <position>: every local message at or before
+# it is left out of what this binding sends, and stays local. The position is
+# recorded under the binding so that the legacy-history rewind in prepare does
+# not lower the cursor back over it. Idempotent; a position can only be moved
+# forward, never back, because moving it back would resend what the caller
+# asked not to send.
+storage_sync_start_after() {
+  local team="$1" server="$2" remote="$3" protocol="$4" position="$5" generation db tl
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  case "$position" in ''|*[!0-9-]*|-|*?-*) _sqlite_sync_why; return 13 ;; esac
+  _sqlite_sync_schema "$team" || return $?
+  generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
+  _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
+  db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
+  agmsg_sqlite "$db" "
+    INSERT OR REPLACE INTO storage_metadata(key,value)
+      VALUES('sync_start_after:$server:$remote:$protocol','$position');
+    UPDATE sync_bindings SET push_cursor=MAX(push_cursor,$position)
+     WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$generation';" >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
 }
 
 # Emits sync_state followed by ordered, durable push reservations.

@@ -311,6 +311,8 @@ storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <pr
 storage_sync_reconcile_push <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>] [<scope>]
+storage_sync_history_position <local-team>
+storage_sync_start_after <local-team> <server-instance-id> <remote-team-id> <protocol-version> <position>
 ```
 
 The extension is optional: a driver without it remains a conforming local-only

@@ -32,6 +32,8 @@ storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <pr
 storage_sync_reconcile_push <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>] [<scope>]
+storage_sync_history_position <local-team>
+storage_sync_start_after <local-team> <server-instance-id> <remote-team-id> <protocol-version> <position>
 ```
 
 `<scope>` narrows which quarantine statuses are eligible: omitted or empty is
@@ -181,6 +183,19 @@ separate. Pull may advance after durable quarantine even when a key is missing;
 adding a key may reprocess quarantine without rewinding transport; importing a
 message does not mark it read. Existing local `message_read` events remain the
 read layer.
+
+`storage_sync_history_position` and `storage_sync_start_after` are optional
+within the extension; a driver without them exits 14 for either. The first
+prints the highest local message position the team holds (a decimal, `0` for
+none) and needs no binding. The second makes one binding's push begin after a
+position: every local message at or before it stays local and is never offered
+by `storage_sync_prepare_push` for that binding. It is idempotent, it only moves
+forward, and a later prepare must not lower it again (the legacy-history rewind
+leaves a binding that has been started after a position alone). A caller that
+wants "from now" reads the position first, before anything that can take time,
+and passes it once the binding exists; a message written in between is newer
+than the position and is sent. A caller that needs this and meets a driver
+without it stops before anything is sent.
 
 `storage_sync_reprocess` emits durable blocking envelopes without changing the
 transport cursor. The engine reevaluates them against the current authenticated

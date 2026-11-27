@@ -1791,7 +1791,12 @@ async function send(config, path, init, authHeaders) {
       error.status = response.status; error.retryable = true;
       throw error;
     }
-    throw new Error(`HTTP ${response.status} returned invalid JSON`);
+    // httpStatus, not status: `status` decides whether a failure is retried, and
+    // this error has never been retried. It only lets a caller that has to tell
+    // a refused address (401, 410) from weather read what the server said.
+    const invalid = new Error(`HTTP ${response.status} returned invalid JSON`);
+    invalid.httpStatus = response.status;
+    throw invalid;
   }
   if (protocol !== PROTOCOL) {
     if (!response.ok && [502, 503, 504].includes(response.status)) {
@@ -1799,7 +1804,9 @@ async function send(config, path, init, authHeaders) {
       error.status = response.status; error.retryable = true;
       throw error;
     }
-    throw new Error("response protocol version mismatch");
+    const mismatch = new Error("response protocol version mismatch");
+    mismatch.httpStatus = response.status;
+    throw mismatch;
   }
   if (!response.ok) {
     validateErrorBinding(config, response.status, body);
@@ -3064,7 +3071,8 @@ export async function configure(args) {
       (cipherProfile === "age-v1" && minimumSecurity !== "e2ee-required")) {
     throw new Error(`${cipherProfile} requires its explicit matching minimum-security mode`);
   }
-  const serverUrl = new URL(args.server).toString().replace(/\/$/, "");
+  // An address that is itself a credential arrives in the environment, not in argv.
+  const serverUrl = new URL(args.server ?? process.env.AGMSG_REMOTE_ENDPOINT).toString().replace(/\/$/, "");
   const binding = await readConnectedBinding(team);
   if (serverUrl !== binding.endpoint || args["team-id"] !== binding.remote_team_id) {
     throw new Error("configure binding does not match remote.sh connect");
@@ -4654,7 +4662,8 @@ export async function pullBootstrap(args, dependencies = {}) {
   const team = requireName(args.team, "team");
   const teamId = args["team-id"] ?? "";
   if (!UUID_V7.test(teamId)) throw new Error("team-id must be a canonical UUIDv7");
-  const serverUrl = args.endpoint ?? "";
+  // An address that is itself a credential arrives in the environment, not in argv.
+  const serverUrl = args.endpoint ?? process.env.AGMSG_REMOTE_ENDPOINT ?? "";
   if (!serverUrl) throw new Error("endpoint is required");
   const limit = Number(args.limit ?? 1000);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("limit must be 1..1000");
@@ -4760,7 +4769,8 @@ export async function pullBootstrap(args, dependencies = {}) {
 // before any config exists, so it validates its own answer rather than going
 // through the binding checks the rest of the client relies on.
 export async function resolveTeam(args) {
-  const serverUrl = args.endpoint ?? "";
+  // An address that is itself a credential arrives in the environment, not in argv.
+  const serverUrl = args.endpoint ?? process.env.AGMSG_REMOTE_ENDPOINT ?? "";
   if (!serverUrl) throw new Error("endpoint is required");
   const name = args.name ?? "";
   if (!name) throw new Error("name is required");
@@ -4827,7 +4837,12 @@ async function publicGet(serverUrl, path) {
   }
   let body;
   try { body = JSON.parse(text); } catch {
-    throw new Error(`HTTP ${response.status} returned invalid JSON`);
+    // httpStatus, not status: `status` decides whether a failure is retried, and
+    // this error has never been retried. It only lets a caller that has to tell
+    // a refused address (401, 410) from weather read what the server said.
+    const invalid = new Error(`HTTP ${response.status} returned invalid JSON`);
+    invalid.httpStatus = response.status;
+    throw invalid;
   }
   if (!response.ok) {
     // This message is no longer only for a log: the resolve-team CLI
@@ -5097,6 +5112,14 @@ if (process.argv[1] &&
   main().catch(async (error) => {
     await event("fatal", { message: error.message, code: error.code ?? null });
     process.stderr.write(`${error.message}\n`);
+    // A caller that has to tell "the server no longer accepts this address"
+    // (401, 410) from a failure that may pass names a file here, and gets the
+    // status code and nothing else: no URL, no message text.
+    const failureFile = process.env.AGMSG_REMOTE_FAILURE_FILE;
+    const refused = error.httpStatus ?? error.status;
+    if (failureFile && [401, 410].includes(refused)) {
+      try { writeFileSync(failureFile, `${refused}\n`); } catch { /* best effort */ }
+    }
     process.exitCode = 1;
   });
 }

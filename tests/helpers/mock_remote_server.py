@@ -36,6 +36,25 @@ CONNECT_STATUS = os.environ.get("MOCK_CONNECT_STATUS", "")
 # is in, and the one `pull` must not read as "unencrypted".
 TEAM_CIPHER_PROFILE = os.environ.get("MOCK_TEAM_CIPHER_PROFILE", "age-v1")
 
+# Origin-level features the unauthenticated /v1/health lists. Empty means the
+# field is absent altogether, the answer a server without any gives.
+FEATURES = [f for f in os.environ.get("MOCK_FEATURES", "").split(",") if f]
+# Device approval: how many token polls answer "authorization_pending" before
+# the approval arrives, and an optional terminal error to answer with instead.
+DEVICE_PENDING = int(os.environ.get("MOCK_DEVICE_PENDING", "0") or 0)
+DEVICE_INTERVAL = int(os.environ.get("MOCK_DEVICE_INTERVAL", "0") or 0)
+DEVICE_ERROR = os.environ.get("MOCK_DEVICE_ERROR", "")
+# A status every request under a capability prefix (/t/<secret>/...) answers with:
+# the data side refusing an address, while the routes on the origin keep working.
+DATA_STATUS = os.environ.get("MOCK_DATA_STATUS", "")
+# "text": the data-side refusal is plain text, not JSON (a gateway or proxy page).
+DATA_BODY = os.environ.get("MOCK_DATA_BODY", "")
+# A status /v1/device/activate answers with instead of activating (empty: activate).
+DEVICE_ACTIVATE_STATUS = os.environ.get("MOCK_DEVICE_ACTIVATE_STATUS", "")
+DEVICE_SECRET = "mocksecret0123456789abcdef0123456789abcdef"
+DEVICE_STATE = {"codes": 0, "polls": 0, "activations": 0, "bad_activations": 0, "failed_activations": 0,
+                "last_code_body": None}
+
 
 # POST /v1/connect registers a client-owned team once. No credential is issued
 # or returned — reaching the server is the permission. A team_id already
@@ -260,6 +279,7 @@ class Handler(BaseHTTPRequestHandler):
         reaches the terminal. The token is not checked: this server issues and
         verifies no credential, exactly like the real one.
         """
+        self.via_capability = self.path.startswith("/t/")
         if self.path.startswith("/t/"):
             rest = self.path[len("/t/"):]
             cut = rest.find("/")
@@ -271,6 +291,13 @@ class Handler(BaseHTTPRequestHandler):
         # Python requires the declaration to precede the first mention anywhere
         # in the function — including the read in the /v1/health branch below.
         global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT, LAST_CLIENT_VERSION
+        global DEVICE_PENDING, FEATURES, CONNECT_STATUS, DEVICE_ACTIVATE_STATUS, DATA_STATUS, DATA_BODY
+        if DATA_STATUS and self.via_capability:
+            if DATA_BODY == "text":
+                self._send_raw(int(DATA_STATUS), "denied")
+            else:
+                self._send_json(int(DATA_STATUS), {"error": {"code": "unauthorized"}})
+            return
         # Read before write, and only for a route under test: the inspection
         # route itself is a request too, and capturing unconditionally would
         # have it overwrite the very value it was asked to report.
@@ -283,12 +310,41 @@ class Handler(BaseHTTPRequestHandler):
             # answers. MOCK_HEALTH_TEAM_ID overrides it so a test can make the
             # server disagree with the local binding.
             team_id = HEALTH_TEAM_ID or self.headers.get("Agmsg-Team-ID", "")
-            self._send_json(200, {
+            health = {
                 "status": "ok",
                 "database": "ok",
                 "server_instance_id": CONNECT_SERVER_ID,
                 "team_id": team_id,
-            })
+            }
+            if FEATURES:
+                health["features"] = FEATURES
+            self._send_json(200, health)
+            return
+        if self.path == "/_test/device-state":
+            self._send_json(200, DEVICE_STATE)
+            return
+        # Knobs a test turns while the server runs: a restart moves the port,
+        # and the client has already recorded the old one.
+        if self.path == "/_test/device-approve":
+            DEVICE_PENDING = 0
+            self._send_json(200, {"approved": True})
+            return
+        if self.path.startswith("/_test/features"):
+            FEATURES = [f for f in self.path.partition("?value=")[2].split(",") if f]
+            self._send_json(200, {"features": FEATURES})
+            return
+        if self.path.startswith("/_test/data-status"):
+            value, _, body_kind = self.path.partition("?value=")[2].partition("&body=")
+            DATA_STATUS, DATA_BODY = value, body_kind
+            self._send_json(200, {"status": DATA_STATUS})
+            return
+        if self.path.startswith("/_test/activate-status"):
+            DEVICE_ACTIVATE_STATUS = self.path.partition("?value=")[2]
+            self._send_json(200, {"status": DEVICE_ACTIVATE_STATUS})
+            return
+        if self.path.startswith("/_test/connect-status"):
+            CONNECT_STATUS = self.path.partition("?value=")[2]
+            self._send_json(200, {"status": CONNECT_STATUS})
             return
         if self.path == "/_test/drop-next-connect":
             DROP_NEXT_CONNECT = True
@@ -608,6 +664,50 @@ class Handler(BaseHTTPRequestHandler):
         # branch. Only a test that needs the client's non-200 branch sets this.
         if CONNECT_STATUS and self.path.endswith("/v1/connect"):
             self._send_json(int(CONNECT_STATUS), {"error": {"code": "forced-by-fixture"}})
+            return
+
+        if self.path == "/v1/device/code":
+            DEVICE_STATE["codes"] += 1
+            try:
+                DEVICE_STATE["last_code_body"] = json.loads(raw)
+            except Exception:
+                self._send_json(400, {"error": "bad_request"})
+                return
+            self._send_json(200, {
+                "device_code": "mockdevicecode",
+                "user_code": "ABCD-2345",
+                "verification_uri": "http://approve.example/device",
+                "verification_uri_complete": "http://approve.example/device?user_code=ABCD-2345",
+                "expires_in": 60,
+                "interval": DEVICE_INTERVAL,
+            })
+            return
+        if self.path == "/v1/device/token":
+            DEVICE_STATE["polls"] += 1
+            if DEVICE_ERROR:
+                self._send_json(400, {"error": DEVICE_ERROR})
+                return
+            if DEVICE_STATE["polls"] <= DEVICE_PENDING:
+                self._send_json(400, {"error": "authorization_pending"})
+                return
+            host = self.headers.get("Host", "127.0.0.1")
+            self._send_json(200, {
+                "capability_url": "http://%s/t/%s" % (host, DEVICE_SECRET),
+                "machine_name": "mock",
+                "scope": "login",
+            })
+            return
+        if self.path == "/v1/device/activate":
+            if self.headers.get("Authorization", "") != "Bearer " + DEVICE_SECRET:
+                DEVICE_STATE["bad_activations"] += 1
+                self._send_json(401, {"error": "unauthenticated"})
+                return
+            if DEVICE_ACTIVATE_STATUS:
+                DEVICE_STATE["failed_activations"] += 1
+                self._send_json(int(DEVICE_ACTIVATE_STATUS), {"error": "unavailable"})
+                return
+            DEVICE_STATE["activations"] += 1
+            self._send_json(200, {"status": "active"})
             return
 
         if self.path == "/v1/messages":
