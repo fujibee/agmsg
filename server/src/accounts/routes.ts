@@ -154,6 +154,10 @@ export async function registerDeviceRoutes(
           capability_url: `${publicUrl}/t/${result.secret}`,
           machine_name: result.machineName,
           scope: "login",
+          // The approval binds one team, so the machine learns it here and needs
+          // no name lookup under its capability URL.
+          team_id: result.teamId,
+          team_name: result.teamName,
           // Opaque. The single owner account stands where a hosted service
           // names the organisation.
           org: result.accountId,

@@ -65,7 +65,7 @@ describeDatabase("device flow", () => {
     expect((await approve(code.user_code)).statusCode).toBe(200);
     const ready = await poll(code.device_code);
     expect(ready.statusCode, ready.body).toBe(200);
-    return { code, ready: ready.json() as { capability_url: string; machine_name: string; scope: string; org: string } };
+    return { code, ready: ready.json() as { capability_url: string; machine_name: string; scope: string; org: string; team_id: string; team_name: string } };
   }
 
   beforeAll(async () => {
@@ -100,6 +100,9 @@ describeDatabase("device flow", () => {
     expect(ready.scope).toBe("login");
     expect(ready.machine_name).toBe("laptop");
     expect(typeof ready.org).toBe("string");
+    // The approval binds one team, so the answer names it.
+    expect(ready.team_id).toBe(teamA);
+    expect(ready.team_name).toBe("team-a");
     expect(ready.capability_url.startsWith(`${origin}/t/agsy_`)).toBe(true);
     const path = ready.capability_url.slice(origin.length);
 
