@@ -25,6 +25,8 @@ describeDatabase("POST /v1/connect", () => {
     port: 8788,
     logLevel: "silent",
     retentionMaxLiveMessages: null,
+    escrowBackend: "none",
+    escrowKeyfile: null,
   };
 
   const teamId = "0198c200-0000-7000-8000-0000000000aa";
