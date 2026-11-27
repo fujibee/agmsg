@@ -628,6 +628,19 @@ EOF
 
 # --- rename.sh (agent rename) ---
 
+@test "rename: a seat that was running under the old name is told how its session follows (#2050)" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  bash "$SCRIPTS/join.sh" myteam idle claude-code /tmp/proj
+  ( export SKILL_DIR="$TEST_SKILL_DIR"; source "$SCRIPTS/lib/role-session.sh"; agmsg_role_session_record myteam claude sess-1 /tmp/proj claude-code )
+  run bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  [ "$status" -eq 0 ]
+  [ "${lines[1]}" = "Next: in the session that was claude, run actas claude-orchestrator, then fix; that moves its session name, role record and pane to claude-orchestrator." ]
+  # a member no session ever acted as: nothing to move, no line
+  run bash "$SCRIPTS/rename.sh" myteam idle idle2
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+}
+
 @test "rename: renames an agent, preserving its registration" {
   bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
   run bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator

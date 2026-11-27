@@ -471,3 +471,121 @@ EOT
   refute grep -q 'nested terminals' <<<"$stderr"
   grep -Fq 'tmux:/tmp/ts:%3' "$(agmsg_spawn_path seatteam alice)"
 }
+
+# --- #2050: inside Codex's sandbox ps is refused; agmsgd records the pane ----------
+# A sandboxed tool shell cannot list processes, so the ancestry walk cannot tell
+# whether it runs under the shared daemon. actas leaves a request instead, and the
+# fill script (what agmsgd runs, outside the sandbox) proves and records the pane.
+
+_minimal_herdr() {   # the labelling fake from test_self_name.bats
+  export ARGV_LOG="$BATS_TEST_TMPDIR/herdr.argv"; : > "$ARGV_LOG"
+  export FAKE_HERDR_STATE="$FAKEBIN/herdr.labels"; : > "$FAKE_HERDR_STATE"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+state='$FAKE_HERDR_STATE'
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  # This fixture exercises naming marks with an initially unnamed agent.
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
+elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  grep -v "^\$3	" "\$state" > "\$state.n" 2>/dev/null || : > "\$state.n"
+  printf '%s\t%s\n' "\$3" "\$4" >> "\$state.n"; mv "\$state.n" "\$state"
+elif [ "\$1" = pane ] && [ "\$2" = list ]; then
+  rows=""
+  while IFS=\$'\t' read -r pid lbl; do
+    [ -n "\$pid" ] || continue
+    [ -n "\$rows" ] && rows="\$rows,"
+    rows="\$rows{\"pane_id\":\"\$pid\",\"label\":\"\$lbl\"}"
+  done < "\$state"
+  printf '{"id":"1","result":{"panes":[%s]}}\n' "\$rows"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  lbl="\$(awk -F'\t' -v p="\$3" '\$1 == p { print \$2 }' "\$state" 2>/dev/null)"
+  if [ -n "\$lbl" ]; then
+    printf '{"result":{"pane":{"agent_status":"idle","label":"%s","terminal_title":"t"}}}\n' "\$lbl"
+  else
+    printf '{"result":{"pane":{"agent_status":"idle","terminal_title":"t"}}}\n'
+  fi
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+_fill() {   # run the fill script the way agmsgd does: none of the seat's terminal env
+  run env -u HERDR_ENV -u HERDR_PANE_ID -u TMUX -u TMUX_PANE -u CODEX_THREAD_ID \
+    bash "$SKILL_DIR/scripts/internal/codex-pane-fill.sh" "$1"
+}
+
+@test "sandboxed codex actas (ps refused): a request for agmsgd is left, the line says pending, nothing is recorded" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^placement=pending team=seatteam reason=.*recorded from outside the sandbox by agmsgd')" -eq 1 ]
+  refute grep -q '^placement=unrecorded' <<<"$output"
+  req="$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ -f "$req" ]
+  grep -qx 'team=seatteam' "$req"
+  grep -qx 'agent=alice' "$req"
+  grep -qx 'thread=t-aaa' "$req"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill (agmsgd, outside the sandbox): the seat's pane is proven from its thread and recorded; the request is removed" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=recorded reason=herdr:$HERDR_SOCKET_PATH:w1:pC" ]
+  refute test -e "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:w1:pC" "$(agmsg_spawn_path seatteam alice)"
+  # the daemon starter's pane (the seat's inherited w1:p17) was never used
+  refute grep -Fq 'w1:p17' "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: a request for a thread the seat has left is dropped, nothing is recorded" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  # the seat moved on to another thread since it asked
+  sed -i.bak 's/^thread=t-aaa$/thread=t-zzz/' "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  mv "$SKILL_DIR/run/codex-pane-request.t-aaa" "$SKILL_DIR/run/codex-pane-request.t-zzz"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-zzz"
+  [ "$status" -eq 0 ]
+  case "$output" in "state=dropped reason=the seat's role-session no longer names thread t-zzz") ;; *) echo "$output"; return 1 ;; esac
+  refute test -e "$SKILL_DIR/run/codex-pane-request.t-zzz"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: a thread no TUI can be tied to says why, records nothing, and is not retried" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _tui 91002 10:01 /work/a w1:pN
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=unrecorded reason=several_codex_tuis_may_hold_this_thread" ]
+  refute test -e "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  refute test -e "$(agmsg_spawn_path seatteam alice)"
+}

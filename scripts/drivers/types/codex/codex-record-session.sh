@@ -92,6 +92,14 @@ _codex_actas_placement() {
       else
         _pl_own="$(agmsg_codex_own_pane 2>/dev/null)" || _pl_own=""
         case "$_pl_own" in
+          "unknown"$'\t'"cannot_tell_whether_under_shared_daemon")
+            # The process table is not visible from here: Codex's sandbox refuses
+            # ps. agmsgd, outside the sandbox, resolves this thread and records it.
+            if agmsg_codex_pane_request "$TEAM" "$AGENT" "$CODEX_THREAD_ID" "${project_phys:-$PROJECT}"; then
+              printf 'placement=pending team=%s reason=%s\n' "$TEAM" "this Codex seat cannot list processes (Codex's sandbox), so its pane is recorded from outside the sandbox by agmsgd on its next poll"
+              return "$_rc"
+            fi
+            _pl_reason="this Codex seat cannot list processes (Codex's sandbox) and the request for agmsgd to record its pane could not be written" ;;
           unknown*) _pl_reason="this Codex seat's own pane could not be proven (${_pl_own#unknown$'\t'})" ;;
         esac
       fi

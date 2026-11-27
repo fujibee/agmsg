@@ -583,15 +583,14 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   await verifiedWindowsChannel.stop();
 
   // The seat is known to this channel from an earlier poll, then leaves the
-  // roster: what agmsgd observed is kept in memory, so only a seat it has seen
-  // can be marked as gone.
+  // roster (it left, or was renamed): its row is dropped rather than kept under
+  // the old name until agmsgd restarts (#2050).
   const missingSeatChannel = createCodexQueueChannel({ db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir } });
   await missingSeatChannel.pollOnce();
+  assert.ok(seatBrief(missingSeatChannel, JSON.stringify(['alpha', 'alice'])));
   writeFileSync(path.join(teamsDir, 'alpha', 'config.json'), JSON.stringify({ agents: {} }));
   await missingSeatChannel.pollOnce();
-  const missingSeat = seatBrief(missingSeatChannel, JSON.stringify(['alpha', 'alice']));
-  assert.equal(missingSeat.state, 'unaddressable');
-  assert.equal(missingSeat.reason, 'seat_registration_missing');
+  assert.equal(seatBrief(missingSeatChannel, JSON.stringify(['alpha', 'alice'])), undefined);
   await missingSeatChannel.stop();
 
   installDb.prepare(`

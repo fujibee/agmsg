@@ -248,10 +248,44 @@ EOF
   esac
 }
 
+# The same answer for a thread named by the caller, from outside the seat
+# (agmsgd filling in a seat's pane after the seat asked, #2050). There is no
+# environment of the seat's own to trust here, so the "under the shared daemon?"
+# walk is skipped and the thread is always resolved to its TUI. Output as for
+# agmsg_codex_own_pane, except that an empty answer never happens: it is env or
+# unknown.
+agmsg_codex_thread_pane() {   # <thread>
+  case "${1:-}" in ''|*[!A-Za-z0-9-]*) printf 'unknown\tthread_id_malformed\n'; return 0 ;; esac
+  CODEX_THREAD_ID="$1" _AGMSG_COP_FROM_OUTSIDE=1 agmsg_codex_own_pane
+}
+
+# A seat that cannot prove its own pane because it cannot see the process table
+# (Codex's sandbox refuses ps, pgrep and sysctl, measured on macOS seatbelt)
+# leaves a request for agmsgd, which runs outside the sandbox and resolves the
+# same thread the same way (agmsg_codex_thread_pane), then records the pane for
+# this seat and removes the request (#2050). One file per thread: asking twice
+# replaces the first. KEY=VALUE lines; agmsgd reads exactly these four keys.
+#   agmsg_codex_pane_request <team> <agent> <thread> <project>   rc 0 written
+agmsg_codex_pane_request() {
+  local team="$1" agent="$2" tid="$3" project="$4" f tmp
+  case "$tid" in ''|*[!A-Za-z0-9-]*) return 1 ;; esac
+  case "$team$agent$project" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$project" ] || return 1
+  [ -n "${SKILL_DIR:-}" ] || return 1
+  f="$SKILL_DIR/run/codex-pane-request.$tid"
+  mkdir -p "${f%/*}" 2>/dev/null || return 1
+  tmp="$f.$$"
+  printf 'team=%s\nagent=%s\nthread=%s\nproject=%s\n' "$team" "$agent" "$tid" "$project" >"$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$f" 2>/dev/null && return 0
+  rm -f "$tmp" 2>/dev/null
+  return 1
+}
+
 agmsg_codex_own_pane() {
   local tid="${CODEX_THREAD_ID:-}" f kind ts pid lstart reason now cur env found rc
+  local outside="${_AGMSG_COP_FROM_OUTSIDE:-}"
   [ -n "$tid" ] || return 0
-  [ -n "${HERDR_ENV:-}${TMUX:-}${TMUX_PANE:-}${HERDR_PANE_ID:-}" ] || return 0
+  [ -n "$outside" ] || [ -n "${HERDR_ENV:-}${TMUX:-}${TMUX_PANE:-}${HERDR_PANE_ID:-}" ] || return 0
   case "$tid" in *[!A-Za-z0-9-]*) return 0 ;; esac
 
   if f="$(_agmsg_cop_cache "$tid")" && [ -f "$f" ]; then
@@ -259,8 +293,8 @@ agmsg_codex_own_pane() {
     IFS='|' read -r kind ts pid lstart reason <"$f" || kind=""
     now="$(date +%s)"
     case "$kind" in
-      trusted) [ "$((now - ts))" -lt "$AGMSG_CODEX_TRUSTED_TTL" ] && return 0 ;;
-      unknown) [ "$((now - ts))" -lt "$AGMSG_CODEX_UNKNOWN_TTL" ] \
+      trusted) [ -z "$outside" ] && [ "$((now - ts))" -lt "$AGMSG_CODEX_TRUSTED_TTL" ] && return 0 ;;
+      unknown) [ -z "$outside" ] && [ "$((now - ts))" -lt "$AGMSG_CODEX_UNKNOWN_TTL" ] \
                  && { printf 'unknown\t%s\n' "$reason"; return 0; } ;;
       pane)
         # The pid still being that process proves it is alive, not that it still
@@ -283,7 +317,8 @@ agmsg_codex_own_pane() {
     esac
   fi
 
-  rc=0; _agmsg_cop_under_managed_daemon || rc=$?
+  rc=0
+  [ -n "$outside" ] || _agmsg_cop_under_managed_daemon || rc=$?
   case "$rc" in
     0) ;;
     1) printf '' | _agmsg_cop_remember trusted "$tid"; return 0 ;;

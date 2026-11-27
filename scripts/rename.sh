@@ -276,3 +276,13 @@ fi
 
 agmsg_lock_release
 echo "Renamed $OLD_NAME → $NEW_NAME in team $TEAM"
+
+# A seat that was running under the old name still holds that name: its CLI
+# session name, its role-session record and (for Codex) its pane are written
+# by the seat itself, and only under the name it acts as (#2050). Say what
+# brings them over, instead of leaving `team` to show a mismatch nobody named.
+# shellcheck disable=SC1091
+if source "$SCRIPT_DIR/lib/role-session.sh" 2>/dev/null \
+   && [ -n "$(agmsg_role_session_uuid "$TEAM" "$OLD_NAME" 2>/dev/null)" ]; then
+  echo "Next: in the session that was $OLD_NAME, run actas $NEW_NAME, then fix; that moves its session name, role record and pane to $NEW_NAME."
+fi

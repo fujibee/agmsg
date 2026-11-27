@@ -349,6 +349,21 @@ EOF
     IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity
 EOF
+    # A wrong session name the seat itself skipped renaming (its own pane could
+    # not be proved when it tried) says so, and what repairs it, in the human
+    # table only; the JSON cell stays the observation (#2050).
+    case "$OUTPUT_MODE:$cli_session" in
+      json:*) ;;
+      *:mismatch\(*)
+        if declare -F agmsg_role_session_get >/dev/null 2>&1 \
+           || { [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ] && . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null; }; then
+          local _rename_result
+          _rename_result="$(agmsg_role_session_get "$team" "$agent" rename_result 2>/dev/null)" || _rename_result=""
+          case "$_rename_result" in
+            skipped:*) cli_session="$cli_session; the seat skipped renaming its session ($_rename_result); running fix in that seat renames it" ;;
+          esac
+        fi ;;
+    esac
     # The location probe already ran, above, as a genuine per-target reachability
     # check (each driver's terminal_where targets THIS pane's own recorded
     # socket, not the caller's -- see agmsg_team_reach's own header for why that

@@ -262,7 +262,11 @@ agmsg_self_rename_on_action() {
         # we cannot show is our own. Same fail-closed direction as the claim
         # guard above -- record why and leave the mark on a terminal "skipped"
         # result rather than "attempted", so this generation is not retried.
-        _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:${_proof_state:-no_proof}" "$type"
+        # The proof's own reason goes on the mark too: "undetermined" alone
+        # left a seat's session name wrong with nothing saying why (#2050).
+        local _proof_why=""
+        case "$_proof_out" in *"	"*) _proof_why="${_proof_out#*	}"; _proof_why="${_proof_why%%[[:space:]]*}" ;; esac
+        _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:${_proof_state:-no_proof}${_proof_why:+:$_proof_why}" "$type"
         return 0
       fi
       # A `proved` state is not, by itself, proof about THIS pane: self-proof.sh
