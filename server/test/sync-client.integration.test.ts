@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
-import type { Config } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 import { migrate } from "../src/db.js";
 import { envelopeDigest } from "../src/protocol.js";
 import { retainThrough } from "../src/storage.js";
@@ -51,17 +51,7 @@ describeDatabase("Stage-1 polling sync client", () => {
     // from the connect body — the first machine's `connect` below registers
     // the team it owns. Pre-creating it here (the pairing-era assumption) would
     // make that first connect a 409.
-    const config: Config = {
-      profile: "open",
-    ownerSecret: null,
-    publicUrl: null,
-    deviceClientIds: ["agmsg-cli"],
-      databaseUrl: databaseUrl ?? "",
-      host: "127.0.0.1", port: 8787, logLevel: "silent",
-      retentionMaxLiveMessages: null,
-      escrowBackend: "none",
-      escrowKeyfile: null,
-    };
+    const config = testConfig({ databaseUrl: databaseUrl ?? "", port: 8787 });
     app = createApp(pool, config);
     serverUrl = await app.listen({ host: "127.0.0.1", port: 0 });
     root = await mkdtemp(join(tmpdir(), "agmsg-stage1-sync-"));

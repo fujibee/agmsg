@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
-import type { Config } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 import { migrate } from "../src/db.js";
 
 // POST /v1/connect registers a team the client already owns: it writes the team
@@ -18,19 +18,7 @@ describeDatabase("POST /v1/connect", () => {
   let pool: Pool;
   let app: ReturnType<typeof createApp>;
 
-  const config: Config = {
-    profile: "open",
-    ownerSecret: null,
-    publicUrl: null,
-    deviceClientIds: ["agmsg-cli"],
-    databaseUrl: databaseUrl ?? "",
-    host: "127.0.0.1",
-    port: 8788,
-    logLevel: "silent",
-    retentionMaxLiveMessages: null,
-    escrowBackend: "none",
-    escrowKeyfile: null,
-  };
+  const config = testConfig({ databaseUrl: databaseUrl ?? "", port: 8788 });
 
   const teamId = "0198c200-0000-7000-8000-0000000000aa";
   const memberA = "0198c200-0000-7000-8000-0000000000b1";

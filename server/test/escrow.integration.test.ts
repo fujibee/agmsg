@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { insertDevice } from "../src/accounts/capability.js";
 import { createApp } from "../src/app.js";
 import type { Config } from "../src/config.js";
+import { testConfig } from "./helpers/config.js";
 import { migrate } from "../src/db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -33,15 +34,10 @@ describeDatabase("key escrow", () => {
   let pool: Pool;
   let secret: string;
 
-  const config = (escrowBackend: "none" | "keyfile"): Config => ({
+  const config = (escrowBackend: "none" | "keyfile"): Config => testConfig({
     profile: "accounts",
     databaseUrl: databaseUrl ?? "",
-    host: "127.0.0.1",
-    port: 0,
-    logLevel: "silent",
-    retentionMaxLiveMessages: null,
     escrowBackend,
-    escrowKeyfile: null,
   });
 
   async function insert(values: ReturnType<typeof row>): Promise<void> {
