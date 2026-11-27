@@ -709,6 +709,8 @@ _remote_http_get_json() {
 # ever written to a 0600 file under the credentials directory.
 
 _REMOTE_DEVICE_CLIENT_ID="agmsg-cli"
+# Set only by --machine-name; never read from the caller's environment.
+REMOTE_DEVICE_MACHINE_NAME=""
 
 # _remote_http_json_call <method> <url> <body_file|-> <out_body_file> [<bearer>] -> prints http_code
 # One request, no team header (the device routes have no team yet). The bearer,
@@ -841,7 +843,12 @@ _remote_device_approve() {
       return 0
     fi
   fi
-  machine="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
+  # The machine's own label on the server. A server holds one live device per
+  # name in a team, so two installs on one host (or two hosts that share a
+  # name) need different ones: --machine-name sets it, and the host name is only
+  # the default.
+  machine="${REMOTE_DEVICE_MACHINE_NAME:-}"
+  [ -n "$machine" ] || machine="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
   machine="$(printf '%s' "$machine" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
   [ -n "$machine" ] || machine="machine"
   body="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-body.XXXXXX")"
@@ -898,6 +905,11 @@ _remote_device_approve() {
       access_denied)
         rm -f "$body" "$out"
         echo "agmsg: the approval was denied; nothing was changed" >&2; return 1 ;;
+      machine_exists)
+        rm -f "$body" "$out"
+        echo "agmsg: a device named '$machine' is already connected to this team on that server; nothing was changed." >&2
+        echo "agmsg: run the command again with --machine-name <another name> for this machine." >&2
+        return 1 ;;
       expired_token)
         rm -f "$body" "$out"
         echo "agmsg: the approval expired; run the command again for a new code. Nothing was changed" >&2; return 1 ;;
@@ -1652,6 +1664,8 @@ cmd_pull() {
       --endpoint=*) endpoint="${1#--endpoint=}"; shift ;;
       --team-id) team_id="${2:?--team-id requires a value}"; shift 2 ;;
       --team-id=*) team_id="${1#--team-id=}"; shift ;;
+      --machine-name) REMOTE_DEVICE_MACHINE_NAME="${2:?--machine-name requires a value}"; shift 2 ;;
+      --machine-name=*) REMOTE_DEVICE_MACHINE_NAME="${1#--machine-name=}"; shift ;;
       *) positional+=("$1"); shift ;;
     esac
   done
@@ -2918,10 +2932,12 @@ cmd_connect() {
       --endpoint=*) endpoint="${1#--endpoint=}"; shift ;;
       --e2ee) e2ee=1; shift ;;
       --with-history) with_history=1; shift ;;
+      --machine-name) REMOTE_DEVICE_MACHINE_NAME="${2:?--machine-name requires a value}"; shift 2 ;;
+      --machine-name=*) REMOTE_DEVICE_MACHINE_NAME="${1#--machine-name=}"; shift ;;
       *) positional+=("$1"); shift ;;
     esac
   done
-  : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] [--with-history] <team>}"
+  : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] [--with-history] [--machine-name <name>] <team>}"
   # The plaintext-address rule protects message bodies that would otherwise
   # cross the network unencrypted. Under --e2ee those bodies are sealed before
   # they ever reach this check, so the rule has nothing left to protect here --
@@ -2932,7 +2948,7 @@ cmd_connect() {
   fi
   endpoint="${endpoint%/}"
   team="${positional[0]:-}"
-  [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] [--with-history] <team>" >&2; exit 1; }
+  [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] [--with-history] [--machine-name <name>] <team>" >&2; exit 1; }
 
   local cfg team_id team_name key_id binding_cipher
   cfg="$(_remote_team_config "$team")"

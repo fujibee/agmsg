@@ -181,6 +181,24 @@ recorded_endpoint() {
   [ -z "$(saved_approvals)" ]
 }
 
+@test "device connect: --machine-name labels this machine, and a name already taken says how to choose another" {
+  start_mock MOCK_FEATURES=device-approval
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --machine-name second-install testteam
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.last_code_body.machine_name')" = "second-install" ]
+}
+
+@test "device connect: a machine name the server already holds is reported with the way out" {
+  start_mock MOCK_FEATURES=device-approval MOCK_DEVICE_ERROR=machine_exists
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 1 ]
+  has "$output" "already connected to this team"
+  has "$output" "--machine-name"
+  has "$output" "nothing was changed"
+  [ -z "$(recorded_endpoint)" ]
+  [ -z "$(saved_approvals)" ]
+}
+
 @test "device connect: the history is not uploaded unless asked, and a message written while approving is" {
   start_mock MOCK_FEATURES=device-approval MOCK_DEVICE_PENDING=1000000 MOCK_DEVICE_INTERVAL=1
   bash "$SCRIPTS/send.sh" testteam alice alice "written before the command" >/dev/null
