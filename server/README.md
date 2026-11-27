@@ -83,6 +83,23 @@ npm start
 Replace every value in angle brackets before running the command. Startup
 applies the same idempotent migrations used by the Compose image.
 
+## Key escrow
+
+`AGMSG_ESCROW_BACKEND` chooses whether the server keeps a wrapped copy of a
+team's key so it can hand that key to the next approved device. It applies only
+to the accounts profile.
+
+- `none` (default): the server holds nothing it could open. This is the only
+  setting where the operator cannot read the key.
+- `keyfile`: the wrapped keys are sealed under a master key in the file named by
+  `AGMSG_ESCROW_KEYFILE` (at least 32 bytes, for example
+  `openssl rand -out escrow.key 32`). The server refuses to start if the file is
+  missing, unreadable or too short.
+
+A key file on the same host as the database protects only against a leaked
+database dump. Anyone who can read both the file and the database can open every
+wrapped key, and so can the operator.
+
 ## Retention
 
 After a successful write, the reference server can apply a configured

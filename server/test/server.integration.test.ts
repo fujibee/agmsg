@@ -35,6 +35,8 @@ describeDatabase("remote storage HTTP API v1", () => {
     port: 8787,
     logLevel: "silent",
     retentionMaxLiveMessages: null,
+    escrowBackend: "none",
+    escrowKeyfile: null,
   };
 
   let headers: Record<string, string>;

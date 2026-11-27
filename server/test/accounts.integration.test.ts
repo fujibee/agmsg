@@ -47,6 +47,8 @@ describeDatabase("accounts profile", () => {
     port: 0,
     logLevel: "silent",
     retentionMaxLiveMessages: null,
+    escrowBackend: "none",
+    escrowKeyfile: null,
   });
 
   async function addTeam(teamId: string, name: string): Promise<void> {

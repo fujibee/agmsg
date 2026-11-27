@@ -19,6 +19,8 @@ const config: Config = {
   port: 0,
   logLevel: "silent",
   retentionMaxLiveMessages: null,
+  escrowBackend: "none",
+  escrowKeyfile: null,
 };
 
 const jsonHeaders = {

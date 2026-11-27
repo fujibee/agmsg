@@ -59,6 +59,8 @@ describeDatabase("Stage-1 polling sync client", () => {
       databaseUrl: databaseUrl ?? "",
       host: "127.0.0.1", port: 8787, logLevel: "silent",
       retentionMaxLiveMessages: null,
+      escrowBackend: "none",
+      escrowKeyfile: null,
     };
     app = createApp(pool, config);
     serverUrl = await app.listen({ host: "127.0.0.1", port: 0 });

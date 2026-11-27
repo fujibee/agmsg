@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ESCROW_BACKENDS, type EscrowBackendName } from "./escrow.js";
 
 const environmentSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -20,6 +21,8 @@ const environmentSchema = z.object({
     .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n,
       "retention maximum exceeds signed BIGINT")
     .optional(),
+  AGMSG_ESCROW_BACKEND: z.enum(ESCROW_BACKENDS).default("none"),
+  AGMSG_ESCROW_KEYFILE: z.string().min(1).optional(),
 });
 
 export type Profile = "open" | "accounts";
@@ -39,6 +42,8 @@ export type Config = {
   port: number;
   logLevel: z.infer<typeof environmentSchema>["LOG_LEVEL"];
   retentionMaxLiveMessages: bigint | null;
+  escrowBackend: EscrowBackendName;
+  escrowKeyfile: string | null;
 };
 
 const MIN_SECRET_LENGTH = 32;
@@ -101,5 +106,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Config
     retentionMaxLiveMessages: parsed.AGMSG_RETENTION_MAX_LIVE_MESSAGES === undefined
       ? null
       : BigInt(parsed.AGMSG_RETENTION_MAX_LIVE_MESSAGES),
+    escrowBackend: parsed.AGMSG_ESCROW_BACKEND,
+    escrowKeyfile: parsed.AGMSG_ESCROW_KEYFILE ?? null,
   };
 }
