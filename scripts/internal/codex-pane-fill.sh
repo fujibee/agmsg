@@ -118,10 +118,32 @@ EOF
 rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
 [ -n "$rec" ] || { report unrecorded placement_path_unavailable; exit 0; }
 role_snapshot; [ "$SNAP" = "$snap" ] || { report dropped "the seat's role-session changed while its pane was being proven"; exit 0; }
-# The seat's own record as it was, so a write that turns out stale can be undone.
-before=""; had_before=0
-[ -f "$rec" ] && { before="$(cat "$rec")"; had_before=1; }
+
+# The record is written as a compare-and-set: under the role-session lock (the
+# one every role-session writer takes, the seat's own actas included), the
+# role-session is read again and the record is written only if it still says
+# what it said when this request was checked. A seat that ran actas again, or
+# moved to another thread, changed its role-session first (actas records the
+# role before it writes the pane), so this request writes nothing and the
+# seat's own newer record is never overwritten or undone. Only this one write
+# is under the lock: the naming steps before it take that lock themselves.
+_agmsg_pane_fill_cas() {   # <record path> <row>
+  role_snapshot
+  [ "$SNAP" = "$snap" ] || return 3
+  agmsg_write_atomic "$1" "$2"
+}
+_agmsg_placement_write_record() {   # overrides terminal-registry.sh's
+  _agmsg_role_session_write _agmsg_pane_fill_cas "$1" "$2"
+}
+
 out="$(agmsg_placement_report "" "$team" "$agent" "$project" codex record "" "" replace_claim 2>&1)" || true
+role_snapshot
+if [ "$SNAP" != "$snap" ]; then
+  # Either the compare-and-set refused (nothing written), or the role changed
+  # after the write committed (then the seat's own newer actas writes after it).
+  report dropped "the seat's role-session changed while its pane was being recorded"
+  exit 0
+fi
 case "$out" in
   *placement=unrecorded*) report unrecorded "${out#*reason=}"; exit 0 ;;
 esac
@@ -133,22 +155,5 @@ case "$ref" in
   *":$pane") ;;
   *) report unrecorded "the pane ($pane) was proven but no record for it was written${out:+: $out}"; exit 0 ;;
 esac
-# The role-session cannot be held locked across the write (the naming path takes
-# that lock itself), so it is read once more after it. Changed: the record just
-# written may be the old thread's pane, so it is undone -- the seat's previous
-# record put back, or none -- unless something else has replaced it meanwhile.
-# The worst outcome is then "no record yet", which the seat's own next actas
-# fills, never the old TUI's pane standing as its record.
-role_snapshot
-if [ "$SNAP" != "$snap" ]; then
-  now=""; [ -f "$rec" ] && now="$(cat "$rec")"
-  case "$now" in
-    "$ref"*)
-      if [ "$had_before" -eq 1 ]; then agmsg_write_atomic "$rec" "$before" 2>/dev/null || rm -f "$rec"
-      else rm -f "$rec"; fi ;;
-  esac
-  report dropped "the seat's role-session changed while its pane was being recorded; the record was undone"
-  exit 0
-fi
 report recorded "$ref"
 exit 0

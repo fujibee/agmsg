@@ -625,7 +625,7 @@ _role_moves_to() {   # <hook file> <thread>: a script that moves the seat's role
   refute test -e "$(agmsg_spawn_path seatteam alice)"
 }
 
-@test "fill: the seat moves to another thread while its record is being written -- the write is undone" {
+@test "fill: the seat moves to another thread while its record is being written -- the compare-and-set writes nothing" {
   _thread t-aaa /work/a 600
   _tui 91001 10:00 /work/a w1:pC
   _minimal_herdr
@@ -636,7 +636,7 @@ _role_moves_to() {   # <hook file> <thread>: a script that moves the seat's role
   _role_moves_to "$FAKEBIN/on_rename" t-new
   _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
   [ "$status" -eq 0 ]
-  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being recorded; the record was undone" ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being recorded" ]
   refute test -e "$FAKEBIN/on_rename"        # the hook did run, during the write
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   refute test -e "$(agmsg_spawn_path seatteam alice)"
@@ -656,4 +656,25 @@ _role_moves_to() {   # <hook file> <thread>: a script that moves the seat's role
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   refute grep -Fq /somewhere/else "$(agmsg_spawn_path seatteam alice)"
   grep -Fq "$BATS_TEST_TMPDIR/proj" "$(agmsg_spawn_path seatteam alice)"
+}
+
+@test "fill: a newer actas that wrote the same pane with a new project mid-fill keeps its record (no lost update)" {
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _minimal_herdr
+  _seat t-aaa
+  touch "$PSDIR/fail_chain"
+  _actas_record
+  rm -f "$PSDIR/fail_chain"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  rec="$(agmsg_spawn_path seatteam alice)"
+  # the other writer: the seat's new actas moves its role first, then records the same pane for a new project
+  _role_moves_to "$FAKEBIN/on_rename" t-new
+  printf 'mkdir -p "%s"; printf "herdr:%s:w1:pC\\t/new/project\\tcodex\\n" > "%s"\n' "$(dirname "$rec")" "$HERDR_SOCKET_PATH" "$rec" >> "$FAKEBIN/on_rename"
+  _fill "$SKILL_DIR/run/codex-pane-request.t-aaa"
+  [ "$status" -eq 0 ]
+  [ "$output" = "state=dropped reason=the seat's role-session changed while its pane was being recorded" ]
+  refute test -e "$FAKEBIN/on_rename"
+  [ "$(cat "$rec")" = "$(printf 'herdr:%s:w1:pC\t/new/project\tcodex' "$HERDR_SOCKET_PATH")" ]
+  grep -qx 'session=t-new' "$SKILL_DIR/run/role-session.seatteam__alice"
 }
