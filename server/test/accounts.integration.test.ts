@@ -39,6 +39,9 @@ describeDatabase("accounts profile", () => {
 
   const config = (profile: "open" | "accounts"): Config => ({
     profile,
+    ownerSecret: profile === "accounts" ? "0123456789abcdef0123456789abcdef" : null,
+    publicUrl: profile === "accounts" ? "https://agmsg.test" : null,
+    deviceClientIds: ["agmsg-cli"],
     databaseUrl: databaseUrl ?? "",
     host: "127.0.0.1",
     port: 0,

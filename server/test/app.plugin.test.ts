@@ -11,6 +11,9 @@ import type { Config } from "../src/config.js";
 
 const config: Config = {
   profile: "open",
+    ownerSecret: null,
+    publicUrl: null,
+    deviceClientIds: ["agmsg-cli"],
   databaseUrl: "postgres://unused",
   host: "127.0.0.1",
   port: 0,

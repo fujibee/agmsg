@@ -47,7 +47,10 @@ but does not replace the network boundary.
 serves the data routes only under a per-device capability URL
 (`/t/<secret>/v1/...`); see the profiles section of `spec/v1.md`. A device is
 bound to one team, and an unknown or revoked secret is refused without saying
-which.
+which. In that profile set `AGMSG_OWNER_SECRET` (make one with
+`openssl rand -hex 32`; the server refuses a weak one) and `AGMSG_PUBLIC_URL`
+(the origin devices reach the server at, for example `https://agmsg.example.com`;
+serve it over TLS). The owner approves new devices at `<AGMSG_PUBLIC_URL>/approve`. `AGMSG_DEVICE_CLIENT_IDS` (comma separated, default `agmsg-cli`) lists the client ids that may ask for a device code; any other id gets `invalid_client`.
 
 ## Compose configuration
 
