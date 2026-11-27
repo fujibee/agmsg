@@ -7,6 +7,7 @@ import { removeDevice } from "../src/accounts/device-removal.js";
 import { fenceEpoch, liftEpochFence } from "../src/fence.js";
 import type { Config } from "../src/config.js";
 import { inTransaction, migrate } from "../src/db.js";
+import { testConfig } from "./helpers/config.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDatabase = databaseUrl ? describe : describe.skip;
@@ -24,11 +25,10 @@ describeDatabase("owner removal of a device", () => {
   let cookie = "";
   let counter = 0;
 
-  const config: Config = {
-    profile: "accounts", ownerSecret, publicUrl: origin, deviceClientIds: ["agmsg-cli"],
-    databaseUrl: databaseUrl ?? "", host: "127.0.0.1", port: 0,
-    logLevel: "silent", retentionMaxLiveMessages: null,
-  };
+  const config: Config = testConfig({
+    profile: "accounts", ownerSecret, publicUrl: origin,
+    databaseUrl: databaseUrl ?? "",
+  });
   const address = () => `10.5.0.${(counter += 1) % 250 + 1}`;
   const del = (id: string, headers: Record<string, string>, payload?: object) =>
     app.inject({
