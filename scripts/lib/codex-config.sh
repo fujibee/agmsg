@@ -3,9 +3,12 @@
 # An explicit CODEX_HOME isolates the profile: never also edit the default
 # profile, including when testing a separate install (#1718).
 
-# Prints the active profile config, falling back to Codex's default.
+# Prints the active profile config, falling back to Codex's default. When
+# CODEX_HOME is unset, the default follows AGMSG_INSTALL_HOME like every other
+# per-agent destination install.sh writes, so an install relocated with it
+# never edits the real profile's config (#2059). Unset, it is $HOME/.codex.
 agmsg_codex_config_paths() {
-  printf '%s/config.toml\n' "${CODEX_HOME:-$HOME/.codex}"
+  printf '%s/config.toml\n' "${CODEX_HOME:-${AGMSG_INSTALL_HOME:-$HOME}/.codex}"
 }
 
 # Use the same native Windows path spelling for insertion and removal.

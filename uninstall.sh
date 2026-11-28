@@ -17,9 +17,10 @@ set -euo pipefail
 # Mirrors install.sh's own AGMSG_INSTALL_HOME: relocates the command/skill
 # destinations this script removes from (see install.sh's own top-of-file
 # comment for the full list and what is deliberately excluded -- CLAUDE_CONFIG_DIR,
-# CODEX_HOME, and the install's runtime state root under AGMSG_HOME/~/.agmsg,
-# which this does not move). Unset, this is $HOME, byte-for-byte the prior
-# behavior for those destinations.
+# an explicit CODEX_HOME, and the install's runtime state root under
+# AGMSG_HOME/~/.agmsg, which this does not move). With CODEX_HOME unset the Codex
+# config follows it, the same selection install.sh used (#2059). Unset, this is
+# $HOME, byte-for-byte the prior behavior for those destinations.
 INSTALL_HOME="${AGMSG_INSTALL_HOME:-$HOME}"
 # How the messages below name a location under INSTALL_HOME: "~" when it is the
 # default (the text these messages always had), the real path once

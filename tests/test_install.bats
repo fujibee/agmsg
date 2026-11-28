@@ -3724,6 +3724,51 @@ CYG
   [ ! -e "$real/.claude/commands/agmsg.md" ]
 }
 
+@test "install.sh / uninstall.sh: AGMSG_INSTALL_HOME without CODEX_HOME edits the relocated Codex config, never the real one (#2059)" {
+  local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home"
+  mkdir -p "$real/.codex" "$dest/.codex"
+  printf 'model = "real"\n' > "$real/.codex/config.toml"
+  printf 'model = "dest"\n' > "$dest/.codex/config.toml"
+  local before; before="$(cksum < "$real/.codex/config.toml")"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$(cksum < "$real/.codex/config.toml")" = "$before" ]
+  [ ! -e "$real/.codex/config.toml.bak" ]
+  grep -qF "$dest/.agents/skills/agmsg/.install-op" "$dest/.codex/config.toml"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$dest/.agents/skills/agmsg/uninstall.sh" --yes
+  [ "$(cksum < "$real/.codex/config.toml")" = "$before" ]
+  refute grep -qF "$dest/.agents/skills/agmsg" "$dest/.codex/config.toml"
+}
+
+@test "install.sh: AGMSG_INSTALL_HOME with no relocated Codex config leaves the real one alone (#2059)" {
+  local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home"
+  mkdir -p "$real/.codex" "$dest"
+  printf 'model = "real"\n' > "$real/.codex/config.toml"
+  local before; before="$(cksum < "$real/.codex/config.toml")"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$(cksum < "$real/.codex/config.toml")" = "$before" ]
+  [ ! -e "$real/.codex/config.toml.bak" ]
+  [ ! -e "$dest/.codex" ]
+}
+
+@test "install.sh: an explicit CODEX_HOME still wins over AGMSG_INSTALL_HOME (#2059)" {
+  local real="$FAKE_HOME/real-home" dest="$FAKE_HOME/install-home" profile="$FAKE_HOME/profile"
+  mkdir -p "$real/.codex" "$dest/.codex" "$profile"
+  printf 'model = "real"\n' > "$real/.codex/config.toml"
+  printf 'model = "dest"\n' > "$dest/.codex/config.toml"
+  printf 'model = "profile"\n' > "$profile/config.toml"
+  local real_before dest_before
+  real_before="$(cksum < "$real/.codex/config.toml")"
+  dest_before="$(cksum < "$dest/.codex/config.toml")"
+
+  HOME="$real" AGMSG_INSTALL_HOME="$dest" CODEX_HOME="$profile" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  grep -qF "$dest/.agents/skills/agmsg/.install-op" "$profile/config.toml"
+  [ "$(cksum < "$real/.codex/config.toml")" = "$real_before" ]
+  [ "$(cksum < "$dest/.codex/config.toml")" = "$dest_before" ]
+}
+
 @test "install.sh / uninstall.sh: AGMSG_INSTALL_HOME unset behaves exactly like before (writes to HOME)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/SKILL.md" ]

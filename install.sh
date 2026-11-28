@@ -29,8 +29,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # not consulted here: a live Claude Code seat can run with CLAUDE_CONFIG_DIR
 # pointed at a different profile than the one install.sh should write its
 # command file for, and this override is about relocating where install.sh
-# writes, not about matching a running seat's own profile. CODEX_HOME already
-# has its own override, untouched here. This does NOT move the install's
+# writes, not about matching a running seat's own profile. The Codex config
+# moves too while CODEX_HOME is unset (agmsg_codex_config_paths, #2059); an
+# explicit CODEX_HOME still wins. This does NOT move the install's
 # runtime state root (state-root.sh's agmsg_state_base, $AGMSG_HOME or
 # ~/.agmsg by default) -- that is a separate override with its own existing
 # env var, outside what this change touches.
