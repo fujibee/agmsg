@@ -41,6 +41,7 @@ Adapter setup, key generation, and decryption failures must omit credentials and
 
 ## Assertions
 
+- Unauthenticated origin GET `/v1/health` returns string feature names including `key-escrow`. This suite requires a configured escrow backend, so the advertisement is mandatory and never selected by host name.
 - Device registration is idempotent and returns `201 {device_id}`; malformed, foreign-team, changed-key, unknown, and revoked credentials retain the established control-plane error shapes.
 - A claimed empty escrow team returns nested `409 error.code: "no_team_key"`.
 - Malformed requests, non-integer epochs, and unknown request fields return 400 `bad_request`. Invalid epoch range (including zero), key IDs, recipients, identity bindings, snapshot revision, and missing previous epochs return their agreed 422 codes. Reusing a retained key ID for a new private key returns 422 `key_id_conflict`. Refused candidates must not create an escrowed epoch.
