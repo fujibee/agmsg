@@ -83,7 +83,9 @@ describeDatabase("key escrow", () => {
   it("stores one epoch per team and refuses a second row for the same epoch", async () => {
     await insert(row());
     await expect(insert(row())).rejects.toThrow(/duplicate key/u);
-    await insert(row({ epoch: 2 }));
+    // One key id names one key in a team: epoch 2 cannot reuse epoch 1's.
+    await expect(insert(row({ epoch: 2 }))).rejects.toThrow(/team_key_epochs_one_key_id/u);
+    await insert(row({ epoch: 2, key_id: "team-key-2" }));
   });
 
   it("refuses rows that could never be part of a handoff bundle", async () => {

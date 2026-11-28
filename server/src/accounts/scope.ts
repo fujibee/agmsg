@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { Config } from "../config.js";
+import type { EscrowBackend } from "../escrow.js";
 import { ProtocolError, errorBody } from "../errors.js";
 import { resolveSecret } from "./capability.js";
+import { registerKeyRoutes } from "./keys.js";
 
 // <origin>/t/<secret>/v1/... is how a device reaches the data plane in the
 // accounts profile. This scope resolves the secret to one live device and one
@@ -39,32 +41,33 @@ const deviceOf = new WeakMap<FastifyRequest, string>();
 type Options = {
   pool: Pool;
   config: Config;
+  escrow: EscrowBackend | null;
   // The data-plane plugin, passed in so this module does not import app.ts.
   dataPlane: FastifyPluginAsync<{ pool: Pool; config: Config }>;
 };
 
 export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, options) => {
-  const { pool, config, dataPlane } = options;
+  const { pool, config, dataPlane, escrow } = options;
   void app.register(async (scope: FastifyInstance) => {
     scope.addHook("onRequest", async (request: FastifyRequest, reply) => {
       const params = request.params as { secret?: string } | undefined;
       const device = await resolveSecret(pool, params?.secret ?? "");
       if (!device) {
-        void reply.status(401).send(errorBody(unauthenticated()));
+        void reply.header("Cache-Control", "no-store").status(401).send(errorBody(unauthenticated()));
         return reply;
       }
       // The team is the device's, whatever the request says. A header naming
       // another team is a cross-team request, refused like an unknown team.
       const named = request.headers["agmsg-team-id"];
       if (named !== undefined && named !== device.teamId) {
-        void reply.status(404).send(errorBody(teamNotFound()));
+        void reply.header("Cache-Control", "no-store").status(404).send(errorBody(teamNotFound()));
         return reply;
       }
       request.headers["agmsg-team-id"] = device.teamId;
       deviceOf.set(request, device.deviceId);
       const pathTeam = (request.params as { teamId?: string }).teamId;
       if (pathTeam !== undefined && pathTeam !== device.teamId) {
-        void reply.status(404).send(errorBody(teamNotFound()));
+        void reply.header("Cache-Control", "no-store").status(404).send(errorBody(teamNotFound()));
         return reply;
       }
     });
@@ -81,7 +84,7 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
       if (route.endsWith("/v1/connect")) {
         const body = request.body as { team_id?: unknown } | null;
         if (body?.team_id !== request.headers["agmsg-team-id"]) {
-          void reply.status(404).send(errorBody(teamNotFound()));
+          void reply.header("Cache-Control", "no-store").status(404).send(errorBody(teamNotFound()));
           return reply;
         }
       }
@@ -109,5 +112,7 @@ export const registerCapabilityScope: FastifyPluginAsync<Options> = async (app, 
       }
     });
     void scope.register(dataPlane, { pool, config });
+    // Its own context: the no-store header it sets applies to key routes only.
+    void scope.register(async (keys) => { registerKeyRoutes(keys, { pool, escrow }); });
   }, { prefix: "/t/:secret" });
 };

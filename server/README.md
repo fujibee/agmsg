@@ -119,6 +119,27 @@ A key file on the same host as the database protects only against a leaked
 database dump. Anyone who can read both the file and the database can open every
 wrapped key, and so can the operator.
 
+With a backend set, a device reaches its team's key through three routes (the
+exact bodies and refusals are pinned by `test/contract/KEYS.md`):
+
+- `POST /v1/devices` registers the device's public age recipient. The same key
+  again is accepted; a different key for a device that already has one is
+  refused with `device_key_mismatch`.
+- `POST <capability URL>/v1/keys/epochs` registers the epoch a device generated:
+  its private identity, public recipient, key id and the age snapshot that
+  starts it. The server wraps the identity with the backend and keeps the
+  snapshot. Two devices racing for one epoch get one winner; the other receives
+  the winner's public half. Publishing epoch N also lifts the write pause that
+  removing a device put on epoch N-1.
+- `GET <capability URL>/v1/keys/bundle` returns every retained epoch, in one age
+  file sealed to the calling device's own recipient. Each release is recorded in
+  `key_releases` before it is returned. The private identities are never sent in
+  the clear.
+
+Both key routes need a registered recipient (403 `forbidden` otherwise) and
+answer 503 `escrow_unavailable` when the backend is `none`, which is also why
+`key-escrow` is absent from `/v1/capabilities` then.
+
 ## Retention
 
 After a successful write, the reference server can apply a configured

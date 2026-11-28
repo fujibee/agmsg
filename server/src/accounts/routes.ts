@@ -51,6 +51,14 @@ const tokenBody = z.object({
   client_id: z.string().min(1).max(128),
 }).strict();
 
+const registerBody = z.object({
+  team_id: uuid,
+  device_pubkey: z.string().regex(/^age1[0-9a-z]{58}$/u),
+  // The device's own name for itself. The name it was approved under stays the
+  // one the owner sees; this is accepted so a client can send one.
+  label: z.string().min(1).max(128),
+}).strict();
+
 const approveBody = z.object({
   user_code: z.string().min(1).max(64),
   decision: z.enum(["approve", "deny"]),
@@ -203,8 +211,9 @@ export async function registerDeviceRoutes(
     if (!device) return reply.status(401).send({ error: "unauthenticated" });
     const { rows } = await pool.query<{
       device_id: string; name: string; device_type: string; created_at: Date; last_fetch_at: Date | null;
+      device_pubkey: string | null;
     }>(
-      `SELECT device_id, name, device_type, created_at, last_fetch_at FROM devices
+      `SELECT device_id, name, device_type, created_at, last_fetch_at, device_pubkey FROM devices
         WHERE team_id = $1 AND revoked_at IS NULL AND activated_at IS NOT NULL
         ORDER BY created_at, device_id`,
       [device.teamId],
@@ -212,7 +221,7 @@ export async function registerDeviceRoutes(
     return reply.status(200).send({
       devices: rows.map((row) => ({
         id: row.device_id,
-        devicePubkey: null,
+        devicePubkey: row.device_pubkey,
         label: row.name,
         createdAt: row.created_at.toISOString(),
         thisMachine: row.device_id === device.deviceId,
@@ -220,6 +229,32 @@ export async function registerDeviceRoutes(
         lastFetchAt: row.last_fetch_at ? row.last_fetch_at.toISOString() : null,
       })),
     });
+  });
+
+  // A device registers the age recipient a key handoff is sealed to. Idempotent
+  // for the same key; a different key for a device that already registered one
+  // is refused, never replaced. Flat errors, like the rest of this control plane.
+  app.post("/v1/devices", async (request, reply) => {
+    noStore(reply);
+    const secret = bearer(request);
+    const device = secret ? await resolveSecret(pool, secret) : null;
+    if (!device) return reply.status(401).send({ error: "unauthenticated" });
+    const body = registerBody.safeParse(request.body);
+    if (!body.success) return reply.status(400).send({ error: "bad_request" });
+    if (body.data.team_id !== device.teamId) return reply.status(403).send({ error: "forbidden" });
+    // Only ever fills an empty slot, so two racing registrations cannot swap a key.
+    const set = await pool.query(
+      `UPDATE devices SET device_pubkey = $2 WHERE device_id = $1 AND device_pubkey IS NULL`,
+      [device.deviceId, body.data.device_pubkey],
+    );
+    if (set.rowCount === 0) {
+      const { rows } = await pool.query<{ device_pubkey: string | null }>(
+        `SELECT device_pubkey FROM devices WHERE device_id = $1`, [device.deviceId]);
+      if (rows[0]?.device_pubkey !== body.data.device_pubkey) {
+        return reply.status(409).send({ error: "device_key_mismatch" });
+      }
+    }
+    return reply.status(201).send({ device_id: device.deviceId });
   });
 
   // ---- the owner ------------------------------------------------------
