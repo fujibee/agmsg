@@ -496,6 +496,56 @@ marker_dir() {
   stop_engine_of cloned
 }
 
+@test "device pull: the team the approval names is used, so no name lookup is made and --team-id is not needed" {
+  # MOCK_LOOKUP_BAD makes every name lookup fail: a pull that still succeeds did
+  # not make one.
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=cloud-name
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 0 ]
+  has "$output" "Pulled "
+  [ "$(jq -r '.team_id' "$TEST_SKILL_DIR/teams/cloned/config.json")" = "$PULL_TEAM_ID" ]
+  stop_engine_of cloned
+}
+
+@test "device pull: --team-id given on the command line wins over the team the approval names" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none \
+    MOCK_DEVICE_TOKEN_TEAM_ID=01900000-0000-7000-8000-00000000dead MOCK_DEVICE_TOKEN_TEAM_NAME=other
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.team_id' "$TEST_SKILL_DIR/teams/cloned/config.json")" = "$PULL_TEAM_ID" ]
+  stop_engine_of cloned
+}
+
+@test "device pull: a team id without its name is not used" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "could not look up"
+}
+
+@test "device pull: a team id that is not a UUID is not used either" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
+    MOCK_DEVICE_TOKEN_TEAM_ID="../not-a-uuid" MOCK_DEVICE_TOKEN_TEAM_NAME=cloud-name
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "could not look up"
+}
+
+@test "device pull: the team the approval named is kept with a saved approval, so the re-run needs no lookup" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=cloud-name MOCK_DATA_STATUS=503
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  [ "$(sed -n 4p "$(saved_approvals)")" = "$PULL_TEAM_ID" ]
+  curl -sS "$ENDPOINT/_test/data-status?value=" >/dev/null
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.codes')" = 1 ]
+  stop_engine_of cloned
+}
+
 @test "device pull: a bootstrap the data side refuses as invalid drops the approval, and the next run approves again" {
   start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_DATA_STATUS=401
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned

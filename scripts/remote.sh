@@ -787,7 +787,7 @@ _remote_device_pending_write() {
   local file="$1" tmp
   mkdir -p "$CRED_ROOT" || return 1
   tmp="$file.tmp.$$"
-  ( umask 077; printf '%s\n%s\n%s\n' "$2" "$3" "$4" > "$tmp" ) || return 1
+  ( umask 077; printf '%s\n%s\n%s\n%s\n' "$2" "$3" "$4" "${5:-}" > "$tmp" ) || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file"
 }
@@ -821,15 +821,16 @@ _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 # retries from there instead of asking the user to approve again.
 _remote_device_approve() {
   local origin="${1%/}" team="$2" position="${3:-}" team_id_arg="${4:-}" pending machine machine_json body out code doc err interval deadline \
-    device_code user_code uri uri_complete address expires saved_pos activated rc \
+    device_code user_code uri uri_complete address expires saved_pos activated rc saved_team granted_team granted_name \
     markers markers_json marker
   REMOTE_DEVICE_ADDRESS=""
+  REMOTE_DEVICE_TEAM_ID=""
   REMOTE_DEVICE_POSITION="$position"
   # The team name becomes part of a file name below.
   agmsg_validate_team_name "$team" || return 1
   pending="$(_remote_device_pending_file "$origin" "$team")"
   if [ -s "$pending" ]; then
-    { IFS= read -r address; IFS= read -r saved_pos; IFS= read -r activated; } < "$pending" || true
+    { IFS= read -r address; IFS= read -r saved_pos; IFS= read -r activated; IFS= read -r saved_team; } < "$pending" || true
     if [ -n "$address" ]; then
       echo "  using the approval made earlier for team '$team'" >&2
       if [ "$activated" != "1" ]; then
@@ -837,9 +838,10 @@ _remote_device_approve() {
         _remote_device_activate "$origin" "$address" || rc=$?
         if [ "$rc" -eq 2 ]; then rm -f "$pending"; fi
         [ "$rc" -eq 0 ] || return 1
-        _remote_device_pending_write "$pending" "$address" "$saved_pos" 1 || return 1
+        _remote_device_pending_write "$pending" "$address" "$saved_pos" 1 "$saved_team" || return 1
       fi
       REMOTE_DEVICE_ADDRESS="$address"
+      REMOTE_DEVICE_TEAM_ID="$saved_team"
       # The first attempt's position wins: a message written after it, even in
       # an earlier failed run, is newer than the command and must be sent.
       [ -z "$saved_pos" ] || [ -z "$position" ] || REMOTE_DEVICE_POSITION="$saved_pos"
@@ -965,14 +967,24 @@ _remote_device_approve() {
     return 1
   fi
   # Durably saved BEFORE it is activated or used: the server shows it once.
-  _remote_device_pending_write "$pending" "$address" "$position" 0 || {
+  # The approval's team, when the server names it: the id and the name together
+  # or not at all. One that is not a UUID is ignored, never repaired.
+  granted_team="$(_remote_device_field "$doc" '$.team_id')"
+  granted_name="$(_remote_device_field "$doc" '$.team_name')"
+  case "$granted_team" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+    *) granted_team="" ;;
+  esac
+  [ -n "$granted_name" ] || granted_team=""
+  _remote_device_pending_write "$pending" "$address" "$position" 0 "$granted_team" || {
     echo "agmsg: could not save the approved address; nothing was changed" >&2; return 1; }
   rc=0
   _remote_device_activate "$origin" "$address" || rc=$?
   if [ "$rc" -eq 2 ]; then rm -f "$pending"; fi
   [ "$rc" -eq 0 ] || return 1
-  _remote_device_pending_write "$pending" "$address" "$position" 1 || return 1
+  _remote_device_pending_write "$pending" "$address" "$position" 1 "$granted_team" || return 1
   REMOTE_DEVICE_ADDRESS="$address"
+  REMOTE_DEVICE_TEAM_ID="$granted_team"
 }
 
 # _remote_device_failure_file -> prints a fresh temp file for the engine to name a
@@ -1723,6 +1735,11 @@ cmd_pull() {
   # hand only because it stood in for authentication, and this server has none
   # to stand in for. --team-id remains for the case a name cannot settle -- two
   # teams sharing it -- and for anyone who scripted the old form.
+  if [ -z "$team_id" ] && [ "$device_pulled" = "1" ] && [ -n "${REMOTE_DEVICE_TEAM_ID:-}" ]; then
+    # The approval named its team: no lookup is needed (and a capability-scoped
+    # server may not answer one).
+    team_id="$REMOTE_DEVICE_TEAM_ID"
+  fi
   if [ -z "$team_id" ]; then
     team_id="$(_remote_resolve_team_id "$endpoint" "$team")" || exit 1
   fi

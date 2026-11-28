@@ -44,6 +44,10 @@ FEATURES = [f for f in os.environ.get("MOCK_FEATURES", "").split(",") if f]
 DEVICE_PENDING = int(os.environ.get("MOCK_DEVICE_PENDING", "0") or 0)
 DEVICE_INTERVAL = int(os.environ.get("MOCK_DEVICE_INTERVAL", "0") or 0)
 DEVICE_ERROR = os.environ.get("MOCK_DEVICE_ERROR", "")
+# The team the token answer names, as the reference server does for an approval
+# bound to one team. Either may be left empty to send one without the other.
+DEVICE_TOKEN_TEAM_ID = os.environ.get("MOCK_DEVICE_TOKEN_TEAM_ID", "")
+DEVICE_TOKEN_TEAM_NAME = os.environ.get("MOCK_DEVICE_TOKEN_TEAM_NAME", "")
 # A status every request under a capability prefix (/t/<secret>/...) answers with:
 # the data side refusing an address, while the routes on the origin keep working.
 DATA_STATUS = os.environ.get("MOCK_DATA_STATUS", "")
@@ -695,11 +699,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "authorization_pending"})
                 return
             host = self.headers.get("Host", "127.0.0.1")
-            self._send_json(200, {
+            answer = {
                 "capability_url": "http://%s/t/%s" % (host, DEVICE_SECRET),
                 "machine_name": "mock",
                 "scope": "login",
-            })
+            }
+            if DEVICE_TOKEN_TEAM_ID:
+                answer["team_id"] = DEVICE_TOKEN_TEAM_ID
+            if DEVICE_TOKEN_TEAM_NAME:
+                answer["team_name"] = DEVICE_TOKEN_TEAM_NAME
+            self._send_json(200, answer)
             return
         if self.path == "/v1/device/activate":
             if self.headers.get("Authorization", "") != "Bearer " + DEVICE_SECRET:

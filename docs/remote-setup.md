@@ -223,6 +223,10 @@ the command is unchanged:
    capability: whoever holds it can act as this machine. It is saved in a file
    only you can read, recorded in the team's binding, and never printed.
 3. `connect` registers the team as usual, with its whole roster.
+4. `pull` needs no `--team-id`: when the approval is bound to one team, the
+   server names it (id and name together) in its answer and `pull` uses that id.
+   A server that does not name a team gets the usual look-up by name, and
+   `--team-id` given on the command line always wins.
 
 If anything fails after you approved and before the binding is recorded, the
 local team is untouched and still works, the approved address is kept, and
