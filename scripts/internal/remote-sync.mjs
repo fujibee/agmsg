@@ -4751,6 +4751,70 @@ export async function writeRosterSnapshot(args, dependencies = {}) {
   return { type: "roster_snapshot_written", sequence: result.sequence, epoch: result.epoch };
 }
 
+// The exact command that re-runs this pull, for an error that must not be
+// swallowed into a silent fallback: a pull that goes on to replay the roster
+// from scratch after retention has cut its early history would reconstruct
+// the WRONG roster with no indication anything went wrong, which is worse
+// than stopping and saying so.
+function pullRerunCommand(args) {
+  const parts = ["remote.sh pull", `--endpoint ${args.endpoint}`];
+  if (args["team-id"]) parts.push(`--team-id ${args["team-id"]}`);
+  parts.push(args.team);
+  return parts.join(" ");
+}
+
+// A synthetic mutation_id for a seeded member_joined, in the same spirit as
+// rosterSnapshotWireId: derived from the snapshot's own identity (team,
+// epoch, sequence) and the member, not random, so a repeated bootstrap (a
+// retry after a failure) produces the identical record rather than a
+// duplicate. UUID v7 shaped, not v4: this is a roster mutation_id, and
+// canonicalRosterMutation (and the wire's own convention) requires that
+// shape for one. Nothing here is ever sealed or sent back to a server under
+// this id -- it exists purely as this journal's own bookkeeping key.
+function seededMutationId(teamId, epoch, sequence, memberId) {
+  const digest = createHash("sha256")
+    .update("agmsg-roster-snapshot-seed\0").update(String(teamId)).update("\0")
+    .update(String(epoch)).update("\0").update(String(sequence)).update("\0")
+    .update(String(memberId)).digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// Seeds the roster from a snapshot at sequence S: the member list AS OF S,
+// applied as synthetic member_joined records so the driver's own roster
+// state ends up holding exactly that membership before any real mutation is
+// replayed.
+//
+// Returns the BigInt sequence S so the caller can skip any roster mutation
+// at or before it -- replaying one after the seed can regress state (an
+// older rename or leave undoing what the snapshot already reflects), and
+// idempotence by mutation_id does not help here because these synthetic ids
+// are not the real mutation_ids those messages carry.
+async function seedRosterFromSnapshot(config, snapshot, rosterDriverCall) {
+  const seedSequence = sequence(snapshot.sequence, "roster snapshot sequence");
+  const opened = await openRosterSnapshot({
+    teamId: config.remote_team_id, epoch: snapshot.epoch, sequence: snapshot.sequence,
+    blob: snapshot.blob, protocolVersion: config.protocol_version, maxBlobBytes: 1_048_576,
+  });
+  const occurredAt = new Date().toISOString().replace(/Z$/u, "000Z");
+  const records = opened.members.map((member) => {
+    const mutationId = seededMutationId(
+      config.remote_team_id, snapshot.epoch, snapshot.sequence, member.member_id);
+    return {
+      type: "sync_pull_message", id: mutationId, server_seq: seedSequence,
+      server_received_at: occurredAt, status: "importable",
+      projection: { kind: "member_joined", mutation_id: mutationId,
+        member_id: member.member_id, name: member.name, occurred_at: occurredAt },
+    };
+  });
+  await rosterDriverCall("apply", config,
+    [...records, { type: "sync_pull_cursor", next_after: seedSequence }]);
+  return BigInt(seedSequence);
+}
+
 export async function pullBootstrap(args, dependencies = {}) {
   const publicSnapshotCall = dependencies.publicSnapshotCall ?? publicSnapshot;
   const requestPublicCall = dependencies.requestPublicCall ?? requestPublic;
@@ -4807,6 +4871,41 @@ export async function pullBootstrap(args, dependencies = {}) {
     min_available_seq: teamSnapshot.min_available_seq,
   });
 
+  // When the server does not advertise roster-snapshot, nothing here
+  // changes: today's path (replay every roster mutation from
+  // min_available_seq) is exactly what runs below. Advertised and
+  // anything about reading or opening it fails -- a network error, a bad
+  // binding id, a bad digest, a non-canonical form -- this throws rather
+  // than falling back to replay: after retention has cut the early
+  // history, a silent fallback would reconstruct the WRONG roster with
+  // nothing to say so. `seedSequence` stays null when there is nothing to
+  // skip against (feature absent, or a server that has never had one
+  // written -- sequence null, an empty team): every roster mutation in
+  // the stream applies exactly as it does today.
+  let seedSequence = null;
+  if (Array.isArray(teamSnapshot.features) && teamSnapshot.features.includes("roster-snapshot")) {
+    let snapshot;
+    try {
+      snapshot = await requestPublicCall(config, "/v1/roster-snapshot");
+    } catch (error) {
+      throw new Error(
+        `the server lists roster-snapshot but the snapshot could not be read (${error.message}); ` +
+        `nothing was seeded. Rerun: ${pullRerunCommand(args)}`);
+    }
+    if (snapshot.sequence !== null) {
+      try {
+        seedSequence = await seedRosterFromSnapshot(config, snapshot, rosterDriverCall);
+      } catch (error) {
+        throw new Error(
+          `the server's roster snapshot could not be opened or verified (${error.message}); ` +
+          `nothing was seeded. Rerun: ${pullRerunCommand(args)}`);
+      }
+      await eventCall("pull.bootstrap.roster_snapshot_seeded", {
+        sequence: snapshot.sequence, epoch: snapshot.epoch,
+      });
+    }
+  }
+
   let cursor = String(teamSnapshot.min_available_seq ?? "0");
   let imported = 0;
   let ageV1Envelopes = 0;
@@ -4835,8 +4934,16 @@ export async function pullBootstrap(args, dependencies = {}) {
     if (rosterRecords.length + messageRecords.length !== records.length) {
       throw new Error("pull bootstrap cannot apply this projection kind");
     }
-    const rosterApplied = rosterRecords.length > 0 ?
-      await rosterDriverCall("apply", config, [...rosterRecords, cursorRecord]) : [];
+    // Already in the seed: a roster mutation at or before the snapshot's own
+    // sequence is skipped, never applied, when a snapshot was seeded above.
+    // Replaying it anyway could regress the seeded state (an older rename or
+    // leave undoing what the snapshot already reflects), and these records'
+    // real mutation_ids are not the synthetic ones the seed used, so the
+    // driver's own idempotence-by-mutation_id check would not catch this.
+    const rosterRecordsToApply = seedSequence === null ? rosterRecords :
+      rosterRecords.filter((record) => BigInt(record.server_seq) > seedSequence);
+    const rosterApplied = rosterRecordsToApply.length > 0 ?
+      await rosterDriverCall("apply", config, [...rosterRecordsToApply, cursorRecord]) : [];
     const applied = await driverCall("apply", config, [...messageRecords, cursorRecord]);
     await eventCall("pull.bootstrap.applied", {
       after: cursor, next_after: page.next_after,

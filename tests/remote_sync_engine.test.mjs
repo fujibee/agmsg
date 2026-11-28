@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { before, after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { readNativeAgeIdentity } from "../scripts/internal/sync-cipher.mjs";
+import { readNativeAgeIdentity, sealRosterSnapshot } from "../scripts/internal/sync-cipher.mjs";
 import {
   ageSnapshotDigest,
   activateKeyRotations,
@@ -4686,6 +4686,189 @@ test("pull bootstrap dispatches a real mixed roster and message page", async () 
   assert.equal(storageInputs[0].filter((record) => record.type === "sync_pull_message").length, 73);
   assert.deepEqual(storageInputs[0].at(-1), { type: "sync_pull_cursor", next_after: "80" });
   assert.equal(result.age_v1_envelopes, 1);
+});
+
+function sealedRosterSnapshotBlob(teamId, epoch, seq, members) {
+  return sealRosterSnapshot({
+    teamId, epoch, sequence: seq, cipher: "none", maxBlobBytes: 1_048_576,
+    protocolVersion: 1, projection: { kind: "roster_snapshot", epoch, sequence: seq, members },
+  });
+}
+
+test("pull bootstrap seeds from a roster snapshot, then applies only mutations after its sequence", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const alice = { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "alice" };
+  const blob = sealedRosterSnapshotBlob(teamId, "0", "5", [alice]);
+  const olderMutation = {
+    server_seq: "3", id: "20000000-0000-4000-8000-000000000001",
+    server_received_at: "2026-07-29T05:00:00.000000Z",
+    envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" },
+    projection: { kind: "member_joined", mutation_id: "018f3f7e-0000-7000-8000-000000000020",
+      member_id: "018f3f7e-0000-7000-8000-000000000011", name: "bob",
+      occurred_at: "2026-07-29T05:00:00.000000Z" },
+  };
+  const newerMutation = {
+    server_seq: "7", id: "20000000-0000-4000-8000-000000000002",
+    server_received_at: "2026-07-29T05:00:00.000000Z",
+    envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" },
+    projection: { kind: "member_joined", mutation_id: "018f3f7e-0000-7000-8000-000000000021",
+      member_id: "018f3f7e-0000-7000-8000-000000000012", name: "carol",
+      occurred_at: "2026-07-29T05:00:00.000000Z" },
+  };
+  const rosterInputs = [];
+  await pullBootstrap({ team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+    publicSnapshotCall: async () => ({
+      server_instance_id: serverId, team_id: teamId, team_name: "source",
+      min_available_seq: "0", features: ["roster-snapshot"],
+    }),
+    requestPublicCall: async (_config, path) => {
+      if (path === "/v1/roster-snapshot") return { sequence: "5", epoch: 0, blob };
+      return {
+        messages: [olderMutation, newerMutation].map(({ projection: _p, ...m }) => m),
+        next_after: "7", has_more: false,
+      };
+    },
+    evaluateCall: async (_config, _teamSnapshot, message) => ({
+      status: "importable",
+      projection: [olderMutation, newerMutation].find((entry) => entry.id === message.id).projection,
+    }),
+    driverCall: async () => [{ type: "sync_apply_result" }],
+    rosterDriverCall: async (operation, _config, input) => {
+      assert.equal(operation, "apply");
+      rosterInputs.push(input);
+      return [{ type: "roster_sync_apply_outcome", status: "imported" }];
+    },
+    eventCall: async () => {},
+  });
+  // Call 1: the seed, from the snapshot alone.
+  assert.equal(rosterInputs.length, 2);
+  const seedCall = rosterInputs[0].filter((record) => record.type === "sync_pull_message");
+  assert.equal(seedCall.length, 1);
+  assert.equal(seedCall[0].projection.member_id, alice.member_id);
+  assert.equal(seedCall[0].server_seq, "5");
+  // Call 2: the page's roster mutations, with the one at-or-before sequence 5
+  // (bob, server_seq "3") skipped and the one after it (carol, "7") applied.
+  const pageCall = rosterInputs[1].filter((record) => record.type === "sync_pull_message");
+  assert.equal(pageCall.length, 1);
+  assert.equal(pageCall[0].projection.name, "carol");
+});
+
+test("pull bootstrap seeds from a roster snapshot even when retention has cut the mutation that is already in it", async () => {
+  // min_available_seq "6" is AFTER the snapshot's own sequence "5" -- the
+  // server has already dropped everything at or before 5, so a plain replay
+  // starting at min_available_seq could never see the roster state the
+  // snapshot captures. This is the case the feature exists for.
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const alice = { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "alice" };
+  const blob = sealedRosterSnapshotBlob(teamId, "0", "5", [alice]);
+  const rosterInputs = [];
+  await pullBootstrap({ team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+    publicSnapshotCall: async () => ({
+      server_instance_id: serverId, team_id: teamId, team_name: "source",
+      min_available_seq: "6", features: ["roster-snapshot"],
+    }),
+    requestPublicCall: async (_config, path) => {
+      if (path === "/v1/roster-snapshot") return { sequence: "5", epoch: 0, blob };
+      return { messages: [], next_after: "6", has_more: false };
+    },
+    evaluateCall: async () => { throw new Error("no message to evaluate in this test"); },
+    driverCall: async () => [{ type: "sync_apply_result" }],
+    rosterDriverCall: async (operation, _config, input) => {
+      rosterInputs.push(input);
+      return [{ type: "roster_sync_apply_outcome", status: "imported" }];
+    },
+    eventCall: async () => {},
+  });
+  assert.equal(rosterInputs.length, 1);
+  const seedCall = rosterInputs[0].filter((record) => record.type === "sync_pull_message");
+  assert.equal(seedCall.length, 1);
+  assert.equal(seedCall[0].projection.member_id, alice.member_id);
+});
+
+test("pull bootstrap rejects rather than silently falling back when a listed roster snapshot cannot be read", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  await assert.rejects(pullBootstrap(
+    { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        min_available_seq: "0", features: ["roster-snapshot"],
+      }),
+      requestPublicCall: async (_config, path) => {
+        if (path === "/v1/roster-snapshot") throw new Error("HTTP 503 unavailable");
+        throw new Error("must not fetch messages before the snapshot read is resolved");
+      },
+      rosterDriverCall: async () => { throw new Error("must not seed on a failed read"); },
+      eventCall: async () => {},
+    },
+  ), /snapshot could not be read.*Rerun: remote\.sh pull/su);
+});
+
+test("pull bootstrap rejects rather than silently falling back when a listed roster snapshot does not open", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  await assert.rejects(pullBootstrap(
+    { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        min_available_seq: "0", features: ["roster-snapshot"],
+      }),
+      requestPublicCall: async (_config, path) => {
+        if (path === "/v1/roster-snapshot") return { sequence: "5", epoch: 0, blob: "not-canonical-base64!!" };
+        throw new Error("must not fetch messages before the snapshot open is resolved");
+      },
+      rosterDriverCall: async () => { throw new Error("must not seed on a failed open"); },
+      eventCall: async () => {},
+    },
+  ), /snapshot could not be opened or verified.*Rerun: remote\.sh pull/su);
+});
+
+test("pull bootstrap skips the roster snapshot read entirely when the feature is not listed", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const requestedPaths = [];
+  await pullBootstrap({ team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+    publicSnapshotCall: async () => ({
+      server_instance_id: serverId, team_id: teamId, team_name: "source", min_available_seq: "0",
+    }),
+    requestPublicCall: async (_config, path) => {
+      requestedPaths.push(path);
+      return { messages: [], next_after: "0", has_more: false };
+    },
+    driverCall: async () => [{ type: "sync_apply_result" }],
+    rosterDriverCall: async () => { throw new Error("must not be called"); },
+    eventCall: async () => {},
+  });
+  assert.ok(!requestedPaths.includes("/v1/roster-snapshot"));
+});
+
+test("pull bootstrap takes today's path for an empty team even when the feature is listed", async () => {
+  // sequence null: the feature is advertised, but no snapshot has ever been
+  // written (a freshly connected but still-empty team). Nothing to seed,
+  // nothing to skip -- every roster mutation in the stream applies as
+  // before.
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const rosterInputs = [];
+  await pullBootstrap({ team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+    publicSnapshotCall: async () => ({
+      server_instance_id: serverId, team_id: teamId, team_name: "source",
+      min_available_seq: "0", features: ["roster-snapshot"],
+    }),
+    requestPublicCall: async (_config, path) => {
+      if (path === "/v1/roster-snapshot") return { sequence: null, epoch: null, blob: null };
+      return { messages: [], next_after: "0", has_more: false };
+    },
+    driverCall: async () => [{ type: "sync_apply_result" }],
+    rosterDriverCall: async (operation, _config, input) => {
+      rosterInputs.push(input);
+      return [{ type: "roster_sync_apply_outcome", status: "imported" }];
+    },
+    eventCall: async () => {},
+  });
+  assert.equal(rosterInputs.length, 0);
 });
 
 test("pull bootstrap rejects unsupported projection kinds before either cursor advances", async () => {
