@@ -718,7 +718,7 @@ REMOTE_DEVICE_MACHINE_NAME=""
 # One request, no team header (the device routes have no team yet). The bearer,
 # when given, goes in the 0600 curl config file, never in argv.
 _remote_http_json_call() {
-  local method="$1" url="$2" body_file="$3" out_file="$4" bearer="${5:-}" \
+  local method="$1" url="$2" body_file="$3" out_file="$4" bearer="${5:-}" team_header="${6:-}" \
     cfg curl_output curl_status=0 curl_err work_dir
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-curl.XXXXXX")"
   trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
@@ -737,6 +737,9 @@ _remote_http_json_call() {
     fi
     if [ -n "$bearer" ]; then
       printf 'header = "Authorization: Bearer %s"\n' "$(_remote_curl_quote "$bearer")"
+    fi
+    if [ -n "$team_header" ]; then
+      printf 'header = "Agmsg-Team-ID: %s"\n' "$(_remote_curl_quote "$team_header")"
     fi
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
@@ -810,6 +813,144 @@ _remote_device_activate() {
 
 # _remote_device_field <doc> <json path> -> value or empty
 _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
+
+# --- key escrow ----------------------------------------------------------------
+#
+# A server that lists `key-escrow` keeps a wrapped copy of a team's key so a
+# second machine can join without a hand-carried key. This machine proves who it
+# is to that server by an age device key of its own (made once, kept 0600), and
+# the key bundle comes back sealed to it. The team key and the device key are
+# secrets: they never appear on a command line, and the address never does
+# either.
+
+_remote_device_identity_file() {
+  local key
+  key="$(printf '%s' "${1%/}" | agmsg_sha1)"
+  printf '%s' "$CRED_ROOT/device-identity.$2.${key:0:16}"
+}
+
+# _remote_escrow_error <status> <body-file> <what> prints one stated line. Only
+# a code shaped like the protocol's own is echoed; the server's text never is.
+_remote_escrow_error() {
+  local status="$1" body="$2" what="$3" doc code
+  doc="$(cat "$body" 2>/dev/null || true)"
+  code="$(_remote_device_field "$doc" '$.error.code')"
+  [ -n "$code" ] || code="$(_remote_device_field "$doc" '$.error')"
+  case "$code" in
+    *[!a-z0-9_-]*|'') code="" ;;
+  esac
+  echo "agmsg: $what (HTTP $status${code:+, $code})." >&2
+}
+
+# _remote_escrow_device_recipient <origin> <team> prints the device recipient,
+# making the device key first when this machine has none for that server.
+_remote_escrow_device_recipient() {
+  local file tmp
+  file="$(_remote_device_identity_file "$1" "$2")"
+  command -v age-keygen >/dev/null 2>&1 || {
+    echo "agmsg: key escrow needs age-keygen on PATH (install age)." >&2; return 1; }
+  if [ ! -s "$file" ]; then
+    mkdir -p "$CRED_ROOT" || return 1
+    tmp="$file.tmp.$$"
+    ( umask 077; age-keygen -o "$tmp" >/dev/null 2>&1 ) || { rm -f "$tmp"; echo "agmsg: could not make this machine's device key" >&2; return 1; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file" || return 1
+  fi
+  age-keygen -y "$file" 2>/dev/null
+}
+
+# _remote_escrow_register_device <origin> <team> <address> <team-id>
+_remote_escrow_register_device() {
+  local origin="${1%/}" team="$2" address="$3" team_id="$4" recipient secret body out code label label_json
+  recipient="$(_remote_escrow_device_recipient "$origin" "$team")" || return 1
+  # The device's own name for itself: the machine name given, else this host's.
+  label="${REMOTE_DEVICE_MACHINE_NAME:-}"
+  if [ -z "$label" ]; then
+    label="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo machine)"
+    label="$(printf '%s' "$label" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+    [ -n "$label" ] || label="machine"
+  fi
+  label_json="$(agmsg_sqlite_mem "SELECT json_quote('$(_agmsg_sqlesc "$label")');")"
+  [ -n "$recipient" ] || { echo "agmsg: could not read this machine's device key" >&2; return 1; }
+  secret="${address##*/t/}"; secret="${secret%%/*}"
+  body="$(mktemp "${TMPDIR:-/tmp}/agmsg-escrow-body.XXXXXX")"
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-escrow-out.XXXXXX")"
+  printf '{"team_id":"%s","device_pubkey":"%s","label":%s}' "$team_id" "$recipient" "$label_json" > "$body"
+  code="$(_remote_http_json_call POST "$origin/v1/devices" "$body" "$out" "$secret")" || code="000"
+  rm -f "$body"
+  case "$code" in
+    200|201) rm -f "$out"; return 0 ;;
+    409) rm -f "$out"
+      echo "agmsg: the server already holds a different device key for this machine's approval; nothing was installed." >&2; return 1 ;;
+    *) _remote_escrow_error "$code" "$out" "the server did not accept this machine's device key"; rm -f "$out"; return 1 ;;
+  esac
+}
+
+# _remote_escrow_publish_epoch <team> <cfg> <origin> <address> <remote-team-id>
+# Registers the device key and sends the team's epoch-1 key and snapshot. The
+# same key already held there is fine (a repeat); another key is a stop.
+_remote_escrow_publish_epoch() {
+  local team="$1" cfg="$2" origin="${3%/}" address="${4%/}" remote_team_id="$5" \
+    key_id recipient identity_file snapshot_file body out code doc got_key
+  key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
+  recipient="$(_remote_read_config_field "$cfg" '$.remote_key.current.recipient')"
+  identity_file="$CONNECTION_ROOT/run/remote-credentials/$team/keys/$key_id.key"
+  [ -f "$identity_file" ] || { echo "agmsg: the team key file is missing; nothing was sent to the server." >&2; return 1; }
+  _remote_escrow_register_device "$origin" "$team" "$address" "$remote_team_id" || return 1
+  snapshot_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-escrow-snapshot.XXXXXX")"
+  body="$(mktemp "${TMPDIR:-/tmp}/agmsg-escrow-body.XXXXXX")"
+  out="$(mktemp "${TMPDIR:-/tmp}/agmsg-escrow-out.XXXXXX")"
+  chmod 600 "$body"
+  rm -f "$snapshot_file"
+  bash "$SCRIPT_DIR/remote-sync.sh" export-age-snapshot --team "$team" --out "$snapshot_file" >/dev/null 2>&1 || {
+    rm -f "$body" "$out"; echo "agmsg: could not export the team's key snapshot; nothing was sent to the server." >&2; return 1; }
+  ( umask 077; bash "$SCRIPT_DIR/remote-sync.sh" escrow-epoch-body --epoch 1 --key-id "$key_id" \
+      --recipient "$recipient" --identity "$identity_file" --snapshot "$snapshot_file" > "$body" ) || {
+    rm -f "$snapshot_file" "$body" "$out"; echo "agmsg: could not prepare the team key for the server; nothing was sent." >&2; return 1; }
+  rm -f "$snapshot_file"
+  code="$(_remote_http_json_call POST "$address/v1/keys/epochs" "$body" "$out" "" "$remote_team_id")" || code="000"
+  rm -f "$body"
+  case "$code" in
+    201) rm -f "$out"; return 0 ;;
+    200)
+      doc="$(cat "$out" 2>/dev/null || true)"; rm -f "$out"
+      got_key="$(_remote_device_field "$doc" '$.key_id')"
+      if [ "$got_key" = "$key_id" ]; then return 0; fi
+      echo "agmsg: the server already holds a different key for this team's first epoch; nothing was changed there." >&2
+      echo "agmsg: pull that team from the server instead of connecting a second copy of it." >&2
+      return 1 ;;
+    *) _remote_escrow_error "$code" "$out" "the server did not accept the team key"; rm -f "$out"; return 1 ;;
+  esac
+}
+
+# _remote_escrow_install_bundle <team> <origin> <address> <remote-team-id>
+# Fetches the key bundle sealed to this machine's device key, opens it, and
+# hands it to the existing import (unlock --authenticated-bundle-stdin). Nothing
+# is installed unless every check passes.
+_remote_escrow_install_bundle() {
+  local team="$1" origin="${2%/}" address="${3%/}" remote_team_id="$4" \
+    identity_file resp code opened rc=0
+  _remote_escrow_register_device "$origin" "$team" "$address" "$remote_team_id" || return 1
+  identity_file="$(_remote_device_identity_file "$origin" "$team")"
+  resp="$(mktemp "${TMPDIR:-/tmp}/agmsg-escrow-resp.XXXXXX")"
+  code="$(_remote_http_get_json "$address/v1/keys/bundle" "$remote_team_id" "$resp")" || code="000"
+  if [ "$code" != "200" ]; then
+    if [ "$code" = "409" ] && grep -q 'no_team_key' "$resp" 2>/dev/null; then
+      echo "agmsg: the server holds no key for this team yet; nothing was installed." >&2
+    else
+      _remote_escrow_error "$code" "$resp" "the server did not send the team's key bundle"
+    fi
+    rm -f "$resp"; return 1
+  fi
+  opened="$(mktemp -u "${TMPDIR:-/tmp}/agmsg-escrow-bundle.XXXXXX")"
+  ( umask 077; bash "$SCRIPT_DIR/remote-sync.sh" escrow-open-bundle \
+      --response "$resp" --identity "$identity_file" --out "$opened" ) || rc=$?
+  rm -f "$resp"
+  if [ "$rc" -ne 0 ]; then rm -f "$opened"; return 1; fi
+  bash "$SCRIPT_DIR/remote.sh" unlock "$team" --authenticated-bundle-stdin < "$opened" || rc=$?
+  rm -f "$opened"
+  return "$rc"
+}
 
 # _remote_device_rerun_command <origin> <team-id> <local-name> [<machine-name>]
 # prints the command that pulls that team. Every argument is quoted as given:
@@ -1980,6 +2121,21 @@ cmd_pull() {
     *)    needs_key=1 ;;
   esac
 
+  # A server that keeps a wrapped copy of the team key sends it sealed to this
+  # machine's own device key. It is opened and imported through the same path as
+  # a handed bundle (unlock); every check there applies, and nothing is
+  # installed unless all of them pass. A manual end-to-end team never takes a
+  # key from the server: this runs only for a team pulled by device approval.
+  if [ "$device_pulled" -eq 1 ] && [ "$binding_cipher" = "age-v1" ] && ! _remote_holds_current_key "$team" "$cfg" \
+      && _remote_server_lists_feature "$device_origin" key-escrow; then
+    if _remote_escrow_install_bundle "$team" "${endpoint%%/t/*}" "$endpoint" "$pulled_id"; then
+      echo "The team key came from the server's escrow."
+    else
+      echo "agmsg: the team was pulled but its key could not be installed from the server; the sync engine stays halted." >&2
+      echo "agmsg: to try again: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") escrow-install $(agmsg_shq "$team")" >&2
+    fi
+  fi
+
   # Named for what it HOLDS. It is set when the key is missing, so the name
   # has to say "cannot": a reader who trusts a `can_read` that means the
   # opposite writes `[ "$can_read" -eq 1 ] && start_engine` and reopens the
@@ -2069,6 +2225,47 @@ cmd_pull() {
       echo "Open your agent and invoke its installed '$cmd_name' command, then join with a new agent name."
     fi
   fi
+}
+
+# remote.sh escrow-publish <team>: sends the team's first-epoch key to the server
+# again (what connect does after the binding is recorded). Safe to repeat.
+cmd_escrow_publish() {
+  local team="${1:-}" cfg endpoint remote_team_id
+  [ -n "$team" ] || { echo "Usage: remote.sh escrow-publish <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  cfg="$(_remote_team_config "$team")"
+  [ -f "$cfg" ] || { echo "agmsg: team '$team' is not a local team" >&2; exit 1; }
+  endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
+  remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
+  case "$endpoint" in
+    */t/*) ;;
+    *) echo "agmsg: team '$team' was not connected by device approval; there is no key to send." >&2; exit 1 ;;
+  esac
+  _remote_escrow_publish_epoch "$team" "$cfg" "${endpoint%%/t/*}" "$endpoint" "$remote_team_id" || exit 1
+  echo "The team key is on the server."
+  _remote_sync_engine_start "$team" || { echo "agmsg: the sync engine did not start; see remote.sh status $team" >&2; exit 1; }
+  echo "Sync engine start requested (remote.sh status $team confirms)."
+}
+
+# remote.sh escrow-install <team>: fetches the team's key from the server again
+# and installs it (what pull does right after a device-approved pull). Safe to
+# repeat; nothing is installed unless every check passes.
+cmd_escrow_install() {
+  local team="${1:-}" cfg endpoint remote_team_id
+  [ -n "$team" ] || { echo "Usage: remote.sh escrow-install <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  cfg="$(_remote_team_config "$team")"
+  [ -f "$cfg" ] || { echo "agmsg: team '$team' is not a local team" >&2; exit 1; }
+  endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
+  remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
+  case "$endpoint" in
+    */t/*) ;;
+    *) echo "agmsg: team '$team' was not pulled by device approval; there is no server key to fetch." >&2; exit 1 ;;
+  esac
+  if [ "$(_remote_read_config_field "$cfg" '$.remote_binding.cipher_profile')" != "age-v1" ]; then
+    echo "agmsg: team '$team' is not an encrypted team; there is no key to fetch." >&2; exit 1
+  fi
+  _remote_escrow_install_bundle "$team" "${endpoint%%/t/*}" "$endpoint" "$remote_team_id" || exit 1
 }
 
 cmd_unlock() {
@@ -3066,8 +3263,24 @@ cmd_connect() {
   local device_approved=0 device_origin="" live_endpoint live_disconnected history_pos="" use_device=0
   live_endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
   live_disconnected="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  # Key escrow: a server that keeps a wrapped copy of the team key gets a team
+  # sealed with a new key (age-v1), so another machine can join without a
+  # hand-carried key. Only for a team that has no key of its own; one that does
+  # keeps its manual key and the manual path.
+  local escrow=0
   if [ "$e2ee" -eq 0 ] && _remote_server_lists_feature "$endpoint" device-approval; then
     use_device=1
+    key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
+    if { [ -z "$key_id" ] || [ "$key_id" = "null" ]; } && _remote_server_lists_feature "$endpoint" key-escrow; then
+      escrow=1
+      if ! command -v age >/dev/null 2>&1 || ! command -v age-keygen >/dev/null 2>&1; then
+        echo "agmsg: this server keeps a wrapped copy of the team key, which needs age and age-keygen on PATH here." >&2
+        echo "agmsg: nothing was sent and nothing was changed. Install age and run the command again." >&2
+        exit 1
+      fi
+    elif [ -n "$key_id" ] && [ "$key_id" != "null" ] && _remote_server_lists_feature "$endpoint" key-escrow; then
+      echo "Note: team '$team' has its own key, so this server's key escrow is not used for it; it stays on the manual key." >&2
+    fi
   fi
   if [ -z "$with_history" ]; then
     if [ "$use_device" -eq 1 ]; then with_history="$_REMOTE_HISTORY_DEFAULT_DEVICE"
@@ -3093,6 +3306,10 @@ cmd_connect() {
       device_approved=1
     fi
   fi
+  if [ "$escrow" -eq 1 ] && [ "$device_approved" -eq 1 ]; then
+    e2ee=1
+    echo "This server keeps a wrapped copy of the team key, so another machine can join without a hand-carried key." >&2
+  fi
   key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
   # Asked HERE: before the key is minted and before the registration POST.
   # Every SHA-256 in the e2ee path -- the fingerprint printed by `key.sh
@@ -3105,7 +3322,13 @@ cmd_connect() {
     agmsg_require_sha256 || exit 1
   fi
   if [ "$e2ee" -eq 1 ] && { [ -z "$key_id" ] || [ "$key_id" = "null" ]; }; then
-    bash "$SCRIPT_DIR/key.sh" generate "$team" || exit 1
+    # With key escrow the server holds a copy and another machine joins without
+    # a hand-carried key, so the "back this up by hand" advice would be untrue.
+    if [ "$escrow" -eq 1 ]; then
+      AGMSG_OPERATOR_GUIDANCE=caller bash "$SCRIPT_DIR/key.sh" generate "$team" || exit 1
+    else
+      bash "$SCRIPT_DIR/key.sh" generate "$team" || exit 1
+    fi
     key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
   elif [ "$e2ee" -eq 0 ] && [ -n "$key_id" ] && [ "$key_id" != "null" ]; then
     echo "Note: this team has a key, but plain sync was selected. The key will not be used; pass --e2ee to seal remote messages." >&2
@@ -3256,6 +3479,15 @@ cmd_connect() {
   # cmd_pull, opposite of cmd_unlock, and the note there explains why the three
   # differ. What it must not do is end by saying the engine runs: the line below
   # made that claim unconditionally, from a function that could not fail.
+  # The team's key goes to the server before anything is sent under it.
+  if [ "$escrow" -eq 1 ] && [ "$device_approved" -eq 1 ]; then
+    if ! _remote_escrow_publish_epoch "$team" "$cfg" "${endpoint%%/t/*}" "$endpoint" "$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"; then
+      echo "agmsg: the remote binding was recorded, but the team key was not sent and no sync engine was started." >&2
+      echo "agmsg: run: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") escrow-publish $(agmsg_shq "$team")" >&2
+      exit 1
+    fi
+  fi
+
   local engine_started=1
   _remote_sync_engine_start "$team" || engine_started=0
 
@@ -3296,7 +3528,7 @@ cmd_connect() {
   # that, and this line would talk its operator out of it -- into doing by hand
   # the thing the ceremony exists to make unnecessary. So it is said only when
   # nobody else owns the next step.
-  if [ "$e2ee" -eq 1 ] && agmsg_operator_guidance_is_ours; then
+  if [ "$e2ee" -eq 1 ] && [ "$escrow" -eq 0 ] && agmsg_operator_guidance_is_ours; then
     # The bundle, not the snapshot pair (#668). Both are accepted by `unlock`
     # and that has not changed; what changed is which one this screen names.
     #
@@ -4699,6 +4931,8 @@ case "${1:-}" in
   connect) shift; agmsg_require_python3 "remote connect" || exit 1; cmd_connect "$@" ;;
   pull) shift; agmsg_require_python3 "remote pull" || exit 1; cmd_pull "$@" ;;
   unlock) shift; agmsg_require_python3 "remote unlock" || exit 1; cmd_unlock "$@" ;;
+  escrow-publish) shift; cmd_escrow_publish "$@" ;;
+  escrow-install) shift; agmsg_require_python3 "remote escrow-install" || exit 1; cmd_escrow_install "$@" ;;
   status) shift; agmsg_require_python3 "remote status" || exit 1; cmd_status "$@" ;;
   sync) shift; cmd_sync "$@" ;;
   reprocess) shift; cmd_reprocess "$@" ;;

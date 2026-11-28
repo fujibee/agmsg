@@ -10,6 +10,7 @@ server is the permission, the same as the real one (docs/design/remote-sync.md).
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import TCPServer
@@ -48,6 +49,30 @@ DEVICE_ERROR = os.environ.get("MOCK_DEVICE_ERROR", "")
 # bound to one team. Either may be left empty to send one without the other.
 # A server that keeps one live device per name: a second token for a name it has
 # already issued one for is refused, as the reference server does.
+# Key escrow, as the reference server does it: a device registers an age
+# recipient, a team's epoch keys are stored, and a bundle of every retained epoch
+# is sealed to the asking device's recipient with the real age tool.
+ESCROW = {"device_pubkey": "", "epochs": [], "registrations": 0, "epoch_posts": 0, "bundle_gets": 0}
+# MOCK_ESCROW_BUNDLE_DIGEST=wrong makes the answer's digest disagree with the bundle.
+ESCROW_BUNDLE_DIGEST = os.environ.get("MOCK_ESCROW_BUNDLE_DIGEST", "")
+# MOCK_ESCROW_TAMPER=identity swaps a private key in the bundle for another one.
+ESCROW_TAMPER = os.environ.get("MOCK_ESCROW_TAMPER", "")
+# MOCK_ESCROW_DEVICE_REPLACE=1: every approval is a different device, so a new device key is accepted.
+ESCROW_DEVICE_REPLACE = os.environ.get("MOCK_ESCROW_DEVICE_REPLACE") == "1"
+# MOCK_ESCROW_PRELOAD_KEY_ID=<id> makes the server already hold another key for epoch 1.
+if os.environ.get("MOCK_ESCROW_PRELOAD_KEY_ID"):
+    ESCROW["epochs"].append({"epoch": 1, "key_id": os.environ["MOCK_ESCROW_PRELOAD_KEY_ID"],
+                             "recipient": "age1" + "q" * 58, "identity": "", "snapshot": {}})
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def snapshot_digest(snapshot):
+    return hashlib.sha256(canonical(snapshot).encode("utf-8")).hexdigest()
+
+
 DEVICE_UNIQUE_NAMES = os.environ.get("MOCK_DEVICE_UNIQUE_NAMES") == "1"
 DEVICE_MINTED = set()
 DEVICE_TOKEN_TEAM_ID = os.environ.get("MOCK_DEVICE_TOKEN_TEAM_ID", "")
@@ -330,6 +355,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/_test/device-state":
             self._send_json(200, DEVICE_STATE)
+            return
+        if self.path == "/_test/escrow-state":
+            self._send_json(200, {k: v for k, v in ESCROW.items() if k != "epochs"} | {
+                "epoch_count": len(ESCROW["epochs"]),
+                "first_epoch": ESCROW["epochs"][0] if ESCROW["epochs"] else None})
+            return
+        if self.path == "/v1/keys/bundle":
+            ESCROW["bundle_gets"] += 1
+            if not ESCROW["device_pubkey"]:
+                self._send_json(403, {"error": {"code": "forbidden"}})
+                return
+            if not ESCROW["epochs"]:
+                self._send_json(409, {"error": {"code": "no_team_key", "message": "this team has no escrowed key"}})
+                return
+            ordered = sorted(ESCROW["epochs"], key=lambda e: e["epoch"])
+            identities = [{"key_id": e["key_id"], "identity": e["identity"]} for e in ordered]
+            if ESCROW_TAMPER == "identity" and identities:
+                identities[0]["identity"] = "AGE-SECRET-KEY-1" + "Q" * 58
+            plaintext = canonical({
+                "format_version": 1, "type": "agmsg_age_v1_handoff",
+                "snapshots": [e["snapshot"] for e in ordered], "identities": identities})
+            sealed = subprocess.run(["age", "-r", ESCROW["device_pubkey"]], input=plaintext.encode("utf-8"),
+                                    capture_output=True, check=True).stdout
+            import base64
+            digest = snapshot_digest(ordered[-1]["snapshot"])
+            if ESCROW_BUNDLE_DIGEST == "wrong":
+                digest = "0" * 64
+            self._send_json(200, {"format": "agmsg_age_v1_handoff", "epochs": [e["epoch"] for e in ordered],
+                                  "snapshot_sha256": digest, "bundle": base64.b64encode(sealed).decode()})
             return
         # Knobs a test turns while the server runs: a restart moves the port,
         # and the client has already recorded the old one.
@@ -719,6 +773,45 @@ class Handler(BaseHTTPRequestHandler):
             if DEVICE_TOKEN_TEAM_NAME:
                 answer["team_name"] = DEVICE_TOKEN_TEAM_NAME
             self._send_json(200, answer)
+            return
+        if self.path == "/v1/devices":
+            if self.headers.get("Authorization", "") != "Bearer " + DEVICE_SECRET:
+                self._send_json(401, {"error": "unauthenticated"})
+                return
+            try:
+                body = json.loads(raw)
+            except Exception:
+                self._send_json(400, {"error": "bad_request"})
+                return
+            if sorted(body) != ["device_pubkey", "label", "team_id"]:
+                self._send_json(400, {"error": "bad_request"})
+                return
+            ESCROW["registrations"] += 1
+            ESCROW["last_registration"] = body
+            if ESCROW["device_pubkey"] and ESCROW["device_pubkey"] != body["device_pubkey"] and not ESCROW_DEVICE_REPLACE:
+                self._send_json(409, {"error": "device_key_mismatch"})
+                return
+            ESCROW["device_pubkey"] = body["device_pubkey"]
+            self._send_json(201, {"device_id": "mock-device"})
+            return
+        if self.path == "/v1/keys/epochs":
+            ESCROW["epoch_posts"] += 1
+            if not ESCROW["device_pubkey"]:
+                self._send_json(403, {"error": {"code": "forbidden"}})
+                return
+            try:
+                body = json.loads(raw)
+            except Exception:
+                self._send_json(400, {"error": {"code": "bad_request"}})
+                return
+            ESCROW["last_epoch_body_keys"] = sorted(body)
+            for existing in ESCROW["epochs"]:
+                if existing["epoch"] == body.get("epoch"):
+                    self._send_json(200, {"status": "exists", "epoch": existing["epoch"],
+                                          "key_id": existing["key_id"], "recipient": existing["recipient"]})
+                    return
+            ESCROW["epochs"].append(body)
+            self._send_json(201, {"status": "registered", "epoch": body["epoch"]})
             return
         if self.path == "/v1/device/activate":
             if self.headers.get("Authorization", "") != "Bearer " + DEVICE_SECRET:
