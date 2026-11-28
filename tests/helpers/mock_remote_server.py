@@ -673,6 +673,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_json(400, {"error": "bad_request"})
                 return
+            # An older server refuses a field it does not know.
+            if "env_markers" in DEVICE_STATE["last_code_body"] and "env-markers" not in FEATURES:
+                self._send_json(400, {"error": "bad_request"})
+                return
             self._send_json(200, {
                 "device_code": "mockdevicecode",
                 "user_code": "ABCD-2345",
