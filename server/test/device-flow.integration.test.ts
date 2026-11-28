@@ -65,7 +65,7 @@ describeDatabase("device flow", () => {
     expect((await approve(code.user_code)).statusCode).toBe(200);
     const ready = await poll(code.device_code);
     expect(ready.statusCode, ready.body).toBe(200);
-    return { code, ready: ready.json() as { capability_url: string; machine_name: string; scope: string; org: string } };
+    return { code, ready: ready.json() as { capability_url: string; machine_name: string; scope: string; org: string; team_id: string; team_name: string } };
   }
 
   beforeAll(async () => {
@@ -93,6 +93,13 @@ describeDatabase("device flow", () => {
     await admin.end();
   });
 
+  it("leaves both team fields out when the server has no row for the team yet", async () => {
+    const unregistered = "018f3f7e-0000-7000-8000-0000000000e9";
+    const { ready } = await mint("first-connect", { team_id: unregistered });
+    expect("team_id" in ready).toBe(false);
+    expect("team_name" in ready).toBe(false);
+  });
+
   it("runs code, approval, token and activate, and the URL then reaches the team's data", async () => {
     const { code, ready } = await mint("laptop", { device_type: "claude-code" });
     expect(code.verification_uri).toBe(`${origin}/approve`);
@@ -100,6 +107,9 @@ describeDatabase("device flow", () => {
     expect(ready.scope).toBe("login");
     expect(ready.machine_name).toBe("laptop");
     expect(typeof ready.org).toBe("string");
+    // The approval binds one team, so the answer names it.
+    expect(ready.team_id).toBe(teamA);
+    expect(ready.team_name).toBe("team-a");
     expect(ready.capability_url.startsWith(`${origin}/t/agsy_`)).toBe(true);
     const path = ready.capability_url.slice(origin.length);
 
