@@ -11,6 +11,7 @@ import { originFeatures, teamFeatures } from "./accounts/features.js";
 import { registerDeviceRoutes } from "./accounts/routes.js";
 import { registerCapabilityScope, redactSecretPath } from "./accounts/scope.js";
 import type { Config } from "./config.js";
+import type { EscrowBackend } from "./escrow.js";
 import { limitsFor } from "./limits.js";
 import { errorBody, DatabaseUnavailableError, ProtocolError } from "./errors.js";
 import {
@@ -90,6 +91,8 @@ async function scopedTeamId(
 export type AppOptions = {
   // Test seam: where the request log goes. Production logs to stdout.
   logStream?: { write: (line: string) => void };
+  // The loaded escrow backend; null (or absent) when none is configured.
+  escrow?: EscrowBackend | null;
 };
 
 export function createApp(
@@ -143,7 +146,7 @@ export function createApp(
       void reply.status(404).send(errorBody(new ProtocolError(404, "not-found", "no such route")));
     });
     void app.register(registerDeviceRoutes, { pool, config });
-    void app.register(registerCapabilityScope, { pool, config, dataPlane });
+    void app.register(registerCapabilityScope, { pool, config, dataPlane, escrow: options.escrow ?? null });
   } else {
     void app.register(dataPlane, { pool, config });
   }
