@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
@@ -71,6 +71,8 @@ function usage() {
   remote-sync.sh verify-age-snapshot --team NAME --age-snapshot FILE
   remote-sync.sh export-age-handoff --team NAME --out FILE
   remote-sync.sh verify-age-handoff --team NAME --bundle FILE --out-dir DIRECTORY
+  remote-sync.sh escrow-epoch-body --epoch N --key-id ID --recipient AGE1 --identity FILE --snapshot FILE
+  remote-sync.sh escrow-open-bundle --response FILE --identity FILE --out FILE
   remote-sync.sh once --team NAME [--limit N]
   remote-sync.sh run --team NAME [--limit N] [--interval SECONDS]
   remote-sync.sh reprocess --team NAME [--limit N] [--scope malformed]
@@ -5064,17 +5066,86 @@ export async function setEndpoint(args) {
   await event("endpoint.aligned", { team, stored_config: true, changed: true });
 }
 
+// ---- key escrow (the server holds a wrapped copy of an epoch's key) ----------
+//
+// Neither command talks to the server: the shell carries the request through
+// curl (the address is a credential and stays out of a command line), and these
+// only build a request body and open a response, so everything that touches a
+// private key stays in this file.
+
+const AGE_SECRET_KEY_LINE = /^AGE-SECRET-KEY-[0-9A-Z]+$/u;
+
+// The body of POST <address>/v1/keys/epochs. It carries the epoch's private
+// identity, so it goes to stdout for a 0600 file and nowhere else.
+export async function escrowEpochBody(args) {
+  const epoch = Number(args.epoch);
+  if (!Number.isInteger(epoch) || epoch < 1) throw new Error("escrow-epoch-body requires --epoch >= 1");
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(args["key-id"] ?? "")) throw new Error("escrow-epoch-body requires a valid --key-id");
+  if (!/^age1[0-9a-z]{58}$/u.test(args.recipient ?? "")) throw new Error("escrow-epoch-body requires a valid --recipient");
+  if (!args.identity || !args.snapshot) throw new Error("escrow-epoch-body requires --identity and --snapshot");
+  const identityLines = (await readFile(resolve(args.identity), "utf8")).split("\n")
+    .map((line) => line.trim()).filter((line) => AGE_SECRET_KEY_LINE.test(line));
+  if (identityLines.length !== 1) throw new Error("the key file does not hold exactly one age identity");
+  const snapshotText = await readFile(resolve(args.snapshot), "utf8");
+  const snapshot = parseStrictJson(snapshotText);
+  process.stdout.write(`${canonicalJson({
+    epoch, key_id: args["key-id"], recipient: args.recipient, identity: identityLines[0], snapshot,
+  })}\n`);
+}
+
+// Opens the answer of GET <address>/v1/keys/bundle with this machine's device
+// key and writes the handoff document it holds, ready for `unlock
+// --authenticated-bundle-stdin`. The digest the server reported is only
+// compared: the one that counts is recomputed here from the snapshot the bundle
+// carries. The chain, the identity-to-key links and the rest are checked again
+// by verify-age-handoff when the bundle is imported.
+export async function escrowOpenBundle(args) {
+  if (!args.response || !args.identity || !args.out) {
+    throw new Error("escrow-open-bundle requires --response, --identity and --out");
+  }
+  const answer = parseStrictJson(await readFile(resolve(args.response), "utf8"));
+  if (!answer || answer.format !== "agmsg_age_v1_handoff" || typeof answer.bundle !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(answer.snapshot_sha256 ?? "") || !Array.isArray(answer.epochs) ||
+      answer.epochs.length < 1 || answer.epochs.some((epoch, index) => epoch !== index + 1)) {
+    throw new Error("the key bundle the server sent is not in the expected form; nothing was installed");
+  }
+  const age = process.env.AGMSG_AGE_BIN || "age";
+  const opened = spawnSync(age, ["--decrypt", "--identity", resolve(args.identity)], {
+    input: Buffer.from(answer.bundle, "base64"), maxBuffer: 8 * 1024 * 1024, windowsHide: true,
+  });
+  if (opened.error || opened.status !== 0) {
+    throw new Error("could not open the key bundle with this machine's device key; nothing was installed");
+  }
+  const text = opened.stdout.toString("utf8");
+  let bundle;
+  try { bundle = parseStrictJson(text); } catch {
+    throw new Error("the key bundle is not valid JSON once opened; nothing was installed");
+  }
+  if (text.trim() !== canonicalJson(bundle) || !bundle || bundle.type !== "agmsg_age_v1_handoff" ||
+      !Array.isArray(bundle.snapshots) || bundle.snapshots.length !== answer.epochs.length) {
+    throw new Error("the key bundle does not match what the server described; nothing was installed");
+  }
+  const digest = ageSnapshotDigest(bundle.snapshots.at(-1));
+  if (digest !== answer.snapshot_sha256) {
+    throw new Error("the key bundle's snapshot digest differs from the one the server reported; nothing was installed");
+  }
+  await writeFile(resolve(args.out), `${text.trim()}\n`, { mode: 0o600, flag: "wx" });
+}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = options(rest);
   if (!["configure", "export-age-snapshot", "verify-age-snapshot", "export-age-handoff",
         "verify-age-handoff", "once", "run", "reprocess", "resync",
-        "unblock-read", "pull-bootstrap", "resolve-team", "set-endpoint"].includes(command)) {
+        "unblock-read", "pull-bootstrap", "resolve-team", "set-endpoint",
+        "escrow-epoch-body", "escrow-open-bundle"].includes(command)) {
     throw new Error(usage());
   }
   if (command === "configure") { await configure(args); return; }
   if (command === "export-age-snapshot") { await exportAgeSnapshot(args); return; }
   if (command === "verify-age-snapshot") { await verifyAgeSnapshot(args); return; }
+  if (command === "escrow-epoch-body") { await escrowEpochBody(args); return; }
+  if (command === "escrow-open-bundle") { await escrowOpenBundle(args); return; }
   if (command === "export-age-handoff") { await exportAgeHandoff(args); return; }
   if (command === "verify-age-handoff") { await verifyAgeHandoff(args); return; }
   // Before any local team exists, so neither can go through loadConfig.
