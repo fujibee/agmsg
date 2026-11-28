@@ -480,11 +480,20 @@ EOF
   [ ! -L "$SK/run" ]
   [ "$(ls -A "$SK")" = .install-op ]
   [ -f "$SK/.install-op/lock.db" ]
-  # the state root keeps only the old-layout lock file of the run/ it had
-  [ ! -e "$ST/db" ] && [ ! -e "$ST/teams" ] && [ ! -e "$ST/.owner" ]
-  [ "$(cd "$ST" && find . -mindepth 1 | sort | grep -vE 'install-op.lock.db|^\./run$' | wc -l | tr -d ' ')" -eq 0 ]
+  # with no old-layout lock in its run/, nothing of the state root is left,
+  # not even the empty run/ or the root directory itself (#2072)
+  [ ! -e "$ST" ]
   # the entries carry the resolved spelling (/private/var for /var on macOS)
   ! grep -q '/\.agmsg/agmsg' "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "uninstall leaves the state's run/ and root in place while an old-layout lock database is still there (#2072)" {
+  inst
+  : > "$ST/run/install-op.lock.db"
+  run env HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  [ "$status" -eq 0 ]
+  [ -f "$ST/run/install-op.lock.db" ]
+  [ "$(cd "$ST" && find . -mindepth 1 | sort | tr '\n' ' ')" = "./run ./run/install-op.lock.db " ]
 }
 
 @test "uninstall reads the config by the same TOML rules: a writable_roots example in a multi-line string is kept, and an install then uninstall restores the file byte for byte" {
