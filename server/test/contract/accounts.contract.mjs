@@ -80,6 +80,8 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
   assert.equal(typeof fixture.approveGrant, "function", "fixture.approveGrant is required");
   assert.equal(typeof fixture.dispose, "function", "fixture.dispose is required");
   assert.ok(fixture.expectedLimits && typeof fixture.expectedLimits === "object" && !Array.isArray(fixture.expectedLimits), "fixture.expectedLimits is required (empty for unlimited)");
+  const expectedOriginFeatures = fixture.expectedOriginFeatures ?? [];
+  assert.ok(Array.isArray(expectedOriginFeatures) && expectedOriginFeatures.every(name => typeof name === "string"), "fixture.expectedOriginFeatures must contain feature names");
   const primary = capability(fixture.primary.capabilityUrl);
   const foreign = capability(fixture.foreign.capabilityUrl);
   const revoked = capability(fixture.revoked.capabilityUrl);
@@ -117,8 +119,8 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
   function noSecretEcho(response) {
     assert.ok(knownSecrets.every(secret => !response.raw.includes(secret)), "error response reflected a capability secret");
   }
-  async function issue(machineName) {
-    const response = await control("/v1/device/code", { method: "POST", body: { client_id: CLIENT, machine_name: machineName } });
+  async function issue(machineName, extra = {}) {
+    const response = await control("/v1/device/code", { method: "POST", body: { client_id: CLIENT, machine_name: machineName, ...extra } });
     assert.equal(response.status, 200);
     keys(response.body, CODE_KEYS, "device code");
     assert.ok(/^[A-Za-z0-9_-]{43}$/.test(response.body.device_code), "device code must be 32-byte base64url");
@@ -142,6 +144,28 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       assert.ok(Array.isArray(response.body.features), "origin health must expose features");
       assert.ok(response.body.features.every(name => typeof name === "string"), "feature names must be strings");
       assert.ok(response.body.features.includes("device-approval"), "origin must advertise device approval");
+      for (const feature of expectedOriginFeatures) assert.ok(response.body.features.includes(feature), `missing origin feature: ${feature}`);
+    });
+
+    it("validates optional environment marker IDs when advertised", async context => {
+      const health = await control("/v1/health");
+      assert.equal(health.status, 200);
+      assert.ok(Array.isArray(health.body.features), "origin health must expose features");
+      if (!health.body.features.includes("env-markers")) {
+        context.skip("origin does not advertise env-markers");
+        return;
+      }
+      const eight = Array.from({ length: 8 }, (_, index) => `marker-${index}`);
+      for (const extra of [{}, { env_markers: [] }, { env_markers: ["remote-terminal"] }, { env_markers: eight }]) {
+        await issue(`contract-markers-${randomBytes(8).toString("hex")}`, extra);
+      }
+      for (const markers of [["UPPERCASE"], ["duplicate", "duplicate"], [...eight, "marker-8"], "not-an-array"]) {
+        const response = await control("/v1/device/code", {
+          method: "POST",
+          body: { client_id: CLIENT, machine_name: "contract-invalid-markers", env_markers: markers },
+        });
+        flatError(response, 400, "bad_request");
+      }
     });
 
     it("rejects malformed device-code bodies and unknown clients with the current control-plane errors", async () => {
