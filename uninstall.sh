@@ -670,6 +670,12 @@ _uninstall_one() {
     if [ -n "$STATE_PARENT" ] && [ -f "$STATE_PARENT/.owner" ]; then
       rm -f "$STATE_PARENT/.owner"
     fi
+    # The state's run/ and the state root itself are left empty by the lines
+    # above unless an old-layout lock database is still in run/ (#2072).
+    if [ -n "$STATE_PARENT" ]; then
+      rmdir "$STATE_PARENT/run" 2>/dev/null || true
+      rmdir "$STATE_PARENT" 2>/dev/null || true
+    fi
     rmdir "$SKILL_DIR" 2>/dev/null || true
     unset _left
   fi
