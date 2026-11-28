@@ -168,4 +168,76 @@ describeDatabase("escrowed team keys over a capability URL", () => {
     expect(changed.statusCode).toBe(409);
     expect(changed.json()).toEqual({ error: "device_key_mismatch" });
   });
+
+  describe("against a removal that commits while a key request is in flight", () => {
+    const team2 = "018f3f7e-0000-7000-8000-0000000000d4";
+    const gate = () => {
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => { open = resolve; });
+      return { opened, open };
+    };
+    let racing: ReturnType<typeof createApp>;
+    let wrapGate = Promise.resolve();
+    let unwrapGate = Promise.resolve();
+    const slow = {
+      ...backend,
+      wrap: async (...args: Parameters<typeof backend.wrap>) => { await wrapGate; return backend.wrap(...args); },
+      unwrap: async (...args: Parameters<typeof backend.unwrap>) => { await unwrapGate; return backend.unwrap(...args); },
+    };
+
+    async function enrolled(name: string) {
+      const made = await insertDevice(pool, { teamId: team2, name, deviceType: "test", active: true });
+      const identity = await generateX25519Identity();
+      await pool.query(`UPDATE devices SET device_pubkey = $2 WHERE device_id = $1`,
+        [made.deviceId, await identityToRecipient(identity)]);
+      return made;
+    }
+
+    beforeAll(async () => {
+      await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'race-team')`, [team2]);
+      racing = createApp(pool, testConfig({
+        profile: "accounts", ownerSecret: "0123456789abcdef0123456789abcdef",
+        publicUrl: origin, databaseUrl: databaseUrl ?? "",
+      }), { escrow: slow });
+      await racing.ready();
+    });
+    afterAll(async () => { await racing.close(); });
+
+    it("refuses an epoch from a device removed after it was authenticated, and keeps the fence", async () => {
+      const sender = await enrolled("sender");
+      const first = await epochOf(1, null);
+      first.snapshot.team_id = team2;
+      expect((await post(sender.secret, "epochs", first, racing)).statusCode).toBe(201);
+      const second = await epochOf(2, { snapshot: first.snapshot });
+      const hold = gate();
+      wrapGate = hold.opened;
+      const inFlight = post(sender.secret, "epochs", second, racing);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect((await removeDevice(pool, sender.deviceId)).ok).toBe(true);
+      expect(await fencedKeyIds(pool, team2, [first.key_id])).toEqual([first.key_id]);
+      wrapGate = Promise.resolve();
+      hold.open();
+      const answer = await inFlight;
+      expect(answer.statusCode).toBe(401);
+      expect((await pool.query(`SELECT 1 FROM team_key_epochs WHERE team_id = $1 AND epoch = 2`, [team2])).rowCount).toBe(0);
+      expect(await fencedKeyIds(pool, team2, [first.key_id])).toEqual([first.key_id]);
+    });
+
+    it("lets a release that began before a removal finish, and refuses the next one", async () => {
+      const reader = await enrolled("reader");
+      const hold = gate();
+      unwrapGate = hold.opened;
+      const inFlight = bundle(reader.secret, racing);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      let removed = false;
+      const removal = removeDevice(pool, reader.deviceId).then((result) => { removed = true; return result; });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(removed).toBe(false);
+      unwrapGate = Promise.resolve();
+      hold.open();
+      expect((await inFlight).statusCode).toBe(200);
+      expect((await removal).ok).toBe(true);
+      expect((await bundle(reader.secret, racing)).statusCode).toBe(401);
+    });
+  });
 });

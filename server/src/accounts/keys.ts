@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import { AGE_IDENTITY, AGE_RECIPIENT, recipientOfIdentity, sealToRecipient } from "../age.js";
@@ -72,6 +72,19 @@ export function registerKeyRoutes(
     return { ...device, recipient, backend: escrow };
   }
 
+  // Locks the caller's device row and checks it is still live, inside the
+  // caller's transaction. Removal locks the device row first and the team row
+  // second; every key transaction takes them in that same order, so a removal
+  // that committed first is seen here, and one that comes later waits. The
+  // refusal is the same answer an unknown capability gets.
+  async function lockLiveDevice(client: PoolClient, deviceId: string, mode: "UPDATE" | "SHARE"): Promise<void> {
+    const { rowCount } = await client.query(
+      `SELECT 1 FROM devices
+        WHERE device_id = $1 AND activated_at IS NOT NULL AND revoked_at IS NULL FOR ${mode}`,
+      [deviceId]);
+    if (rowCount === 0) throw refuse(401, "unauthenticated", "capability URL is not valid");
+  }
+
   app.post("/v1/keys/epochs", async (request, reply) => {
     const who = await caller(request);
     const parsed = epochBody.safeParse(request.body);
@@ -90,6 +103,7 @@ export function registerKeyRoutes(
     const wrapped = Buffer.from(await who.backend.wrap(Buffer.from(body.identity, "utf8"), { teamId: who.teamId, epoch }));
 
     const result = await inTransaction(pool, async (client) => {
+      await lockLiveDevice(client, who.deviceId, "SHARE");
       // The team lock removal takes: registration is ordered against it.
       const team = await client.query(`SELECT 1 FROM teams WHERE team_id = $1 FOR UPDATE`, [who.teamId]);
       if (team.rowCount === 0) throw refuse(404, "team-not-found", "team is not provisioned");
@@ -125,33 +139,42 @@ export function registerKeyRoutes(
   app.get("/v1/keys/bundle", async (request, reply) => {
     const who = await caller(request);
     if (Object.keys((request.query ?? {}) as object).length > 0) throw badRequest();
-    const rows = await listEpochs(pool, who.teamId);
-    const latest = rows.at(-1);
-    if (!latest) throw refuse(409, "no_team_key", "this team has no escrowed key");
-    // Recorded before anything leaves: a key that cannot be audited is not
-    // released. A failure after this point is recorded as failed.
-    const audit = (outcome: "released" | "failed") => pool.query(
-      `INSERT INTO key_releases (id, team_id, epoch, principal, device_id, purpose, outcome)
-       VALUES ($1, $2, $3, $4, $4, 'enroll', $5)`,
-      [uuidv7(), who.teamId, latest.epoch.toString(), who.deviceId, outcome]);
-    let sealed: Uint8Array;
-    try {
-      const identities = [];
-      for (const row of rows) {
-        const identity = await who.backend.unwrap(row.wrappedKey, { teamId: who.teamId, epoch: row.epoch });
-        identities.push({ key_id: row.keyId, identity: Buffer.from(identity).toString("utf8") });
+    // One transaction holds the device row, so a removal cannot commit between
+    // the check that the device is live and the release: it waits, and the next
+    // request is refused. A failed release is recorded and committed, then
+    // refused, so the record outlives the refusal.
+    const outcome = await inTransaction(pool, async (client) => {
+      await lockLiveDevice(client, who.deviceId, "SHARE");
+      const rows = await listEpochs(client, who.teamId);
+      const latest = rows.at(-1);
+      if (!latest) throw refuse(409, "no_team_key", "this team has no escrowed key");
+      // Recorded before anything leaves: a key that cannot be audited is not
+      // released.
+      const audit = (result: "released" | "failed") => client.query(
+        `INSERT INTO key_releases (id, team_id, epoch, principal, device_id, purpose, outcome)
+         VALUES ($1, $2, $3, $4, $4, 'enroll', $5)`,
+        [uuidv7(), who.teamId, latest.epoch.toString(), who.deviceId, result]);
+      try {
+        const identities = [];
+        for (const row of rows) {
+          const identity = await who.backend.unwrap(row.wrappedKey, { teamId: who.teamId, epoch: row.epoch });
+          identities.push({ key_id: row.keyId, identity: Buffer.from(identity).toString("utf8") });
+        }
+        const sealed = await sealToRecipient(canonicalJson({
+          format_version: 1,
+          type: "agmsg_age_v1_handoff",
+          snapshots: rows.map((row) => row.snapshot),
+          identities,
+        }), who.recipient);
+        await audit("released");
+        return { sealed, rows, latest };
+      } catch {
+        await audit("failed");
+        return null;
       }
-      sealed = await sealToRecipient(canonicalJson({
-        format_version: 1,
-        type: "agmsg_age_v1_handoff",
-        snapshots: rows.map((row) => row.snapshot),
-        identities,
-      }), who.recipient);
-    } catch {
-      await audit("failed");
-      throw refuse(500, "internal-error", "the key could not be released");
-    }
-    await audit("released");
+    });
+    if (outcome === null) throw refuse(500, "internal-error", "the key could not be released");
+    const { sealed, rows, latest } = outcome;
     return reply.status(200).send({
       format: "agmsg_age_v1_handoff",
       epochs: rows.map((row) => Number(row.epoch)),
@@ -160,4 +183,3 @@ export function registerKeyRoutes(
     });
   });
 }
-
