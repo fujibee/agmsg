@@ -195,6 +195,62 @@ recorded_endpoint() {
   [ "$(device_state | jq -r '.last_code_body.machine_name')" = 'My laptop (työ) "2"' ]
 }
 
+# A marker that matches on this machine: the shipped list names a path no test
+# machine has, so the test installs its own list in its own copy of the scripts.
+marker_dir() {
+  mkdir -p "$BATS_TEST_TMPDIR/hosted/skills"
+  printf '# test list\nhosted dir %s\nabsent dir %s\n' \
+    "$BATS_TEST_TMPDIR/hosted/skills" "$BATS_TEST_TMPDIR/not-there" > "$SCRIPTS/drivers/env-markers.conf"
+}
+
+@test "device connect: sends the ids of the matched markers to a server that lists env-markers" {
+  marker_dir
+  start_mock MOCK_FEATURES=device-approval,env-markers
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -c '.last_code_body.env_markers')" = '["hosted"]' ]
+  # Ids only: the path that matched is nowhere in the request.
+  [ "$(device_state | jq -c '.last_code_body' | grep -c "$BATS_TEST_TMPDIR" || true)" = "0" ]
+}
+
+@test "device connect: sends no env_markers to a server that does not list env-markers" {
+  marker_dir
+  start_mock MOCK_FEATURES=device-approval
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.last_code_body | has("env_markers")')" = "false" ]
+}
+
+@test "device connect: sends no env_markers when none matches" {
+  printf 'hosted dir %s\n' "$BATS_TEST_TMPDIR/not-there" > "$SCRIPTS/drivers/env-markers.conf"
+  start_mock MOCK_FEATURES=device-approval,env-markers
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(device_state | jq -r '.last_code_body | has("env_markers")')" = "false" ]
+}
+
+@test "env markers: a list line that does not parse is skipped, a repeat is sent once" {
+  mkdir -p "$BATS_TEST_TMPDIR/d"
+  {
+    printf '# comment\n\n'
+    printf 'Bad dir %s\n' "$BATS_TEST_TMPDIR/d"
+    printf 'rel dir relative/path\n'
+    printf 'two dir %s extra\n' "$BATS_TEST_TMPDIR/d"
+    printf 'odd file %s\n' "$BATS_TEST_TMPDIR/d"
+    printf 'ok-1 dir %s\n' "$BATS_TEST_TMPDIR/d"
+    printf 'ok-1 dir %s\n' "$BATS_TEST_TMPDIR/d"
+    printf 'last dir %s' "$BATS_TEST_TMPDIR/d"
+  } > "$SCRIPTS/drivers/env-markers.conf"
+  run bash -c ". '$SCRIPTS/lib/env-markers.sh'; agmsg_env_markers"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'ok-1\nlast')" ]
+}
+
+@test "env markers: the shipped list names muse and its check is the directory /opt/muse/skills" {
+  run grep -E '^muse dir /opt/muse/skills$' "$BATS_TEST_DIRNAME/../scripts/drivers/env-markers.conf"
+  [ "$status" -eq 0 ]
+}
+
 @test "device connect: a --machine-name the server would refuse stops before it is asked" {
   start_mock MOCK_FEATURES=device-approval
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --machine-name " padded " testteam

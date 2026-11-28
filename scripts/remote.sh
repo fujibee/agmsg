@@ -75,6 +75,8 @@ source "$SCRIPT_DIR/lib/instance-id.sh"
 # `shasum` is absent in Git for Windows' Git Bash.
 # shellcheck source=lib/hash.sh
 source "$SCRIPT_DIR/lib/hash.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/env-markers.sh"
 # The durable "down or degraded" record shown by doctor and at session start.
 # shellcheck source=lib/down-notice.sh
 source "$SCRIPT_DIR/lib/down-notice.sh"
@@ -819,7 +821,8 @@ _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 # retries from there instead of asking the user to approve again.
 _remote_device_approve() {
   local origin="${1%/}" team="$2" position="${3:-}" team_id_arg="${4:-}" pending machine machine_json body out code doc err interval deadline \
-    device_code user_code uri uri_complete address expires saved_pos activated rc
+    device_code user_code uri uri_complete address expires saved_pos activated rc \
+    markers markers_json marker
   REMOTE_DEVICE_ADDRESS=""
   REMOTE_DEVICE_POSITION="$position"
   # The team name becomes part of a file name below.
@@ -868,16 +871,26 @@ _remote_device_approve() {
   machine_json="$(agmsg_sqlite_mem "SELECT json_quote('$(_agmsg_sqlesc "$machine")');")"
   body="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-body.XXXXXX")"
   out="$(mktemp "${TMPDIR:-/tmp}/agmsg-device-out.XXXXXX")"
+  # The ids of the environment markers that matched here, only to a server that
+  # lists "env-markers": an older one refuses a field it does not know.
+  markers_json=""
+  markers="$(agmsg_env_markers)"
+  if [ -n "$markers" ] && _remote_server_lists_feature "$origin" env-markers; then
+    while IFS= read -r marker; do
+      markers_json="${markers_json:+$markers_json,}\"$marker\""
+    done <<< "$markers"
+    markers_json=",\"env_markers\":[$markers_json]"
+  fi
   # The team the machine joins, when it is already known (connect knows its own
   # team id; pull knows it only when given --team-id). A grant issued for a team
   # needs no choice from the owner, which is what lets a first connect succeed
   # on a server that holds no team yet. Without one the owner chooses.
   if [ -n "$team_id_arg" ]; then
-    printf '{"client_id":"%s","scope":"login","machine_name":%s,"team_id":"%s"}' \
-      "$_REMOTE_DEVICE_CLIENT_ID" "$machine_json" "$team_id_arg" > "$body"
+    printf '{"client_id":"%s","scope":"login","machine_name":%s,"team_id":"%s"%s}' \
+      "$_REMOTE_DEVICE_CLIENT_ID" "$machine_json" "$team_id_arg" "$markers_json" > "$body"
   else
-    printf '{"client_id":"%s","scope":"login","machine_name":%s}' \
-      "$_REMOTE_DEVICE_CLIENT_ID" "$machine_json" > "$body"
+    printf '{"client_id":"%s","scope":"login","machine_name":%s%s}' \
+      "$_REMOTE_DEVICE_CLIENT_ID" "$machine_json" "$markers_json" > "$body"
   fi
   code="$(_remote_http_json_call POST "$origin/v1/device/code" "$body" "$out")" || code="000"
   if [ "$code" != "200" ]; then

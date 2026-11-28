@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Environment markers: which hosted environments this machine looks like.
+# The list is the data file drivers/env-markers.conf (one source); this lib only
+# evaluates it. It spawns nothing: every check is a shell builtin.
+
+_AGMSG_ENV_MARKERS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+
+# agmsg_env_markers -> prints the ids of the markers that match, one per line,
+# in file order, each at most once. Prints nothing when none match or the file
+# is absent. Never prints a path or a value.
+agmsg_env_markers() {
+  local conf="$_AGMSG_ENV_MARKERS_LIB_DIR/../drivers/env-markers.conf" \
+    id check arg extra seen=" "
+  [ -r "$conf" ] || return 0
+  while IFS=' ' read -r id check arg extra || [ -n "$id" ]; do
+    case "$id" in ''|'#'*) continue ;; esac
+    [ -z "$extra" ] || continue
+    case "$id" in [a-z]*) ;; *) continue ;; esac
+    case "$id" in *[!a-z0-9-]*) continue ;; esac
+    [ "${#id}" -le 32 ] || continue
+    case "$seen" in *" $id "*) continue ;; esac
+    case "$check" in
+      dir) case "$arg" in /*) [ -d "$arg" ] || continue ;; *) continue ;; esac ;;
+      *) continue ;;
+    esac
+    seen="$seen$id "
+    printf '%s\n' "$id"
+  done < "$conf"
+}
