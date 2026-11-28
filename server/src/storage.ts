@@ -15,6 +15,7 @@ import { limitReached, limitsCapability, NO_LIMITS, type Limits } from "./limits
 // The advisory lock a connect takes while a team limit is set (an arbitrary,
 // fixed key; nothing else in this server takes advisory locks).
 const TEAMS_LIMIT_LOCK = 4120300147;
+import { assertNotFenced } from "./fence.js";
 
 type TeamRow = {
   team_id: string;
@@ -142,6 +143,10 @@ export async function postMessages(
     const serverId = await serverInstanceId(client);
     const team = await teamRow(client, teamId, true);
     if (!team) throw notFound(serverId, teamId);
+    // With the team row locked, so a removal that is fencing an epoch (which
+    // takes this same lock) is either fully before this check or fully after
+    // the store.
+    await assertNotFenced(client, teamId, messages.map((m) => m.envelope.key_id));
     const binding = { serverInstanceId: serverId, teamId };
 
     const firstById = new Map<string, MessageInput>();

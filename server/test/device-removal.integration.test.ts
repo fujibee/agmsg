@@ -1,0 +1,233 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import { Pool } from "pg";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createApp } from "../src/app.js";
+import { insertDevice } from "../src/accounts/capability.js";
+import { removeDevice } from "../src/accounts/device-removal.js";
+import { fenceEpoch, liftEpochFence } from "../src/fence.js";
+import type { Config } from "../src/config.js";
+import { inTransaction, migrate } from "../src/db.js";
+import { testConfig } from "./helpers/config.js";
+
+const databaseUrl = process.env.TEST_DATABASE_URL;
+const describeDatabase = databaseUrl ? describe : describe.skip;
+
+const teamA = "018f3f7e-0000-7000-8000-0000000000a1";
+const origin = "https://agmsg.test";
+const ownerSecret = "0123456789abcdef0123456789abcdef";
+const wire = { "agmsg-protocol-version": "1" };
+
+describeDatabase("owner removal of a device", () => {
+  const schema = `agmsg_test_${randomBytes(8).toString("hex")}`;
+  let admin: Pool;
+  let pool: Pool;
+  let app: ReturnType<typeof createApp>;
+  let cookie = "";
+  let counter = 0;
+
+  const config: Config = testConfig({
+    profile: "accounts", ownerSecret, publicUrl: origin,
+    databaseUrl: databaseUrl ?? "",
+  });
+  const address = () => `10.5.0.${(counter += 1) % 250 + 1}`;
+  const del = (id: string, headers: Record<string, string>, payload?: object) =>
+    app.inject({
+      method: "DELETE", url: `/v1/devices/${id}`, headers, remoteAddress: address(),
+      ...(payload === undefined ? {} : { payload }),
+    });
+    const ownerHeaders = () => ({ origin, cookie });
+
+  const device = (name: string) =>
+    insertDevice(pool, { teamId: teamA, name, deviceType: "codex", active: true });
+
+  function message(keyId: string | null) {
+    return {
+      messages: [{
+        id: randomUUID(),
+        envelope: {
+          v: 1, cipher: keyId === null ? "none" : "age-v1", key_id: keyId,
+          blob: Buffer.from("x").toString("base64"),
+        },
+      }],
+    };
+  }
+  const post = (secret: string, payload: object) =>
+    app.inject({
+      method: "POST", url: `/t/${secret}/v1/messages`,
+      headers: { ...wire, "content-type": "application/json" }, payload,
+    });
+
+  beforeAll(async () => {
+    admin = new Pool({ connectionString: databaseUrl });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    pool = new Pool({ connectionString: databaseUrl, options: `-c search_path=${schema}` });
+    await migrate(pool);
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'team-a')`, [teamA]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none', 'age-v1']::TEXT[])`,
+      [teamA],
+    );
+    app = createApp(pool, config);
+    await app.ready();
+    const signedIn = await app.inject({
+      method: "POST", url: "/approve/signin",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: `secret=${ownerSecret}`, remoteAddress: address(),
+    });
+    cookie = String(signedIn.headers["set-cookie"]).split(";")[0] ?? "";
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await pool.end();
+    if (!/^agmsg_test_[0-9a-f]{16}$/.test(schema)) throw new Error("refusing to remove an unexpected test schema");
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    await admin.end();
+  });
+
+  it("revokes at once: the secret then answers exactly like an unknown one", async () => {
+    const gone = await device("to-remove");
+    const kept = await device("kept");
+    const before = await app.inject({ method: "GET", url: `/t/${gone.secret}/v1/capabilities`, headers: wire });
+    expect(before.statusCode).toBe(200);
+    expect((await del(gone.deviceId, ownerHeaders())).statusCode).toBe(204);
+    const after = await app.inject({ method: "GET", url: `/t/${gone.secret}/v1/capabilities`, headers: wire });
+    const unknown = await app.inject({ method: "GET", url: `/t/agsy_00000000_${"A".repeat(43)}/v1/capabilities`, headers: wire });
+    expect(after.statusCode).toBe(401);
+    expect(after.body).toBe(unknown.body);
+    expect((await app.inject({ method: "GET", url: `/t/${kept.secret}/v1/capabilities`, headers: wire })).statusCode).toBe(200);
+  });
+
+  it("answers 404 the same for unknown, already removed and malformed ids", async () => {
+    const once = await device("twice");
+    expect((await del(once.deviceId, ownerHeaders())).statusCode).toBe(204);
+    const again = await del(once.deviceId, ownerHeaders());
+    const unknown = await del(randomUUID(), ownerHeaders());
+    const malformed = await del("not-an-id", ownerHeaders());
+    for (const answer of [again, unknown, malformed]) {
+      expect(answer.statusCode).toBe(404);
+      expect(answer.json()).toEqual({ error: "not_found" });
+    }
+  });
+
+  it("is the owner's alone: no session, a forged cookie, another origin and no origin all refuse", async () => {
+    const target = await device("guarded");
+    expect((await del(target.deviceId, { origin })).statusCode).toBe(401);
+    expect((await del(target.deviceId, { origin, cookie: "agmsg_owner=forged" })).statusCode).toBe(401);
+    expect((await del(target.deviceId, { origin: "https://evil.test", cookie })).statusCode).toBe(403);
+    expect((await del(target.deviceId, { cookie })).statusCode).toBe(403);
+    // a device's own secret is not an owner session
+    expect((await del(target.deviceId, { origin, authorization: `Bearer ${target.secret}` })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: `/t/${target.secret}/v1/capabilities`, headers: wire })).statusCode).toBe(200);
+  });
+
+  it("accepts no body beyond an empty object: there is no abandon list", async () => {
+    const target = await device("no-abandon");
+    const refused = await del(target.deviceId, { ...ownerHeaders(), "content-type": "application/json" }, { abandon: [] });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toEqual({ error: "bad_request" });
+    expect((await del(target.deviceId, { ...ownerHeaders(), "content-type": "application/json" }, {})).statusCode).toBe(204);
+  });
+
+  it("fences the team's highest stored epoch when the owner removes a device over HTTP", async () => {
+    // Production wiring: no key-id accessor is injected, so removal reads the
+    // escrow store. Its own team keeps the fence away from the other cases.
+    const teamC = "018f3f7e-0000-7000-8000-0000000000c3";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'team-c')`, [teamC]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none', 'age-v1']::TEXT[])`,
+      [teamC],
+    );
+    for (const [epoch, keyId] of [[1, "key-old"], [2, "key-mid"], [3, "key-top"]] as const) {
+      await pool.query(
+        `INSERT INTO team_key_epochs (team_id, epoch, wrap_kind, key_ref, wrapped_key, recipient, key_id, snapshot)
+         VALUES ($1, $2, 'keyfile', 'ref', '\\x01', 'age1recipient', $3, $4::jsonb)`,
+        [teamC, epoch, keyId, JSON.stringify({ epoch_revision: String(epoch - 1) })],
+      );
+    }
+    const gone = await insertDevice(pool, { teamId: teamC, name: "gone", deviceType: "codex", active: true });
+    const kept = await insertDevice(pool, { teamId: teamC, name: "kept", deviceType: "codex", active: true });
+    expect((await post(kept.secret, message("key-top"))).statusCode).toBe(200);
+
+    expect((await del(gone.deviceId, ownerHeaders())).statusCode).toBe(204);
+
+    const fenced = await post(kept.secret, message("key-top"));
+    expect(fenced.statusCode).toBe(409);
+    expect(fenced.json().error.code).toBe("epoch-fenced");
+    // only the highest epoch is fenced; an older key still writes
+    expect((await post(kept.secret, message("key-mid"))).statusCode).toBe(200);
+  });
+
+  describe("the epoch fence", () => {
+    it("pauses writes sealed under the removed device's epoch, with a stated error, until rotation lifts it", async () => {
+      const gone = await device("fenced-gone");
+      const staying = await device("fenced-staying");
+      const removed = await removeDevice(pool, gone.deviceId, async () => "epoch-1");
+      expect(removed).toEqual({ ok: true, teamId: teamA });
+
+      const fenced = await post(staying.secret, message("epoch-1"));
+      expect(fenced.statusCode).toBe(409);
+      expect(fenced.json().error.code).toBe("epoch-fenced");
+      expect(fenced.json().error.details).toEqual({ team_id: teamA, key_id: "epoch-1" });
+      expect(fenced.json().error.message).toMatch(/paused/u);
+
+      // not fenced: plaintext, and a different (next) epoch
+      const plain = await post(staying.secret, message(null));
+      expect(plain.json().error?.code).not.toBe("epoch-fenced");
+      const next = await post(staying.secret, message("epoch-2"));
+      expect(next.json().error?.code).not.toBe("epoch-fenced");
+
+      await inTransaction(pool, (client) => liftEpochFence(client, teamA, "epoch-1"));
+      const lifted = await post(staying.secret, message("epoch-1"));
+      expect(lifted.json().error?.code).not.toBe("epoch-fenced");
+    });
+
+    it("orders a write against a fence that is committing: a write that waits on the team lock is refused", async () => {
+      const staying = await device("race-staying");
+      // A removal part way through: it holds the team lock and has recorded its
+      // fence but not committed. A write arriving now must wait for the lock and
+      // then see the fence; a check made before the lock would let it through.
+      const remover = await pool.connect();
+      try {
+        await remover.query("BEGIN");
+        await remover.query(`SELECT 1 FROM teams WHERE team_id = $1 FOR UPDATE`, [teamA]);
+        await fenceEpoch(remover, teamA, "epoch-race");
+        const write = post(staying.secret, message("epoch-race"));
+        await new Promise((resolve) => setTimeout(resolve, 300)); // the write is now waiting on the lock
+        await remover.query("COMMIT");
+        const refused = await write;
+        expect(refused.statusCode).toBe(409);
+        expect(refused.json().error.code).toBe("epoch-fenced");
+      } finally {
+        remover.release();
+      }
+    });
+
+    it("fences nothing for a team with no epoch key, and the removal still succeeds", async () => {
+      const target = await device("no-epoch");
+      expect((await del(target.deviceId, ownerHeaders())).statusCode).toBe(204);
+      const rows = await pool.query(`SELECT 1 FROM team_epoch_fences WHERE key_id = 'none'`);
+      expect(rows.rowCount).toBe(0);
+    });
+
+    it("holds in the open profile too, where it is part of the data plane", async () => {
+      const open = createApp(pool, { ...config, profile: "open", ownerSecret: null, publicUrl: null });
+      await open.ready();
+      await inTransaction(pool, (client) => fenceEpoch(client, teamA, "epoch-open"));
+      const headers = { ...wire, "agmsg-team-id": teamA, "content-type": "application/json" };
+      const fenced = await open.inject({ method: "POST", url: "/v1/messages", headers, payload: message("epoch-open") });
+      expect(fenced.statusCode).toBe(409);
+      expect(fenced.json().error.code).toBe("epoch-fenced");
+      expect(fenced.json().error.details).toEqual({ team_id: teamA, key_id: "epoch-open" });
+      const plain = await open.inject({ method: "POST", url: "/v1/messages", headers, payload: message(null) });
+      expect(plain.json().error?.code).not.toBe("epoch-fenced");
+      const table = open.printRoutes({ commonPrefix: false });
+      expect(table).not.toMatch(/devices/u);
+      await open.close();
+    });
+  });
+});
