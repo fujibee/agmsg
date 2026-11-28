@@ -3,7 +3,12 @@
 # The list is the data file drivers/env-markers.conf (one source); this lib only
 # evaluates it. It spawns nothing: every check is a shell builtin.
 
-_AGMSG_ENV_MARKERS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+# The directory of this file, by parameter expansion alone: sourced on every
+# remote.sh call, so it must not spawn. (remote.sh is run by path, so the path
+# is absolute or resolvable from the cwd.)
+_agmsg_env_markers_src="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_env_markers_src" in */*) _AGMSG_ENV_MARKERS_LIB_DIR="${_agmsg_env_markers_src%/*}" ;; *) _AGMSG_ENV_MARKERS_LIB_DIR=. ;; esac
+unset _agmsg_env_markers_src
 
 # agmsg_env_markers -> prints the ids of the markers that match, one per line,
 # in file order, each at most once. Prints nothing when none match or the file
