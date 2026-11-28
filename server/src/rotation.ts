@@ -5,7 +5,7 @@ import { snapshotDigest } from "./canonical.js";
 import { inTransaction } from "./db.js";
 import { listEpochs } from "./escrow-store.js";
 import type { EscrowBackend } from "./escrow.js";
-import { fencedKeyIds, liftEpochFence } from "./fence.js";
+import { fencedKeyIds, liftFencesBefore } from "./fence.js";
 
 // Step 2 of removing a device: publish the team's next key epoch and lift the
 // fence step 1 put on the current one. The state is the fence itself. A team
@@ -85,7 +85,7 @@ export async function rotateTeam(
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
       [teamId, epoch.toString(), backend.kind, backend.keyRef, wrapped, recipient, keyId, JSON.stringify(snapshot)],
     );
-    await liftEpochFence(client, teamId, current.keyId);
+    await liftFencesBefore(client, teamId, epoch);
     return "rotated" as const;
   });
 }
