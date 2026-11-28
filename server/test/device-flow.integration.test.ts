@@ -246,6 +246,32 @@ describeDatabase("device flow", () => {
     expect((await post("/v1/device/token", { device_code: "a", client_id: "b", extra: 1 }, address())).statusCode).toBe(400);
   });
 
+  it("accepts env_markers, stores them on the grant and the device, and works without them", async () => {
+    const { ready } = await mint("marked", { env_markers: ["muse", "cc-cloud"] });
+    const device = await pool.query<{ env_markers: string[] }>(
+      "SELECT env_markers FROM devices WHERE name = 'marked' AND team_id = $1", [teamA]);
+    expect(device.rows[0]?.env_markers).toEqual(["muse", "cc-cloud"]);
+    expect(ready.machine_name).toBe("marked");
+    await mint("unmarked");
+    const plain = await pool.query<{ env_markers: string[] }>(
+      "SELECT env_markers FROM devices WHERE name = 'unmarked' AND team_id = $1", [teamA]);
+    expect(plain.rows[0]?.env_markers).toEqual([]);
+    expect((await requestCode({ machine_name: "empty-list", env_markers: [] })).statusCode).toBe(200);
+  });
+
+  it("rejects env_markers that are not a short list of unique ids", async () => {
+    const bad: unknown[] = [
+      "muse", [1], ["Muse"], ["1muse"], ["muse value"], ["a".repeat(33)], [""],
+      ["muse", "muse"], Array.from({ length: 9 }, (_, i) => `m${i}`), null, { muse: true },
+    ];
+    for (const value of bad) {
+      const response = await requestCode({ machine_name: "bad-markers", env_markers: value });
+      expect(response.statusCode, JSON.stringify(value)).toBe(400);
+    }
+    const eight = Array.from({ length: 8 }, (_, i) => `m${i}`);
+    expect((await requestCode({ machine_name: "eight", env_markers: eight })).statusCode).toBe(200);
+  });
+
   it("activate refuses unknown and revoked secrets, and /v1/devices needs a live one", async () => {
     const unknown = "agsy_00000000_" + "A".repeat(43);
     const none = await app.inject({ method: "POST", url: "/v1/device/activate", headers: { authorization: `Bearer ${unknown}` } });

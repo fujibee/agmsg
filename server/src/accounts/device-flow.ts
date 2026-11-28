@@ -29,7 +29,10 @@ export type Issued = {
 
 export async function issueGrant(
   pool: Pool,
-  input: { clientId: string; machineName: string; deviceType: string; teamId: string | null },
+  input: {
+    clientId: string; machineName: string; deviceType: string; teamId: string | null;
+    envMarkers: string[];
+  },
 ): Promise<Issued> {
   return inTransaction(pool, async (client) => {
     // Old finished grants carry nothing; drop them here rather than run a worker.
@@ -47,11 +50,12 @@ export async function issueGrant(
     await client.query(
       `INSERT INTO device_grants
          (grant_id, device_code_hash, user_code_digest, client_id, machine_name,
-          device_type, team_id, expires_at)
+          device_type, team_id, expires_at, env_markers)
        VALUES ($1, $2, $3, $4, $5, $6, $7,
-               clock_timestamp() + make_interval(secs => $8))`,
+               clock_timestamp() + make_interval(secs => $8), $9)`,
       [uuidv7(), material.deviceCodeHash, material.userCodeDigest, input.clientId,
-        input.machineName, input.deviceType, input.teamId, GRANT_TTL_SECONDS],
+        input.machineName, input.deviceType, input.teamId, GRANT_TTL_SECONDS,
+        input.envMarkers],
     );
     return { material, expiresIn: GRANT_TTL_SECONDS, interval: POLL_INTERVAL_SECONDS };
   });
@@ -160,9 +164,9 @@ export async function pollToken(
   return inTransaction(pool, async (client) => {
     const { rows } = await client.query<{
       grant_id: string; state: string; machine_name: string; device_type: string; team_id: string | null;
-      expired: boolean; too_soon: boolean;
+      env_markers: string[]; expired: boolean; too_soon: boolean;
     }>(
-      `SELECT grant_id, state, machine_name, device_type, team_id,
+      `SELECT grant_id, state, machine_name, device_type, team_id, env_markers,
               expires_at <= clock_timestamp() AS expired,
               coalesce(last_poll_at > clock_timestamp() - make_interval(secs => $3), false) AS too_soon
          FROM device_grants
@@ -185,7 +189,7 @@ export async function pollToken(
     if (grant.team_id === null) return { status: "expired_token" as const };
     const minted = await mintDevice(client, {
       grantId: grant.grant_id, teamId: grant.team_id, machineName: grant.machine_name,
-      deviceType: grant.device_type,
+      deviceType: grant.device_type, envMarkers: grant.env_markers,
     }, deviceLimit);
     if (minted === "limit") {
       return { status: "limit_reached" as const, value: deviceLimit ?? 0n };
@@ -211,7 +215,9 @@ export async function pollToken(
 // under another name instead of retrying this grant.
 async function mintDevice(
   client: PoolClient,
-  grant: { grantId: string; teamId: string; machineName: string; deviceType: string },
+  grant: {
+    grantId: string; teamId: string; machineName: string; deviceType: string; envMarkers: string[];
+  },
   deviceLimit: bigint | null,
 ): Promise<{ secret: string } | "limit" | null> {
   // A provisional device that never activated is dead past its deadline and
@@ -251,11 +257,11 @@ async function mintDevice(
   try {
     await client.query(
       `INSERT INTO devices (device_id, team_id, name, device_type, secret_prefix,
-                            secret_hash, activate_deadline)
+                            secret_hash, activate_deadline, env_markers)
        VALUES ($1, $2, $3, $4, $5, $6,
-               clock_timestamp() + make_interval(mins => $7))`,
+               clock_timestamp() + make_interval(mins => $7), $8)`,
       [deviceId, grant.teamId, grant.machineName, grant.deviceType, minted.prefix,
-        minted.hash, ACTIVATE_WINDOW_MINUTES],
+        minted.hash, ACTIVATE_WINDOW_MINUTES, grant.envMarkers],
     );
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {

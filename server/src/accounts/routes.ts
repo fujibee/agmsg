@@ -40,6 +40,10 @@ const codeBody = z.object({
   // The team the machine wants to join. Fixed here and not changeable at
   // approval; omitted when the owner should choose.
   team_id: uuid.optional(),
+  // Ids of the environment markers that matched on the machine: ids only, never
+  // values. At most 8, unique; the server stores them and does not interpret them.
+  env_markers: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,31}$/u)).max(8)
+    .refine((ids) => new Set(ids).size === ids.length).optional(),
 }).strict();
 
 const tokenBody = z.object({
@@ -113,6 +117,7 @@ export async function registerDeviceRoutes(
         machineName: body.data.machine_name,
         deviceType: body.data.device_type ?? "unknown",
         teamId: body.data.team_id ?? null,
+        envMarkers: body.data.env_markers ?? [],
       });
     } catch (error) {
       if (error instanceof AdmissionError) {
