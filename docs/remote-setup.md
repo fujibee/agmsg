@@ -228,6 +228,15 @@ the command is unchanged:
    A server that does not name a team gets the usual look-up by name, and
    `--team-id` given on the command line always wins.
 
+### When the server keeps a copy of the team key
+
+A server that lists `key-escrow` in its `features` keeps a wrapped copy of a team's key, so a second machine can join without a hand-carried key. The operator of such a server can read the team's messages: say so to whoever uses it.
+
+- `connect` of a team that has no key of its own makes the team end-to-end encrypted (`age-v1`): it makes the first key, registers this machine's own device key with the server, and sends the first epoch's key and snapshot. It says so on one line. The team's existing messages are still not sent unless `--with-history` is given. `age` and `age-keygen` must be on `PATH`; without them the command stops before anything is sent. A team that already has its own key stays on that key, and `--e2ee` is always the manual path.
+- `pull` of an encrypted team asks the server for the key bundle, which comes sealed to this machine's device key. The machine opens it and imports it through the same check as `unlock --authenticated-bundle-stdin`: the snapshot chain, each identity against its key id, and the digest recomputed from the snapshots (the server's own digest is only compared). Nothing is installed unless every check passes. If it fails, `remote.sh escrow-install <team>` tries again.
+- If the key could not be sent after `connect`, `remote.sh escrow-publish <team>` sends it and starts syncing. Both commands are safe to repeat.
+
+
 If anything fails after you approved and before the binding is recorded, the
 local team is untouched and still works, the approved address is kept, and
 running the same command again does not ask you to approve again. A denied or
