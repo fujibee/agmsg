@@ -4756,10 +4756,23 @@ export async function writeRosterSnapshot(args, dependencies = {}) {
 // from scratch after retention has cut its early history would reconstruct
 // the WRONG roster with no indication anything went wrong, which is worse
 // than stopping and saying so.
-function pullRerunCommand(args) {
-  const parts = ["remote.sh pull", `--endpoint ${args.endpoint}`];
-  if (args["team-id"]) parts.push(`--team-id ${args["team-id"]}`);
-  parts.push(args.team);
+//
+// `serverUrl`, not `args.endpoint`: cmd_pull never puts the endpoint on
+// argv at all -- it passes it as AGMSG_REMOTE_ENDPOINT, which `args.endpoint`
+// is never set from. `serverUrl` is this function's caller's already-
+// resolved value (args.endpoint ?? the env var), so this prints what was
+// actually used instead of "--endpoint undefined".
+//
+// Absolute path + shellQuote, the same convention remote.sh's own printed
+// recovery commands use (e.g. the stale-engine line in `status`): a bare
+// "remote.sh" is not on PATH, and an unquoted team name or endpoint breaks
+// on a space or a quote the same way the connect-side fix for this (#2081)
+// had to stop assuming too.
+function pullRerunCommand(args, serverUrl) {
+  const remoteSh = resolve(dirname(fileURLToPath(import.meta.url)), "..", "remote.sh");
+  const parts = ["bash", shellQuote(remoteSh), "pull", "--endpoint", shellQuote(serverUrl)];
+  if (args["team-id"]) parts.push("--team-id", shellQuote(args["team-id"]));
+  parts.push(shellQuote(args.team));
   return parts.join(" ");
 }
 
@@ -4890,7 +4903,7 @@ export async function pullBootstrap(args, dependencies = {}) {
     } catch (error) {
       throw new Error(
         `the server lists roster-snapshot but the snapshot could not be read (${error.message}); ` +
-        `nothing was seeded. Rerun: ${pullRerunCommand(args)}`);
+        `nothing was seeded. Rerun: ${pullRerunCommand(args, serverUrl)}`);
     }
     if (snapshot.sequence !== null) {
       try {
@@ -4898,7 +4911,7 @@ export async function pullBootstrap(args, dependencies = {}) {
       } catch (error) {
         throw new Error(
           `the server's roster snapshot could not be opened or verified (${error.message}); ` +
-          `nothing was seeded. Rerun: ${pullRerunCommand(args)}`);
+          `nothing was seeded. Rerun: ${pullRerunCommand(args, serverUrl)}`);
       }
       await eventCall("pull.bootstrap.roster_snapshot_seeded", {
         sequence: snapshot.sequence, epoch: snapshot.epoch,

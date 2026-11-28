@@ -4803,7 +4803,7 @@ test("pull bootstrap rejects rather than silently falling back when a listed ros
       rosterDriverCall: async () => { throw new Error("must not seed on a failed read"); },
       eventCall: async () => {},
     },
-  ), /snapshot could not be read.*Rerun: remote\.sh pull/su);
+  ), /snapshot could not be read.*Rerun: bash .*remote\.sh. pull --endpoint/su);
 });
 
 test("pull bootstrap rejects rather than silently falling back when a listed roster snapshot does not open", async () => {
@@ -4822,7 +4822,7 @@ test("pull bootstrap rejects rather than silently falling back when a listed ros
       rosterDriverCall: async () => { throw new Error("must not seed on a failed open"); },
       eventCall: async () => {},
     },
-  ), /snapshot could not be opened or verified.*Rerun: remote\.sh pull/su);
+  ), /snapshot could not be opened or verified.*Rerun: bash .*remote\.sh. pull --endpoint/su);
 });
 
 test("pull bootstrap skips the roster snapshot read entirely when the feature is not listed", async () => {

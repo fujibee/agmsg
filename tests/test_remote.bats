@@ -2544,7 +2544,16 @@ PY_BIND
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" unreadable
   [ "$status" -ne 0 ]
   grep -qF "snapshot could not be read" <<<"$output"
-  grep -qF "remote.sh pull" <<<"$output"
+  grep -qF "remote.sh' pull --endpoint" <<<"$output"
+
+  # Not just a string that mentions a command -- the exact line printed, run
+  # as-is, must resolve (an absolute, shell-quoted path to remote.sh) rather
+  # than fail with "command not found" before ever reaching the network.
+  local retry_cmd
+  retry_cmd="$(grep -o 'Rerun: .*$' <<<"$output" | sed -e 's/^Rerun: //')"
+  [ -n "$retry_cmd" ]
+  run bash -c "$retry_cmd"
+  [ "$status" -ne 127 ]
 }
 
 @test "remote pull: a stream that carried the roster keeps the ordinary advice (#743)" {
