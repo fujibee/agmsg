@@ -269,7 +269,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       }
     });
 
-    it("registers the claimant idempotently with 201 and preserves key/team refusal shapes", { skip: "lands with key routes" }, async () => {
+    it("registers the claimant idempotently with 201 and preserves key/team refusal shapes", async () => {
       const body = { team_id: fixture.primary.teamId, device_pubkey: fixture.primary.devicePubkey, label: fixture.primary.label };
       for (let n = 0; n < 2; n++) {
         const response = await control("/v1/devices", { method: "POST", headers: bearer(primary.secret), body });
@@ -291,7 +291,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       noSecretEcho(a); noSecretEcho(b); noStore(a); noStore(b);
     });
 
-    it("denies unknown and revoked control credentials on device registration", { skip: "lands with key routes" }, async () => {
+    it("denies unknown and revoked control credentials on device registration", async () => {
       const a = await control("/v1/devices", { method: "POST", body: {}, headers: bearer(unknown) });
       const b = await control("/v1/devices", { method: "POST", body: {}, headers: bearer(revoked.secret) });
       flatError(a, 401, "unauthenticated"); flatError(b, 401, "unauthenticated");

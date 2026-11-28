@@ -1,4 +1,5 @@
 // Reference-server state adapter. All protocol assertions stay in the shared file.
+import { generateX25519Identity, identityToRecipient } from "age-encryption";
 import { Pool } from "pg";
 import { insertDevice } from "../../src/accounts/capability.ts";
 import { userCodeDigestOf } from "../../src/accounts/codes.ts";
@@ -27,7 +28,10 @@ export async function createFixture({ baseUrl }) {
     }
     async function device(teamId, label) {
       const result = await insertDevice(pool, { teamId, name: label, deviceType: "test", active: true });
-      return { capabilityUrl: `${origin.origin}/t/${result.secret}`, teamId, deviceId: result.deviceId, devicePubkey: null, label };
+      // Each claimant arrives with its recipient already registered.
+      const devicePubkey = await identityToRecipient(await generateX25519Identity());
+      await pool.query("UPDATE devices SET device_pubkey = $2 WHERE device_id = $1", [result.deviceId, devicePubkey]);
+      return { capabilityUrl: `${origin.origin}/t/${result.secret}`, teamId, deviceId: result.deviceId, devicePubkey, label };
     }
     const primary = await device(teams[0], "contract-primary");
     primary.teamName = "contract-0";
