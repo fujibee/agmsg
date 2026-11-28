@@ -2490,6 +2490,63 @@ PY_BIND
   [ "$(storage_history mixed | jq -s 'length')" -eq 73 ]
 }
 
+@test "remote pull: seeds the roster from a snapshot and still applies later roster events" {
+  MOCK_PULL_MIXED=1
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  restart_mock_server
+
+  # A snapshot at sequence "5" covering the first 5 of the fixture's 7
+  # member_joined events (member-1..member-5); server_seq 6 and 7 are
+  # deliberately left out, so a correct pull must get them from replay, not
+  # from the snapshot.
+  local blob
+  blob="$(node -e '
+    const { pathToFileURL } = await import("node:url");
+    const { sealRosterSnapshot } = await import(pathToFileURL(process.argv[1]).href);
+    const members = Array.from({ length: 5 }, (_, i) => ({
+      member_id: `018f3f7e-4444-7000-8000-${String(i + 1).padStart(12, "0")}`,
+      name: `member-${i + 1}`,
+    }));
+    const blob = sealRosterSnapshot({
+      teamId: process.argv[2], epoch: "0", sequence: "5", cipher: "none",
+      maxBlobBytes: 1048576, protocolVersion: 1,
+      projection: { kind: "roster_snapshot", epoch: "0", sequence: "5", members },
+    });
+    process.stdout.write(blob);
+  ' --input-type=module "$SCRIPTS/internal/sync-cipher.mjs" "$PULL_TEAM_ID")"
+  run curl -sS -X POST "$ENDPOINT/v1/roster-snapshot" \
+    -H "Agmsg-Team-ID: $PULL_TEAM_ID" -H "Agmsg-Protocol-Version: 1" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg blob "$blob" '{sequence: "5", epoch: 0, blob: $blob}')"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" seeded
+  [ "$status" -eq 0 ]
+  grep -qF "80 message(s)" <<<"$output"
+
+  local cfg
+  cfg="$TEST_SKILL_DIR/teams/seeded/config.json"
+  [ "$(sqlite_mem "SELECT COUNT(*) FROM json_each(
+      json_extract(readfile('$(rf "$cfg")'), '\$.agents'));")" -eq 7 ]
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  [ "$(storage_history seeded | jq -s 'length')" -eq 73 ]
+}
+
+@test "remote pull: a roster snapshot that cannot be read fails the pull, not silently (#2081-follow-up)" {
+  MOCK_PULL_MIXED=1
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  restart_mock_server
+  run curl -sS "$ENDPOINT/_test/fail-next?route=roster-snapshot"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" unreadable
+  [ "$status" -ne 0 ]
+  grep -qF "snapshot could not be read" <<<"$output"
+  grep -qF "remote.sh pull" <<<"$output"
+}
+
 @test "remote pull: a stream that carried the roster keeps the ordinary advice (#743)" {
   # The positive control for the warning asserted in "clones a team". Without a
   # pull that DOES materialise a roster, a warning printed on every pull and one

@@ -414,6 +414,9 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if self.path == "/v1/roster-snapshot":
+            if "roster-snapshot" in FAIL_NEXT:
+                self._send_json(503, {"error": {"code": "server-error"}})
+                return
             team_id = self.headers.get("Agmsg-Team-ID", "")
             stored = ROSTER_SNAPSHOTS.get(team_id) or \
                 {"sequence": None, "epoch": None, "blob": None}
@@ -664,6 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                 }],
                 "members_revision": 0,
                 "members": PULL_MEMBERS,
+                **({"features": TEAM_FEATURES} if TEAM_FEATURES else {}),
             })
             return
         if route == "/v1/teams/%s/messages" % PULL_TEAM_ID:
