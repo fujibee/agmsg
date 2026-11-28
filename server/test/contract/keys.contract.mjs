@@ -100,6 +100,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
     assertKeyMetadata(response.body, teamId);
   }
   function error(response, status, codes, teamId) {
+    noSecretEcho(response);
     assert.equal(response.status, status, "key refusal status");
     object(response.body, ["error"], "key refusal", METADATA);
     object(response.body.error, ["code"], "key error", ["message", "details"]);
@@ -109,13 +110,13 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
       const details = response.body.error.details;
       assert.ok(details && typeof details === "object" && !Array.isArray(details), "key error details must be an object");
     }
-    metadata(response, teamId); noStore(response); noSecretEcho(response);
+    metadata(response, teamId); noStore(response);
   }
   function flatError(response, status, code) {
+    noSecretEcho(response);
     assert.equal(response.status, status);
     object(response.body, ["error"], "device refusal");
     assert.ok(response.body.error === code, "device error code differs");
-    noSecretEcho(response);
   }
   function validateChain(snapshots) {
     const latest = snapshots.at(-1);
@@ -145,22 +146,24 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
     return { ...value, epoch };
   }
   function epochResponse(response, status, epoch, winner) {
+    noSecretEcho(response);
     assert.equal(response.status, status);
     object(response.body, status === 201 ? ["status", "epoch"] : ["status", "epoch", "key_id", "recipient"], "epoch result", METADATA);
     assert.ok(response.body.status === (status === 201 ? "registered" : "exists"), "epoch result status differs");
     assertKeyEpoch(response.body, epoch);
     if (status === 200) assert.ok(response.body.key_id === winner.key_id && response.body.recipient === winner.recipient, "existing epoch must return the winner's public half");
-    metadata(response, fixture.primary.teamId); noStore(response); noSecretEcho(response);
+    metadata(response, fixture.primary.teamId); noStore(response);
   }
   async function bundle(expected) {
     const response = await data(primary, "/keys/bundle", fixture.primary.teamId);
+    noSecretEcho(response);
     assert.equal(response.status, 200);
     object(response.body, ["format", "epochs", "snapshot_sha256", "bundle"], "sealed bundle", METADATA);
     assert.ok(response.body.format === "agmsg_age_v1_handoff", "bundle format differs");
     assert.ok(canonicalJson(response.body.epochs) === canonicalJson(expected.map(row => row.epoch)), "bundle must retain all registered epochs in order");
     assert.ok(typeof response.body.bundle === "string" && response.body.bundle.length > 0 && Buffer.from(response.body.bundle, "base64").toString("base64") === response.body.bundle, "bundle must be base64 ciphertext");
     const sealed = response.body.bundle;
-    noStore(response); metadata(response, fixture.primary.teamId); noSecretEcho(response);
+    noStore(response); metadata(response, fixture.primary.teamId);
     forbiddenText.add(sealed);
     let plaintext, opened;
     try {
