@@ -1,6 +1,6 @@
 # Device registration and escrow key contract
 
-`keys.contract.mjs` is the shared HTTP contract for POST `/v1/devices`, POST `<capability_url>/v1/keys/epochs`, and GET `<capability_url>/v1/keys/bundle`. It has a separate runner because deployments implement these routes after the initial accounts contract. Run it only against an isolated disposable deployment with escrow configured. Owner deletion and epoch fencing are separate follow-ups.
+`keys.contract.mjs` is the shared HTTP contract for POST `/v1/devices`, POST `<capability_url>/v1/keys/epochs`, GET `<capability_url>/v1/keys/bundle`, and controlled epoch fencing on POST `<capability_url>/v1/messages`. It has a separate runner because deployments implement these routes after the initial accounts contract. Run it only against an isolated disposable deployment with escrow configured. Owner deletion and automatic rotation remain implementation-specific integration tests.
 
 ```sh
 node server/test/contract/keys.run.mjs \
@@ -27,6 +27,13 @@ The required callbacks are:
   async openSealed(base64Ciphertext, deviceIdentity) {
     // Real age decryption; return canonical plaintext text, not parsed JSON.
   },
+  async sealMessage(plaintext, recipient) {
+    // Real age encryption; return base64 ciphertext for an ordinary message.
+  },
+  async revokeDevice({ teamId, keyId }) {
+    // Establish a controlled fence through the core fenceEpoch helper.
+    // Return only after that fence is committed; do not rotate it here.
+  },
   async dispose() {
     // Remove only this fixture's disposable state and stop its processes.
   },
@@ -35,7 +42,9 @@ The required callbacks are:
 
 `previous` is null for each competing epoch-1 candidate. For epoch 2 it is the winning epoch-1 object, including `epoch`, `key_id`, `identity`, `recipient`, and `snapshot`. A generated epoch must use a fresh key ID and key, and a complete existing-format age snapshot with `epoch_revision === String(epoch - 1)`. Discover `server_instance_id` from authenticated capabilities. Extend the preceding snapshot's immutable history, hash link, and writer generation; minimal snapshots containing only a revision are insufficient. The suite runs the existing local chain validator before uploading material and after decrypting a bundle.
 
-The suite uses one ordered chain on the primary team: empty bundle, concurrent first registration, repeated registration, winner bundle, second epoch, and complete retained bundle. Fixture callbacks must not pre-register those epochs. Independent cases must not reuse a primary team with existing epochs.
+The suite uses one ordered chain on the primary team: empty bundle, concurrent first registration, repeated registration, winner bundle, second epoch, complete retained bundle, a controlled fence, and a third epoch that lifts it. Fixture callbacks must not pre-register those epochs. Independent cases must not reuse a primary team with existing epochs.
+
+`revokeDevice` isolates the fence mechanism, not a deployment's owner-auth route. Both adapters call the core fence helper directly so a production automatic rotator cannot race the assertion. Owner DELETE and its automatic-rotation behavior, including empty-epoch policy, are tested separately in the [reference removal tests](../device-removal.integration.test.ts). The shared case requires the controlled fence to return 409 until the explicit next-epoch POST; a 200 before that POST is a failure, not an alternate success path. `sealMessage` and `openSealed` use real age encryption/decryption to check ordinary message envelopes as well as bundles.
 
 Adapter setup, key generation, and decryption failures must omit credentials and plaintext. The shared request helper never prints URLs, request bodies, or raw response bodies. It checks responses for reflected capability secrets and private identities. `dispose` runs after the suite; a factory that fails before returning must clean up its own partial setup.
 
@@ -50,5 +59,6 @@ Adapter setup, key generation, and decryption failures must omit credentials and
 - Decrypted bytes equal the existing canonical JSON encoding and contain exactly `{format_version:1, type:"agmsg_age_v1_handoff", snapshots, identities}`. Every registered epoch's snapshot and private identity must be retained, with no duplicate identities. The latest digest is recomputed locally and compared; server-supplied digest text is never accepted on its own.
 - Key data requests use protocol/team headers and the capability path, never a bearer header. Unknown and revoked credentials return identical complete 401 bodies. Foreign existing and nonexistent teams return identical complete 404 bodies.
 - A live capability without a registered recipient receives 403 `forbidden` on both key routes, including an otherwise valid epoch registration request.
+- A current-key write succeeds before the fixture fences it. The same controlled fence repeatedly returns 409 `epoch-fenced`, with exact `{team_id, key_id}` details, while an older retained key still writes. A separate case publishes epoch 3, retries the identical previously refused message with a `stored` acknowledgement, confirms a replay is `duplicate` at the same sequence, writes under the new key, and verifies the complete three-epoch bundle. The refused message must not have consumed its ID or been stored. These message errors use the existing data-plane envelope; the key routes' cache-header requirement is not imposed on them.
 
 These executable cases cover the configured-escrow path, material validation, registration requirements, and isolation. A separate escrow-disabled deployment and its 503 response are explicitly not covered by this fixture. Bundle assertions concern retained content and recipient sealing, not the implementation's unwrap mechanism or audit-call count per read. Do not replace a real deployment with mocked HTTP to claim this contract passes.

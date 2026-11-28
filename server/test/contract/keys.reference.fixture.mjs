@@ -1,10 +1,12 @@
 // Reference-server state adapter for the shared key contract. All protocol
 // assertions stay in the shared file; this only owns database setup and real age
 // key handling.
-import { Decrypter, generateX25519Identity, identityToRecipient } from "age-encryption";
+import { Decrypter, Encrypter, generateX25519Identity, identityToRecipient } from "age-encryption";
 import { Pool } from "pg";
 import { insertDevice } from "../../src/accounts/capability.ts";
 import { snapshotDigest } from "../../src/canonical.ts";
+import { inTransaction } from "../../src/db.ts";
+import { fenceEpoch } from "../../src/fence.ts";
 
 export async function createFixture({ baseUrl }) {
   const origin = new URL(baseUrl);
@@ -65,6 +67,19 @@ export async function createFixture({ baseUrl }) {
         const decrypter = new Decrypter();
         decrypter.addIdentity(deviceIdentity);
         return decrypter.decrypt(Buffer.from(base64, "base64"), "text");
+      },
+      async sealMessage(plaintext, recipient) {
+        const encrypter = new Encrypter();
+        encrypter.addRecipient(recipient);
+        return Buffer.from(await encrypter.encrypt(plaintext)).toString("base64");
+      },
+      async revokeDevice({ teamId, keyId }) {
+        try {
+          if (teamId !== primary.teamId) throw new Error();
+          // A controlled pause: owner removal and its optional automatic
+          // rotation are tested separately, not raced by this HTTP contract.
+          await inTransaction(pool, client => fenceEpoch(client, teamId, keyId));
+        } catch { throw new Error("reference fixture could not establish the test epoch fence"); }
       },
       async dispose() { await pool.end(); },
     };
