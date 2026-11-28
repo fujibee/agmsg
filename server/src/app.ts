@@ -13,6 +13,7 @@ import { registerCapabilityScope, redactSecretPath } from "./accounts/scope.js";
 import type { Config } from "./config.js";
 import type { EscrowBackend } from "./escrow.js";
 import { limitsFor } from "./limits.js";
+import { createRotator } from "./rotation.js";
 import { errorBody, DatabaseUnavailableError, ProtocolError } from "./errors.js";
 import {
   MAX_REQUEST_BYTES,
@@ -145,7 +146,13 @@ export function createApp(
     app.setNotFoundHandler((_request, reply) => {
       void reply.status(404).send(errorBody(new ProtocolError(404, "not-found", "no such route")));
     });
-    void app.register(registerDeviceRoutes, { pool, config });
+    // Step 2 of a device removal runs only where keys are escrowed.
+    const rotator = options.escrow ? createRotator({ pool, backend: options.escrow, log: app.log }) : null;
+    if (rotator) {
+      app.addHook("onReady", async () => { void rotator.start(); });
+      app.addHook("onClose", async () => { rotator.stop(); });
+    }
+    void app.register(registerDeviceRoutes, { pool, config, onRemoved: () => { void rotator?.kick(); } });
     void app.register(registerCapabilityScope, { pool, config, dataPlane, escrow: options.escrow ?? null });
   } else {
     void app.register(dataPlane, { pool, config });
