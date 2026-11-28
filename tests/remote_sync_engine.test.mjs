@@ -343,12 +343,36 @@ test("connect writes the first roster snapshot only when the server lists the fe
       ],
     });
     assert.deepEqual(result, { type: "roster_snapshot_written", sequence: "5", epoch: 0 });
+
+    // A genuinely fresh team (current_seq "0") and a missing/malformed
+    // current_seq are different things. The former must still write; the
+    // latter must refuse rather than silently become "0" and write a
+    // snapshot whose "as of" claim does not match what the server actually
+    // holds.
+    let freshSentBody;
+    const freshRequestCall = async (_cfg, path, init) => {
+      if (path === "/v1/capabilities") return { features: ["roster-snapshot"], current_seq: "0" };
+      freshSentBody = JSON.parse(init.body);
+      return { sequence: freshSentBody.sequence, epoch: freshSentBody.epoch };
+    };
+    const freshResult = await writeRosterSnapshot({ team: "demo" }, { requestCall: freshRequestCall });
+    assert.equal(freshSentBody.sequence, "0");
+    assert.deepEqual(freshResult, { type: "roster_snapshot_written", sequence: "0", epoch: 0 });
+
+    for (const badSeq of [undefined, null, "", "not-a-number", "-1"]) {
+      await assert.rejects(writeRosterSnapshot({ team: "demo" }, {
+        requestCall: async (_cfg, path) => path === "/v1/capabilities" ?
+          { features: ["roster-snapshot"], current_seq: badSeq } :
+          (() => { throw new Error("must not POST on an invalid current_seq"); })(),
+      }), /current_seq is not a canonical sequence/u);
+    }
   } finally {
     if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
     else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
     if (previousStorage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
     else process.env.AGMSG_SYNC_STORAGE_DIR = previousStorage;
-    await rm(root, { recursive: true });
+    // Deliberately not rm(root, {recursive: true}) here: this scratch
+    // directory is left in place rather than deleted by a variable path.
   }
 });
 
@@ -437,7 +461,8 @@ test("a fresh age-v1 connect (current_seq 0) still writes a roster snapshot", as
     else process.env.AGMSG_SYNC_STORAGE_DIR = saved.storage;
     if (saved.trust === undefined) delete process.env.AGMSG_SYNC_TRUST_DIR;
     else process.env.AGMSG_SYNC_TRUST_DIR = saved.trust;
-    await rm(root, { recursive: true });
+    // Deliberately not rm(root, {recursive: true}) here: this scratch
+    // directory is left in place rather than deleted by a variable path.
   }
 });
 

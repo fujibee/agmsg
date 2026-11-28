@@ -4722,14 +4722,18 @@ export async function writeRosterSnapshot(args, dependencies = {}) {
   if (!features.includes("roster-snapshot")) {
     return { type: "roster_snapshot_skipped", reason: "server does not list roster-snapshot" };
   }
-  const sequence = SEQUENCE.test(capabilities.current_seq ?? "") ? capabilities.current_seq : "0";
+  // Valid "0" (a genuinely fresh team) and a missing/malformed current_seq
+  // are different things -- `sequence()` throws on the latter rather than
+  // silently treating it as "0", which would write a snapshot whose "as of"
+  // claim does not match what the server actually holds.
+  const rosterSequence = sequence(capabilities.current_seq, "fresh capabilities current_seq");
   const members = await localRosterMembers(team);
   let epoch = "0";
   let cipher = "none";
   let keyId;
   let recipients;
   if (config.cipher_profile === "age-v1") {
-    const effectiveEpoch = rosterSnapshotAgeEpoch(config, sequence);
+    const effectiveEpoch = rosterSnapshotAgeEpoch(config, rosterSequence);
     if (!effectiveEpoch) throw new Error("no age-v1 epoch is effective at the connect sequence");
     epoch = String(effectiveEpoch.epoch_revision);
     cipher = "age-v1";
@@ -4737,13 +4741,13 @@ export async function writeRosterSnapshot(args, dependencies = {}) {
     recipients = effectiveEpoch.recipients;
   }
   const blob = sealRosterSnapshot({
-    teamId: config.remote_team_id, epoch, sequence, cipher, keyId, recipients,
+    teamId: config.remote_team_id, epoch, sequence: rosterSequence, cipher, keyId, recipients,
     maxBlobBytes: 1_048_576, protocolVersion: config.protocol_version,
-    projection: { kind: "roster_snapshot", epoch, sequence, members },
+    projection: { kind: "roster_snapshot", epoch, sequence: rosterSequence, members },
   });
   const result = await requestCall(config, "/v1/roster-snapshot", { method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sequence, epoch: Number(epoch), blob }) });
+    body: JSON.stringify({ sequence: rosterSequence, epoch: Number(epoch), blob }) });
   return { type: "roster_snapshot_written", sequence: result.sequence, epoch: result.epoch };
 }
 
