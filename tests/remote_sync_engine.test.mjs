@@ -67,6 +67,7 @@ import {
   validateConfiguredAgeIdentities,
   validateCapabilities,
   validateErrorBinding,
+  writeRosterSnapshot,
   errorCode,
   validateMembers,
   validateReadStatePage,
@@ -277,6 +278,71 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
     else process.env.AGMSG_SYNC_STORAGE_DIR = saved.storage;
     if (saved.trust === undefined) delete process.env.AGMSG_SYNC_TRUST_DIR;
     else process.env.AGMSG_SYNC_TRUST_DIR = saved.trust;
+    await rm(root, { recursive: true });
+  }
+});
+
+test("connect writes the first roster snapshot only when the server lists the feature", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-roster-snapshot-write-"));
+  const previous = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  const previousStorage = process.env.AGMSG_SYNC_STORAGE_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
+  const teamDir = join(root, "teams", "demo");
+  const bindingFor = (features) => ({
+    name: "demo",
+    agents: {
+      bob: { member_id: "018f3f7e-0000-7000-8000-000000000002" },
+      alice: { member_id: "018f3f7e-0000-7000-8000-000000000001" },
+    },
+    remote_binding: {
+      endpoint: "https://sync.example.test",
+      server_instance_id: config.server_instance_id,
+      remote_team_id: config.remote_team_id, protocol_version: 1,
+      capabilities: { write_allowed_ciphers: ["none"], features, current_seq: "5" },
+      cipher_profile: "none", connected_at: "2026-07-29T00:00:00Z", disconnected_at: null,
+    },
+  });
+  try {
+    await mkdir(teamDir, { recursive: true });
+
+    await writeFile(join(teamDir, "config.json"),
+      `${JSON.stringify(bindingFor([]))}\n`, authorityFileOptions);
+    const skipped = await writeRosterSnapshot({ team: "demo" },
+      { requestCall: async () => { throw new Error("must not be called"); } });
+    assert.equal(skipped.type, "roster_snapshot_skipped");
+
+    await writeFile(join(teamDir, "config.json"),
+      `${JSON.stringify(bindingFor(["roster-snapshot"]))}\n`, authorityFileOptions);
+    let sentPath;
+    let sentBody;
+    const result = await writeRosterSnapshot({ team: "demo" }, {
+      requestCall: async (_cfg, path, init) => {
+        sentPath = path;
+        sentBody = JSON.parse(init.body);
+        return { sequence: sentBody.sequence, epoch: sentBody.epoch };
+      },
+    });
+    assert.equal(sentPath, "/v1/roster-snapshot");
+    assert.equal(sentBody.sequence, "5");
+    assert.equal(sentBody.epoch, 0);
+    const opened = JSON.parse(Buffer.from(sentBody.blob, "base64").toString("utf8"));
+    assert.equal(opened.v, 1);
+    assert.equal(opened.cipher, "none");
+    const projection = JSON.parse(Buffer.from(opened.blob, "base64").toString("utf8"));
+    assert.deepEqual(projection, {
+      kind: "roster_snapshot", epoch: "0", sequence: "5",
+      members: [
+        { member_id: "018f3f7e-0000-7000-8000-000000000001", name: "alice" },
+        { member_id: "018f3f7e-0000-7000-8000-000000000002", name: "bob" },
+      ],
+    });
+    assert.deepEqual(result, { type: "roster_snapshot_written", sequence: "5", epoch: 0 });
+  } finally {
+    if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
+    if (previousStorage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
+    else process.env.AGMSG_SYNC_STORAGE_DIR = previousStorage;
     await rm(root, { recursive: true });
   }
 });

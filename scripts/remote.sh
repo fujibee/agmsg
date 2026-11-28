@@ -770,6 +770,23 @@ _remote_server_lists_feature() {
   [ "$found" = "1" ]
 }
 
+# _remote_binding_lists_feature <cfg> <feature> -> 0 when the team's STORED
+# binding (remote_binding.capabilities.features, written by the connect
+# response itself) lists it. Team-level, not origin-level: unlike
+# _remote_server_lists_feature above, this needs no network round trip,
+# since the connect response is already on disk by the time any caller here
+# would ask.
+_remote_binding_lists_feature() {
+  local cfg="$1" feature="$2" cfg_escaped found
+  cfg_escaped="$(LC_ALL=C sed "s/'/''/g" "$cfg")"
+  found="$(agmsg_sqlite_mem "SELECT CASE
+      WHEN json_type('$cfg_escaped','\$.remote_binding.capabilities.features')='array'
+      THEN (SELECT count(*) FROM json_each('$cfg_escaped','\$.remote_binding.capabilities.features')
+        WHERE value='$(_agmsg_sqlesc "$feature")')
+      ELSE 0 END;" 2>/dev/null)" || return 1
+  [ "$found" = "1" ]
+}
+
 # _remote_device_pending_file <origin> <team> -> path of the saved approval for that
 # server and team. Keyed by both: an address approved by one server must never
 # be offered to another, and the data host need not be the host that approved.
@@ -3245,6 +3262,20 @@ cmd_connect() {
       echo "agmsg: could not start the push from now; the sync engine was not started, so nothing was sent. Run: remote.sh disconnect $team" >&2
       exit 1
     }
+  fi
+
+  # Write the first roster snapshot, so a later machine can bootstrap its
+  # cursor from it instead of replaying the whole roster-mutation history
+  # (design: "Roster snapshot"). Only when the server lists the feature in
+  # the capabilities just recorded in $cfg — without it, today's path is
+  # unchanged. Best-effort: a connect that already wrote the binding and
+  # moved the store must not fail here over this, so a failure is reported
+  # and the sync engine, which can write a later snapshot on its own cycle,
+  # still starts.
+  if _remote_binding_lists_feature "$cfg" roster-snapshot; then
+    if ! bash "$SCRIPT_DIR/remote-sync.sh" write-roster-snapshot --team "$team" >/dev/null; then
+      echo "agmsg: connected, but the initial roster snapshot could not be written; a later sync still delivers the roster normally." >&2
+    fi
   fi
 
   # Start the polling engine in the background: it pushes what we have, pulls

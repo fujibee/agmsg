@@ -12,7 +12,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, decryptConcurrency, openEnvelope,
-  readNativeAgeIdentity } from "./sync-cipher.mjs";
+  openRosterSnapshot, readNativeAgeIdentity, sealRosterSnapshot } from "./sync-cipher.mjs";
 import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 import { STORAGE_ROSTER_KINDS } from "./wire-kinds.mjs";
 export { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
@@ -77,6 +77,7 @@ function usage() {
   remote-sync.sh resync --team NAME --accept-floor SEQUENCE
   remote-sync.sh unblock-read --team NAME --member-id UUID
   remote-sync.sh set-endpoint --team NAME
+  remote-sync.sh write-roster-snapshot --team NAME
 
 Run remote.sh connect first. The engine reads that team's connection binding
 directly; the remote-sync data plane carries no per-request credential — see
@@ -4670,6 +4671,60 @@ function pullProgress(startedAt, message) {
   process.stderr.write(`agmsg: [${elapsed}s] ${message}\n`);
 }
 
+// The member list in exactly the /v1/connect shape: {member_id, name} pairs,
+// sorted ascending and duplicate-free by member_id -- canonicalRosterSnapshot
+// enforces this (and the server cannot, since the blob is opaque to it), so
+// sorting here is required, not cosmetic.
+async function localRosterMembers(team) {
+  const path = teamConfigPath(team);
+  const value = JSON.parse(await readFile(path, "utf8"));
+  if (!value?.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) {
+    throw new Error("local team roster is invalid");
+  }
+  return Object.entries(value.agents)
+    .map(([name, agent]) => ({ member_id: agent?.member_id, name: requireName(name, "local agent name") }))
+    .sort((left, right) => (left.member_id < right.member_id ? -1 : left.member_id > right.member_id ? 1 : 0));
+}
+
+// Connect writes the first roster snapshot, when the server lists the
+// feature, so a second machine can later bootstrap from it instead of
+// replaying the whole roster-mutation history (design: "Roster snapshot").
+// Without the feature this is a no-op -- today's path is unchanged.
+export async function writeRosterSnapshot(args, dependencies = {}) {
+  const requestCall = dependencies.requestCall ?? request;
+  const team = requireName(args.team, "team");
+  const binding = await readConnectedBinding(team);
+  const features = Array.isArray(binding.capabilities?.features) ? binding.capabilities.features : [];
+  if (!features.includes("roster-snapshot")) {
+    return { type: "roster_snapshot_skipped", reason: "server does not list roster-snapshot" };
+  }
+  const config = await loadConfig(team);
+  const sequence = SEQUENCE.test(binding.capabilities.current_seq ?? "") ?
+    binding.capabilities.current_seq : "0";
+  const members = await localRosterMembers(team);
+  let epoch = "0";
+  let cipher = "none";
+  let keyId;
+  let recipients;
+  if (config.cipher_profile === "age-v1") {
+    const effectiveEpoch = currentAgeEpoch(config, sequence);
+    if (!effectiveEpoch) throw new Error("no age-v1 epoch is effective at the connect sequence");
+    epoch = String(effectiveEpoch.epoch_revision);
+    cipher = "age-v1";
+    keyId = effectiveEpoch.key_id;
+    recipients = effectiveEpoch.recipients;
+  }
+  const blob = sealRosterSnapshot({
+    teamId: config.remote_team_id, epoch, sequence, cipher, keyId, recipients,
+    maxBlobBytes: 1_048_576, protocolVersion: config.protocol_version,
+    projection: { kind: "roster_snapshot", epoch, sequence, members },
+  });
+  const result = await requestCall(config, "/v1/roster-snapshot", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sequence, epoch: Number(epoch), blob }) });
+  return { type: "roster_snapshot_written", sequence: result.sequence, epoch: result.epoch };
+}
+
 export async function pullBootstrap(args, dependencies = {}) {
   const publicSnapshotCall = dependencies.publicSnapshotCall ?? publicSnapshot;
   const requestPublicCall = dependencies.requestPublicCall ?? requestPublic;
@@ -5069,13 +5124,18 @@ async function main() {
   const args = options(rest);
   if (!["configure", "export-age-snapshot", "verify-age-snapshot", "export-age-handoff",
         "verify-age-handoff", "once", "run", "reprocess", "resync",
-        "unblock-read", "pull-bootstrap", "resolve-team", "set-endpoint"].includes(command)) {
+        "unblock-read", "pull-bootstrap", "resolve-team", "set-endpoint",
+        "write-roster-snapshot"].includes(command)) {
     throw new Error(usage());
   }
   if (command === "configure") { await configure(args); return; }
   if (command === "export-age-snapshot") { await exportAgeSnapshot(args); return; }
   if (command === "verify-age-snapshot") { await verifyAgeSnapshot(args); return; }
   if (command === "export-age-handoff") { await exportAgeHandoff(args); return; }
+  if (command === "write-roster-snapshot") {
+    process.stdout.write(`${JSON.stringify(await writeRosterSnapshot(args))}\n`);
+    return;
+  }
   if (command === "verify-age-handoff") { await verifyAgeHandoff(args); return; }
   // Before any local team exists, so neither can go through loadConfig.
   if (command === "resolve-team") { await resolveTeam(args); return; }
