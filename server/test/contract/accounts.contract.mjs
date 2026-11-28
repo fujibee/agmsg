@@ -31,7 +31,7 @@ function dataError(response, status, code) {
   assert.equal(response.status, status, "data-plane error status");
   keys(response.body, ["error"], "data-plane error", ["protocol_version", "server_instance_id", "team_id"]);
   keys(response.body.error, ["code"], "data-plane error code", ["message", "details"]);
-  if (Object.hasOwn(response.body, "protocol_version")) assert.equal(response.body.protocol_version, 1);
+  if (Object.hasOwn(response.body, "protocol_version")) assert.ok(response.body.protocol_version === 1, "error protocol version differs");
   for (const name of ["server_instance_id", "team_id"]) {
     if (Object.hasOwn(response.body, name)) text(response.body[name], `error ${name}`);
   }
@@ -44,7 +44,7 @@ function dataError(response, status, code) {
 }
 function noStore(response, pragma = false) {
   assert.ok(response.headers.get("cache-control")?.split(/\s*,\s*/).includes("no-store"), "response must be no-store");
-  if (pragma) assert.equal(response.headers.get("pragma"), "no-cache");
+  if (pragma) assert.ok(response.headers.get("pragma") === "no-cache", "response must disable caching");
 }
 function capability(url) {
   const parsed = parsedUrl(url, "capability");
@@ -125,8 +125,8 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
     keys(response.body, CODE_KEYS, "device code");
     assert.ok(/^[A-Za-z0-9_-]{43}$/.test(response.body.device_code), "device code must be 32-byte base64url");
     assert.ok(USER_CODE.test(response.body.user_code), "user code must use the displayed Crockford form");
-    assert.equal(response.body.expires_in, 900);
-    assert.equal(response.body.interval, 5);
+    assert.ok(response.body.expires_in === 900, "device code lifetime differs");
+    assert.ok(response.body.interval === 5, "initial polling interval differs");
     const verification = parsedUrl(response.body.verification_uri, "verification URI");
     const complete = parsedUrl(response.body.verification_uri_complete, "complete verification URI");
     assert.ok(complete.origin === verification.origin && complete.pathname === verification.pathname, "verification URIs must identify the same page");
@@ -188,7 +188,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
       assert.equal(fast.status, 400);
       keys(fast.body, ["error", "interval"], "slow_down");
       assert.ok(fast.body.error === "slow_down", "rapid polling must report slow_down");
-      assert.equal(fast.body.interval, 10);
+      assert.ok(fast.body.interval === 10, "slow-down polling interval differs");
       noStore(fast, true);
       flatError(await control("/v1/device/token", { method: "POST", body: {} }), 400, "bad_request");
       flatError(await control("/v1/device/token", { method: "POST", body: { ...payload, extra: true } }), 400, "bad_request");
@@ -302,7 +302,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
     it("uses capability paths without a bearer header and denies a different team's reads and writes", async () => {
       const own = await data(primary.url, "/members", fixture.primary.teamId);
       assert.equal(own.status, 200);
-      assert.equal(own.headers.get("agmsg-protocol-version"), "1");
+      assert.ok(own.headers.get("agmsg-protocol-version") === "1", "data response protocol header differs");
       const nonexistentTeam = "018f3f7e-ffff-7fff-8fff-ffffffffffff";
       for (const [foreignPath, absentPath, options] of [
         ["/members", "/members", {}],
@@ -337,7 +337,7 @@ export function defineAccountsContract({ baseUrl, fixture, requestTimeoutMs = 50
     it("advertises post-connect features in team-scoped capabilities", async () => {
       const response = await data(primary.url, "/capabilities", fixture.primary.teamId);
       assert.equal(response.status, 200);
-      assert.equal(response.body.protocol_version, 1);
+      assert.ok(response.body.protocol_version === 1, "capabilities protocol version differs");
       assert.ok(response.body.team_id === fixture.primary.teamId, "capability binding must name the requested team");
       text(response.body.server_instance_id, "server instance id");
       assert.ok(Array.isArray(response.body.features) && response.body.features.every(name => typeof name === "string"), "capabilities must expose string feature names");

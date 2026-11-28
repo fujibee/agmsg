@@ -87,3 +87,5 @@ The same suite verifies live capability access, cross-team read/write denial, id
 Data-plane errors require `error.code` and allow typed optional protocol binding fields, `error.message`, and `error.details`. Unknown and revoked credentials must still return byte-identical complete bodies.
 
 The approval endpoint itself, owner sign-in, key escrow, key routes, and configurable-limit exhaustion are outside this file. They must not be smuggled into the shared contract through an implementation-specific URL or a host-name condition.
+
+The separate [device registration and escrow key contract](KEYS.md) defines the next route group with real key-generation and decryption fixture callbacks. It has its own runner and requires a disposable configured-escrow deployment; the initial accounts suite remains independently runnable.
