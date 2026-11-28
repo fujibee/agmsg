@@ -6,8 +6,8 @@ import test from "node:test";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { evaluatePull } from "../scripts/internal/remote-sync.mjs";
-import { nativeAgeIdentity, openEnvelope, sealEnvelope,
-  validateAgeHeader } from "../scripts/internal/sync-cipher.mjs";
+import { nativeAgeIdentity, openEnvelope, openRosterSnapshot, sealEnvelope,
+  sealRosterSnapshot, validateAgeHeader } from "../scripts/internal/sync-cipher.mjs";
 
 const manifest = JSON.parse(await readFile(
   new URL("../docs/spec/vectors/age-v1-vectors.json", import.meta.url), "utf8"));
@@ -234,6 +234,50 @@ test("a roster snapshot round-trips sealed and unsealed, and its fields are clos
 
   const duplicate = { ...snapshot, members: [snapshot.members[0], snapshot.members[0]] };
   assert.throws(() => sealEnvelope({ ...base, projection: duplicate }));
+});
+
+test("a roster snapshot blob binds to its exact team/epoch/sequence slot", async () => {
+  const snapshot = {
+    kind: "roster_snapshot",
+    epoch: "1",
+    sequence: "42",
+    members: [{ member_id: "018f3f7e-0000-7000-8000-000000000001", name: "alice" }],
+  };
+  const common = {
+    teamId: manifest.binding.team_id, epoch: "1", sequence: "42",
+    maxBlobBytes: 1_048_576, protocolVersion: 1, projection: snapshot,
+  };
+
+  // Plaintext ("none") has no cryptographic binding at all -- same as an
+  // ordinary unsealed message -- so the wire_id/epoch/sequence recomputation
+  // only matters, and is only tested, under age-v1 below.
+  const plainBlob = sealRosterSnapshot({ ...common, cipher: "none" });
+  assert.deepEqual(
+    await openRosterSnapshot({ teamId: manifest.binding.team_id, epoch: "1", sequence: "42",
+      blob: plainBlob, protocolVersion: 1, maxBlobBytes: 1_048_576 }),
+    snapshot,
+  );
+
+  const ageBlob = sealRosterSnapshot({ ...common, cipher: "age-v1",
+    keyId: manifest.recipient_sets.team_a.key_id ?? "epoch-1",
+    recipients: [manifest.recipient_sets.team_a.recipient] });
+  const identityFile = join(await mkdtemp(join(tmpdir(), "agmsg-roster-snapshot-")), "identity");
+  await writeFile(identityFile, `${manifest.recipient_sets.team_a.identity}\n`, { mode: 0o600 });
+  assert.deepEqual(
+    await openRosterSnapshot({ teamId: manifest.binding.team_id, epoch: "1", sequence: "42",
+      blob: ageBlob, protocolVersion: 1, maxBlobBytes: 1_048_576, identityFile,
+      expectedRecipients: [manifest.recipient_sets.team_a.recipient] }),
+    snapshot,
+  );
+  await assert.rejects(openRosterSnapshot({ teamId: manifest.binding.team_id, epoch: "1",
+    sequence: "43", blob: ageBlob, protocolVersion: 1, maxBlobBytes: 1_048_576, identityFile,
+    expectedRecipients: [manifest.recipient_sets.team_a.recipient] }));
+  await assert.rejects(openRosterSnapshot({ teamId: manifest.binding.team_id, epoch: "2",
+    sequence: "42", blob: ageBlob, protocolVersion: 1, maxBlobBytes: 1_048_576, identityFile,
+    expectedRecipients: [manifest.recipient_sets.team_a.recipient] }));
+  await assert.rejects(openRosterSnapshot({ teamId: "018f3f7e-0000-7000-8000-00000000ffff",
+    epoch: "1", sequence: "42", blob: ageBlob, protocolVersion: 1, maxBlobBytes: 1_048_576, identityFile,
+    expectedRecipients: [manifest.recipient_sets.team_a.recipient] }));
 });
 
 test("a late concurrent rotation may use the preceding key but ordinary data may not", async () => {

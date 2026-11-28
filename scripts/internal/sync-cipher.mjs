@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 // Namespace import, not `{ tmpdir, availableParallelism }`: availableParallelism
@@ -993,6 +993,71 @@ export async function openEnvelope(input) {
   const profile = cipherProfiles[envelope.cipher];
   if (!profile) throw new CipherStateError("unsupported_cipher", `unsupported cipher ${envelope.cipher}`);
   return profile.open(input);
+}
+
+// A roster snapshot has no message of its own to bind to -- team_id alone
+// would let a sealed snapshot from one (epoch, sequence) slot be replayed
+// into another, since every snapshot for a team shares the same row. The
+// wire_id is deterministic rather than random precisely so the reader can
+// recompute it from the row it just read (team_id, epoch, sequence) and
+// have openEnvelope's existing binding check -- the one that already
+// protects a message's wire_id -- reject a swapped row as a mismatch,
+// rather than inventing a second check.
+export function rosterSnapshotWireId(teamId, epoch, sequence) {
+  const digest = createHash("sha256")
+    .update("agmsg-roster-snapshot\0")
+    .update(String(teamId))
+    .update("\0")
+    .update(String(epoch))
+    .update("\0")
+    .update(String(sequence))
+    .digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// The roster-snapshot route stores a bare `blob` -- no envelope wrapper
+// alongside it, unlike a message -- so the envelope sealEnvelope/openEnvelope
+// already produce is itself base64'd into that one field, exactly as the
+// design calls for reusing them as-is rather than inventing a second wire
+// shape. `epoch` and `sequence` travel outside this blob (the route's own
+// columns), which is why the binding recomputes the wire_id from them
+// instead of trusting anything inside the sealed bytes.
+export function sealRosterSnapshot({ teamId, epoch, sequence, cipher, keyId, recipients,
+  maxBlobBytes, protocolVersion, projection }) {
+  const wireId = rosterSnapshotWireId(teamId, epoch, sequence);
+  const envelope = sealEnvelope({
+    type: "sync_seal",
+    envelope_v: 1,
+    cipher,
+    key_id: keyId ?? null,
+    recipients: recipients ?? [],
+    max_blob_bytes: maxBlobBytes,
+    wire_id: wireId,
+    team_id: teamId,
+    protocol_version: protocolVersion,
+    projection,
+  });
+  return Buffer.from(JSON.stringify(envelope), "utf8").toString("base64");
+}
+
+export async function openRosterSnapshot({ teamId, epoch, sequence, blob,
+  protocolVersion, identityFile, expectedRecipients, maxBlobBytes }) {
+  let envelope;
+  try {
+    envelope = JSON.parse(Buffer.from(blob, "base64").toString("utf8"));
+  } catch {
+    malformed("roster snapshot blob is not a sealed envelope");
+  }
+  const wireId = rosterSnapshotWireId(teamId, epoch, sequence);
+  return openEnvelope({
+    envelope, protocol_version: protocolVersion, team_id: teamId, wire_id: wireId,
+    identity_file: identityFile, expected_recipients: expectedRecipients,
+    max_blob_bytes: maxBlobBytes,
+  });
 }
 
 async function readStdin() {
