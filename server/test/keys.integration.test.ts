@@ -171,18 +171,26 @@ describeDatabase("escrowed team keys over a capability URL", () => {
 
   describe("against a removal that commits while a key request is in flight", () => {
     const team2 = "018f3f7e-0000-7000-8000-0000000000d4";
+    // A gate holds a backend call open. `entered` settles once a request is
+    // inside it, so a test starts its race from a known point, not a timer.
     const gate = () => {
       let open!: () => void;
+      let enter!: () => void;
       const opened = new Promise<void>((resolve) => { open = resolve; });
-      return { opened, open };
+      const entered = new Promise<void>((resolve) => { enter = resolve; });
+      return { opened, open, entered, enter };
     };
     let racing: ReturnType<typeof createApp>;
-    let wrapGate = Promise.resolve();
-    let unwrapGate = Promise.resolve();
+    let wrapGate = { opened: Promise.resolve(), enter: () => {} };
+    let unwrapGate = { opened: Promise.resolve(), enter: () => {} };
     const slow = {
       ...backend,
-      wrap: async (...args: Parameters<typeof backend.wrap>) => { await wrapGate; return backend.wrap(...args); },
-      unwrap: async (...args: Parameters<typeof backend.unwrap>) => { await unwrapGate; return backend.unwrap(...args); },
+      wrap: async (...args: Parameters<typeof backend.wrap>) => {
+        wrapGate.enter(); await wrapGate.opened; return backend.wrap(...args);
+      },
+      unwrap: async (...args: Parameters<typeof backend.unwrap>) => {
+        unwrapGate.enter(); await unwrapGate.opened; return backend.unwrap(...args);
+      },
     };
 
     async function enrolled(name: string) {
@@ -210,15 +218,19 @@ describeDatabase("escrowed team keys over a capability URL", () => {
       expect((await post(sender.secret, "epochs", first, racing)).statusCode).toBe(201);
       const second = await epochOf(2, { snapshot: first.snapshot });
       const hold = gate();
-      wrapGate = hold.opened;
-      const inFlight = post(sender.secret, "epochs", second, racing);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect((await removeDevice(pool, sender.deviceId)).ok).toBe(true);
-      expect(await fencedKeyIds(pool, team2, [first.key_id])).toEqual([first.key_id]);
-      wrapGate = Promise.resolve();
-      hold.open();
-      const answer = await inFlight;
-      expect(answer.statusCode).toBe(401);
+      wrapGate = hold;
+      try {
+        const inFlight = post(sender.secret, "epochs", second, racing);
+        await hold.entered;
+        expect((await removeDevice(pool, sender.deviceId)).ok).toBe(true);
+        expect(await fencedKeyIds(pool, team2, [first.key_id])).toEqual([first.key_id]);
+        hold.open();
+        const answer = await inFlight;
+        expect(answer.statusCode).toBe(401);
+      } finally {
+        hold.open();
+        wrapGate = { opened: Promise.resolve(), enter: () => {} };
+      }
       expect((await pool.query(`SELECT 1 FROM team_key_epochs WHERE team_id = $1 AND epoch = 2`, [team2])).rowCount).toBe(0);
       expect(await fencedKeyIds(pool, team2, [first.key_id])).toEqual([first.key_id]);
     });
@@ -226,17 +238,23 @@ describeDatabase("escrowed team keys over a capability URL", () => {
     it("lets a release that began before a removal finish, and refuses the next one", async () => {
       const reader = await enrolled("reader");
       const hold = gate();
-      unwrapGate = hold.opened;
-      const inFlight = bundle(reader.secret, racing);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      let removed = false;
-      const removal = removeDevice(pool, reader.deviceId).then((result) => { removed = true; return result; });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(removed).toBe(false);
-      unwrapGate = Promise.resolve();
-      hold.open();
-      expect((await inFlight).statusCode).toBe(200);
-      expect((await removal).ok).toBe(true);
+      unwrapGate = hold;
+      try {
+        const inFlight = bundle(reader.secret, racing);
+        await hold.entered;
+        let removed = false;
+        const removal = removeDevice(pool, reader.deviceId).then((result) => { removed = true; return result; });
+        // The removal is queued behind the release's device lock. Give it time to
+        // (wrongly) finish; a correct server keeps it waiting.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(removed).toBe(false);
+        hold.open();
+        expect((await inFlight).statusCode).toBe(200);
+        expect((await removal).ok).toBe(true);
+      } finally {
+        hold.open();
+        unwrapGate = { opened: Promise.resolve(), enter: () => {} };
+      }
       expect((await bundle(reader.secret, racing)).statusCode).toBe(401);
     });
   });
