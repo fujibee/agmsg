@@ -12,7 +12,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, decryptConcurrency, openEnvelope,
-  readNativeAgeIdentity } from "./sync-cipher.mjs";
+  openRosterSnapshot, readNativeAgeIdentity, sealRosterSnapshot } from "./sync-cipher.mjs";
 import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 import { STORAGE_ROSTER_KINDS } from "./wire-kinds.mjs";
 export { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
@@ -77,6 +77,7 @@ function usage() {
   remote-sync.sh resync --team NAME --accept-floor SEQUENCE
   remote-sync.sh unblock-read --team NAME --member-id UUID
   remote-sync.sh set-endpoint --team NAME
+  remote-sync.sh write-roster-snapshot --team NAME
 
 Run remote.sh connect first. The engine reads that team's connection binding
 directly; the remote-sync data plane carries no per-request credential — see
@@ -2628,6 +2629,21 @@ function ageHistory(config) {
   ];
 }
 
+// The epoch a roster snapshot AT `sequence` is sealed under: the one
+// effective for the message that would come right after it (effective_from_seq
+// <= sequence + 1), not currentAgeEpoch's own target (effective_from_seq <=
+// sequence) -- that selector answers "which epoch sealed the message AT this
+// sequence", and a snapshot taken before any message exists (sequence "0",
+// a fresh connect) has no message at sequence 0 to ask that of: every epoch's
+// effective_from_seq is >= "1", so currentAgeEpoch(config, "0") always finds
+// no candidate and a first E2EE snapshot could never be written. A snapshot
+// describes the roster as of `sequence`, sealed under whichever key is
+// current for whatever comes next, which is well-defined even when nothing
+// has been written yet.
+function rosterSnapshotAgeEpoch(config, sequence) {
+  return currentAgeEpoch(config, String(BigInt(sequence) + 1n));
+}
+
 function currentAgeEpoch(config, serverSeq) {
   const history = ageHistory(config);
   if (!Array.isArray(history) || history.length < 1) return null;
@@ -4670,6 +4686,71 @@ function pullProgress(startedAt, message) {
   process.stderr.write(`agmsg: [${elapsed}s] ${message}\n`);
 }
 
+// The member list in exactly the /v1/connect shape: {member_id, name} pairs,
+// sorted ascending and duplicate-free by member_id -- canonicalRosterSnapshot
+// enforces this (and the server cannot, since the blob is opaque to it), so
+// sorting here is required, not cosmetic.
+async function localRosterMembers(team) {
+  const path = teamConfigPath(team);
+  const value = JSON.parse(await readFile(path, "utf8"));
+  if (!value?.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) {
+    throw new Error("local team roster is invalid");
+  }
+  return Object.entries(value.agents)
+    .map(([name, agent]) => ({ member_id: agent?.member_id, name: requireName(name, "local agent name") }))
+    .sort((left, right) => (left.member_id < right.member_id ? -1 : left.member_id > right.member_id ? 1 : 0));
+}
+
+// Connect writes the first roster snapshot, when the server lists the
+// feature, so a second machine can later bootstrap from it instead of
+// replaying the whole roster-mutation history (design: "Roster snapshot").
+// Without the feature this is a no-op -- today's path is unchanged.
+export async function writeRosterSnapshot(args, dependencies = {}) {
+  const requestCall = dependencies.requestCall ?? request;
+  const team = requireName(args.team, "team");
+  const config = await loadConfig(team);
+  // Fetched fresh, not read from the binding's connect-time capabilities: a
+  // retry runs long after connect, and `features` can have changed, but more
+  // importantly the stored current_seq is frozen at connect time while
+  // `localRosterMembers` below always reads the CURRENT local roster -- pairing
+  // a stale sequence with a fresh roster would write a snapshot whose "as of"
+  // claim does not match what it actually contains. Fetching current_seq here,
+  // immediately before reading the roster, keeps the two as close together as
+  // this client can get them.
+  const capabilities = await requestCall(config, "/v1/capabilities");
+  const features = Array.isArray(capabilities?.features) ? capabilities.features : [];
+  if (!features.includes("roster-snapshot")) {
+    return { type: "roster_snapshot_skipped", reason: "server does not list roster-snapshot" };
+  }
+  // Valid "0" (a genuinely fresh team) and a missing/malformed current_seq
+  // are different things -- `sequence()` throws on the latter rather than
+  // silently treating it as "0", which would write a snapshot whose "as of"
+  // claim does not match what the server actually holds.
+  const rosterSequence = sequence(capabilities.current_seq, "fresh capabilities current_seq");
+  const members = await localRosterMembers(team);
+  let epoch = "0";
+  let cipher = "none";
+  let keyId;
+  let recipients;
+  if (config.cipher_profile === "age-v1") {
+    const effectiveEpoch = rosterSnapshotAgeEpoch(config, rosterSequence);
+    if (!effectiveEpoch) throw new Error("no age-v1 epoch is effective at the connect sequence");
+    epoch = String(effectiveEpoch.epoch_revision);
+    cipher = "age-v1";
+    keyId = effectiveEpoch.key_id;
+    recipients = effectiveEpoch.recipients;
+  }
+  const blob = sealRosterSnapshot({
+    teamId: config.remote_team_id, epoch, sequence: rosterSequence, cipher, keyId, recipients,
+    maxBlobBytes: 1_048_576, protocolVersion: config.protocol_version,
+    projection: { kind: "roster_snapshot", epoch, sequence: rosterSequence, members },
+  });
+  const result = await requestCall(config, "/v1/roster-snapshot", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sequence: rosterSequence, epoch: Number(epoch), blob }) });
+  return { type: "roster_snapshot_written", sequence: result.sequence, epoch: result.epoch };
+}
+
 export async function pullBootstrap(args, dependencies = {}) {
   const publicSnapshotCall = dependencies.publicSnapshotCall ?? publicSnapshot;
   const requestPublicCall = dependencies.requestPublicCall ?? requestPublic;
@@ -5069,13 +5150,18 @@ async function main() {
   const args = options(rest);
   if (!["configure", "export-age-snapshot", "verify-age-snapshot", "export-age-handoff",
         "verify-age-handoff", "once", "run", "reprocess", "resync",
-        "unblock-read", "pull-bootstrap", "resolve-team", "set-endpoint"].includes(command)) {
+        "unblock-read", "pull-bootstrap", "resolve-team", "set-endpoint",
+        "write-roster-snapshot"].includes(command)) {
     throw new Error(usage());
   }
   if (command === "configure") { await configure(args); return; }
   if (command === "export-age-snapshot") { await exportAgeSnapshot(args); return; }
   if (command === "verify-age-snapshot") { await verifyAgeSnapshot(args); return; }
   if (command === "export-age-handoff") { await exportAgeHandoff(args); return; }
+  if (command === "write-roster-snapshot") {
+    process.stdout.write(`${JSON.stringify(await writeRosterSnapshot(args))}\n`);
+    return;
+  }
   if (command === "verify-age-handoff") { await verifyAgeHandoff(args); return; }
   // Before any local team exists, so neither can go through loadConfig.
   if (command === "resolve-team") { await resolveTeam(args); return; }

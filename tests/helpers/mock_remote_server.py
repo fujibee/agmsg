@@ -39,6 +39,18 @@ TEAM_CIPHER_PROFILE = os.environ.get("MOCK_TEAM_CIPHER_PROFILE", "age-v1")
 # Origin-level features the unauthenticated /v1/health lists. Empty means the
 # field is absent altogether, the answer a server without any gives.
 FEATURES = [f for f in os.environ.get("MOCK_FEATURES", "").split(",") if f]
+# Team-level features the capability snapshot (/v1/connect's own response,
+# and /v1/capabilities) lists. Separate from FEATURES above: a real server's
+# team features are not the same list as its origin features (roster-snapshot
+# has no origin-level counterpart at all), so one test setting one must never
+# move the other.
+TEAM_FEATURES = [f for f in os.environ.get("MOCK_TEAM_FEATURES", "").split(",") if f]
+# Answer POST /v1/roster-snapshot with this HTTP status instead of storing the
+# snapshot -- a connect that wrote one must report it rather than fail, and
+# this is how a test makes that write fail without a real storage backend.
+ROSTER_SNAPSHOT_WRITE_STATUS = os.environ.get("MOCK_ROSTER_SNAPSHOT_WRITE_STATUS", "")
+# The one roster snapshot this mock holds, team_id -> {"sequence", "epoch", "blob"}.
+ROSTER_SNAPSHOTS: dict = {}
 # Device approval: how many token polls answer "authorization_pending" before
 # the approval arrives, and an optional terminal error to answer with instead.
 DEVICE_PENDING = int(os.environ.get("MOCK_DEVICE_PENDING", "0") or 0)
@@ -398,6 +410,18 @@ class Handler(BaseHTTPRequestHandler):
                     "accepted_envelope_versions": [1],
                     "write_allowed_ciphers": CONNECT_CIPHERS,
                 }],
+                **({"features": TEAM_FEATURES} if TEAM_FEATURES else {}),
+            })
+            return
+        if self.path == "/v1/roster-snapshot":
+            team_id = self.headers.get("Agmsg-Team-ID", "")
+            stored = ROSTER_SNAPSHOTS.get(team_id) or \
+                {"sequence": None, "epoch": None, "blob": None}
+            self._send_json(200, {
+                "protocol_version": 1,
+                "server_instance_id": CONNECT_SERVER_ID,
+                "team_id": team_id,
+                **stored,
             })
             return
         if self.path == "/_test/pushed":
@@ -874,6 +898,32 @@ class Handler(BaseHTTPRequestHandler):
                                     "effective_from_seq": "1",
                                     "accepted_envelope_versions": [1],
                                     "write_allowed_ciphers": CONNECT_CIPHERS}],
+                **({"features": TEAM_FEATURES} if TEAM_FEATURES else {}),
+            })
+            return
+
+        if self.path == "/v1/roster-snapshot":
+            if ROSTER_SNAPSHOT_WRITE_STATUS:
+                self._send_json(int(ROSTER_SNAPSHOT_WRITE_STATUS),
+                                 {"error": {"code": "server-error"}})
+                return
+            try:
+                data = json.loads(raw) if raw else {}
+            except Exception:
+                self._send_json(400, {"error": {"code": "invalid-request"}})
+                return
+            team_id = self.headers.get("Agmsg-Team-ID", "")
+            ROSTER_SNAPSHOTS[team_id] = {
+                "sequence": data.get("sequence", ""),
+                "epoch": data.get("epoch", 0),
+                "blob": data.get("blob", ""),
+            }
+            self._send_json(200, {
+                "protocol_version": 1,
+                "server_instance_id": CONNECT_SERVER_ID,
+                "team_id": team_id,
+                "sequence": ROSTER_SNAPSHOTS[team_id]["sequence"],
+                "epoch": ROSTER_SNAPSHOTS[team_id]["epoch"],
             })
             return
 

@@ -33,6 +33,8 @@ setup() {
   MOCK_CONNECT_TEAM_NAME="${MOCK_CONNECT_TEAM_NAME:-}" \
   MOCK_CONNECT_STATUS="${MOCK_CONNECT_STATUS:-}" \
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
+  MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
+  MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
@@ -210,6 +212,8 @@ restart_mock_server() {
   MOCK_CONNECT_TEAM_NAME="${MOCK_CONNECT_TEAM_NAME:-}" \
   MOCK_CONNECT_STATUS="${MOCK_CONNECT_STATUS:-}" \
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
+  MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
+  MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
@@ -258,6 +262,59 @@ skip_if_no_age() {
   # real local team. testteam was minted with a team_id in setup().
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
+}
+
+# --- roster-snapshot: connect writes the first one, when offered -----------
+
+@test "connect: writes the first roster snapshot when the server lists the feature" {
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  restart_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  refute grep -qF 'roster snapshot could not be written' <<<"$output"
+  local team_id
+  team_id="$(_binding_field testteam remote_team_id)"
+  run curl -sS "$ENDPOINT/v1/roster-snapshot" \
+    -H "Agmsg-Team-ID: $team_id" -H "Agmsg-Protocol-Version: 1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"sequence": "0"'* ]]
+}
+
+@test "connect: without the feature, nothing is written and today's path is unchanged" {
+  # MOCK_TEAM_FEATURES is unset (default empty) in setup(): no features field
+  # at all, same as a server that predates roster-snapshot.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local team_id
+  team_id="$(_binding_field testteam remote_team_id)"
+  run curl -sS "$ENDPOINT/v1/roster-snapshot" \
+    -H "Agmsg-Team-ID: $team_id" -H "Agmsg-Protocol-Version: 1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"sequence": null'* ]]
+}
+
+@test "connect: a roster snapshot write that fails is a stated line, not a silent drop, and connect still succeeds" {
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="500"
+  restart_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  grep -qF "roster snapshot could not be written" <<<"$output"
+  grep -qF "write-roster-snapshot --team" <<<"$output"
+  # Not just a string that mentions the command -- the exact line printed,
+  # run as-is, must actually resolve and run the real script (bare
+  # "remote-sync.sh" is not on PATH, which fails as "command not found", exit
+  # 127, before ever reaching the network -- this catches that regression
+  # directly rather than trusting a substring match). The mock still answers
+  # 500 here, so this run fails too, but for the SAME reason the first one
+  # did (the server refused the write), not because the shell could not find
+  # the script.
+  local retry_cmd
+  retry_cmd="$(grep -o 'Run: .*to retry\.' <<<"$output" | sed -e 's/^Run: //' -e 's/ to retry\.$//')"
+  [ -n "$retry_cmd" ]
+  run bash -c "$retry_cmd"
+  [ "$status" -ne 127 ]
+  [[ "$output" == *"HTTP 500"* ]]
 }
 
 @test "connect: without --e2ee, an address outside the allowlist is still refused (control)" {
@@ -3513,6 +3570,8 @@ make_lock() {  # make_lock <team> [pid]
 start_second_mock_server() {
   : > "$TEST_SKILL_DIR/server-b.port"
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
+  MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
+  MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server-b.port" 2>"$TEST_SKILL_DIR/server-b.log" 3>&- &
   MOCK_SERVER_B_PID=$!
