@@ -197,6 +197,14 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
       nonempty(serverId, "capabilities server ID");
     });
 
+    it("advertises configured key escrow on unauthenticated origin health", async () => {
+      const response = await request(controlOrigin, "/v1/health");
+      noSecretEcho(response);
+      assert.equal(response.status, 200);
+      assert.ok(Array.isArray(response.body.features) && response.body.features.every(name => typeof name === "string"), "origin health must expose string feature names");
+      assert.ok(response.body.features.includes("key-escrow"), "configured origin must advertise key escrow");
+    });
+
     it("registers device recipients idempotently and pins control-plane refusals", async () => {
       for (const [identity, caller] of [[fixture.primary, primary], [fixture.foreign, foreign]]) {
         const body = { team_id: identity.teamId, device_pubkey: identity.devicePubkey, label: identity.label };
