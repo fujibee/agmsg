@@ -8,7 +8,7 @@ import { inTransaction } from "../db.js";
 import { listEpochs } from "../escrow-store.js";
 import type { EscrowBackend } from "../escrow.js";
 import { ProtocolError } from "../errors.js";
-import { liftEpochFence } from "../fence.js";
+import { liftFencesBefore } from "../fence.js";
 import { resolveSecret } from "./capability.js";
 
 // A device's escrowed team key, over the capability URL:
@@ -125,9 +125,9 @@ export function registerKeyRoutes(
         [who.teamId, epoch.toString(), who.backend.kind, who.backend.keyRef, wrapped,
           body.recipient, body.key_id, JSON.stringify(body.snapshot)],
       );
-      // Publishing the next epoch ends the pause a device removal put on the one
-      // before it, in this same transaction.
-      if (previous) await liftEpochFence(client, who.teamId, previous.keyId);
+      // Publishing the next epoch ends the pause a device removal put on any
+      // earlier epoch, in this same transaction.
+      await liftFencesBefore(client, who.teamId, epoch);
       return { status: 201 as const, row: null };
     });
     if (result.status === 201) return reply.status(201).send({ status: "registered", epoch: body.epoch });

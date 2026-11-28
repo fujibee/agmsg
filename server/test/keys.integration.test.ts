@@ -258,4 +258,60 @@ describeDatabase("escrowed team keys over a capability URL", () => {
       expect((await bundle(reader.secret, racing)).statusCode).toBe(401);
     });
   });
+
+  describe("fences against registration order", () => {
+    const team3 = "018f3f7e-0000-7000-8000-0000000000e5";
+
+    it("a removal that holds the team lock while reading the key is ordered against a registration", async () => {
+      await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'order-team')`, [team3]);
+      const keeper = await insertDevice(pool, { teamId: team3, name: "keeper", deviceType: "test", active: true });
+      await pool.query(`UPDATE devices SET device_pubkey = $2 WHERE device_id = $1`,
+        [keeper.deviceId, await identityToRecipient(await generateX25519Identity())]);
+      const leaver = await insertDevice(pool, { teamId: team3, name: "leaver", deviceType: "test", active: true });
+      const first = await epochOf(1, null);
+      first.snapshot.team_id = team3;
+      expect((await post(keeper.secret, "epochs", first)).statusCode).toBe(201);
+      const second = await epochOf(2, first);
+      second.snapshot.team_id = team3;
+
+      // The removal reads the current key only after it holds the team lock, and
+      // is held right there: a registration started now has to wait behind it.
+      let release!: () => void;
+      let reading!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      const inside = new Promise<void>((resolve) => { reading = resolve; });
+      const removal = removeDevice(pool, leaver.deviceId, async (client, teamId) => {
+        reading();
+        await held;
+        return (await client.query(
+          `SELECT key_id FROM team_key_epochs WHERE team_id = $1 ORDER BY epoch DESC LIMIT 1`, [teamId])).rows[0].key_id;
+      });
+      await inside;
+      const registering = post(keeper.secret, "epochs", second);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      release();
+      expect((await removal).ok).toBe(true);
+      expect((await registering).statusCode).toBe(201);
+      // The fence the removal put on epoch 1 did not outlive epoch 2.
+      expect(await fencedKeyIds(pool, team3, [first.key_id, second.key_id])).toEqual([]);
+    });
+
+    it("publishing epoch N lifts every unlifted fence on an older epoch, not only N-1", async () => {
+      const t = "018f3f7e-0000-7000-8000-0000000000e6";
+      await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'older-team')`, [t]);
+      const keeper = await insertDevice(pool, { teamId: t, name: "keeper", deviceType: "test", active: true });
+      await pool.query(`UPDATE devices SET device_pubkey = $2 WHERE device_id = $1`,
+        [keeper.deviceId, await identityToRecipient(await generateX25519Identity())]);
+      const a = await epochOf(1, null); a.snapshot.team_id = t;
+      const b = await epochOf(2, a); b.snapshot.team_id = t;
+      const c = await epochOf(3, b); c.snapshot.team_id = t;
+      expect((await post(keeper.secret, "epochs", a)).statusCode).toBe(201);
+      expect((await post(keeper.secret, "epochs", b)).statusCode).toBe(201);
+      // A fence left on epoch 1's key while epoch 2 is current.
+      await pool.query(`INSERT INTO team_epoch_fences (team_id, key_id) VALUES ($1, $2), ($1, $3)`,
+        [t, a.key_id, b.key_id]);
+      expect((await post(keeper.secret, "epochs", c)).statusCode).toBe(201);
+      expect(await fencedKeyIds(pool, t, [a.key_id, b.key_id, c.key_id])).toEqual([]);
+    });
+  });
 });
