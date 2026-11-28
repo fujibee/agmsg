@@ -29,6 +29,7 @@ export async function createFixture({ baseUrl }) {
   // Start or seed only this adapter's isolated test state.
   return {
     expectedLimits: {}, // Unlimited: omit the devices/teams/live_messages keys.
+    expectedOriginFeatures: ["device-approval", "env-markers"],
     expectedTokenTeam: { teamId: "<first-team-uuid-v7>", teamName: "<first-team-name>" },
     primary: {
       capabilityUrl: "http://127.0.0.1:8788/t/<active-secret>",
@@ -72,11 +73,14 @@ Fixture requirements:
 - The approved login must be able to mint one additional machine and read the first team after activation. Capacity-exhaustion and subscription refusal cases are tested separately from this successful-login fixture.
 - `dispose` is always called after the registered suite, including failing tests. If fixture creation fails before returning, the factory must clean up its own partial setup.
 - `expectedLimits` lists only configured finite limits, with decimal-string values: for example `{ devices: "8", teams: "8", live_messages: "1000" }`. Use `{}` when all are unlimited; the response may omit `limits` entirely or return `{}`, and the `limits` feature is optional in that case. Finite configurations require the feature and the exact finite keys and values. `live_messages` describes oldest-message eviction, not refusal. Devices/team exhaustion is tested by the reference server's separate integration cases.
+- `expectedOriginFeatures` optionally lists additional feature names the adapter requires on origin health. The reference adapter requires `env-markers`. The marker case runs only when the origin advertises that feature; otherwise it reports an explicit skip. This permits staged deployment while keeping one shared file. An expected feature missing from health still fails the origin-health case.
 - Adapter errors must omit credentials. The shared HTTP helper never logs request URLs, bodies, cookie values, or raw response bodies on failure.
 
 ## Coverage
 
 The file pins device-code request validation and its six response fields, pending/slow-down/denied/expired token answers, the approved token shape, provisional denial, idempotent activation, token replay, and activation error answers. GET `/v1/devices` pins camelCase device rows and the caller marker, allowing a null public key before key registration and optional `type` and `lastFetchAt` (null before a first fetch). Two POST `/v1/devices` cases retain the idempotent `201 {device_id}`, malformed, foreign-team, changed-key, and unauthenticated checks, explicitly skipped with the reason `lands with key routes` until the key surface lands.
+
+When `env-markers` is advertised, device-code requests accept an absent field, an empty array, a valid marker ID, and eight distinct IDs. Uppercase IDs, duplicates, nine IDs, and a non-array receive `400 {error:"bad_request"}`. Marker interpretation belongs to the implementation; the shared case validates IDs and never supplies environment values.
 
 The same suite verifies live capability access, cross-team read/write denial, identical unknown/revoked answers, absence of echoed secrets, unauthenticated origin `health.features`, and authenticated team `capabilities.features` and `capabilities.limits`. Feature arrays admit unknown additional names; the required names are `device-approval` on origin health, `devices` and `roster-snapshot` after connect, and `limits` when finite limits are configured.
 
