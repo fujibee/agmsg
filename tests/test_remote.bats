@@ -98,10 +98,16 @@ _start_1941_launcher() {
   local dir="$TEST_SKILL_DIR"
   # The sleeper is a shell of its own so that it carries the nonce too, and a
   # leak of it is visible to _count_1941_survivors. The command after the
-  # sleep keeps bash from replacing itself with the sleep.
+  # sleep keeps bash from replacing itself with the sleep. $3 is created once
+  # `sync start` has returned successfully: that is the moment #1941's trigger
+  # reaps the group (the command that started the engine has ended), and the
+  # engine's pidfile alone appears earlier, before the engine has left the
+  # group. The marker is named after this run's nonce, so no earlier run's
+  # marker can stand in for it.
+  _M1941="$dir/1941.started.$_N1941"
   perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; exec @ARGV' \
-    bash -c 'bash "$1" sync start testteam; bash -c "sleep 120; : \"\$1\"" sleeper "$2" & wait' \
-    launcher "$SCRIPTS/remote.sh" "$_N1941" &
+    bash -c 'bash "$1" sync start testteam && : > "$3"; bash -c "sleep 120; : \"\$1\"" sleeper "$2" & wait' \
+    launcher "$SCRIPTS/remote.sh" "$_N1941" "$_M1941" &
   _C1941=$!
   # Until perl has called setsid the launcher is still in this shell's group, and
   # signalling "its" group would reach nothing (or worse). Wait for it to lead a
@@ -1418,6 +1424,12 @@ _drop_local_member() {
   local launcher_pid
   launcher_pid="$(cat "$TEST_SKILL_DIR/1941.launcher.pid")"
   wait_for_file "$pidfile"
+  # Signal only after `sync start` has returned successfully, as #1941's
+  # trigger does. The pidfile is written right after the fork, before setsid
+  # has run in the engine, so signalling on the pidfile alone could reach an
+  # engine that is still in the launcher's group: a test race, not the bug
+  # (ubuntu CI).
+  wait_for_file "$_M1941"
   local engine_pid
   engine_pid="$(cat "$pidfile")"
 
