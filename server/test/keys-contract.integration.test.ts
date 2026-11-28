@@ -52,9 +52,7 @@ it.skipIf(!databaseUrl)("runs the shared key contract against the reference HTTP
     }));
     app = createApp(pool, config, { escrow: createKeyfileBackend(randomBytes(32)) });
     await app.listen({ host: "127.0.0.1", port });
-    // The probe a client reads before it has any team: escrow is already advertised.
-    const health = await fetch(`${baseUrl}/v1/health`);
-    expect((await health.json() as { features: string[] }).features).toContain("key-escrow");
+    // The shared contract checks the unauthenticated origin feature probe.
     const directory = fileURLToPath(new URL("../", import.meta.url));
     try {
       const result = await execFileAsync(process.execPath, [
