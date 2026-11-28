@@ -16,6 +16,7 @@ setup() {
   MOCK_TEAM_CIPHER_PROFILE=age-v1
   MOCK_CONNECT_STATUS=""
   export MOCK_CONNECT_STATUS
+  MOCK_PULL_MIN_AVAILABLE_SEQ=""
   export PEER_SKILL_DIR=""
   # Some cases deliberately remove python3 from PATH to verify the control-plane
   # gate. Resolve the fixture interpreter in each test process before that
@@ -35,6 +36,7 @@ setup() {
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
   MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
   MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
+  MOCK_PULL_MIN_AVAILABLE_SEQ="${MOCK_PULL_MIN_AVAILABLE_SEQ:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
@@ -214,6 +216,7 @@ restart_mock_server() {
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
   MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
   MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
+  MOCK_PULL_MIN_AVAILABLE_SEQ="${MOCK_PULL_MIN_AVAILABLE_SEQ:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
@@ -2490,6 +2493,99 @@ PY_BIND
   [ "$(storage_history mixed | jq -s 'length')" -eq 73 ]
 }
 
+@test "remote pull: seeds the roster from a snapshot and still applies later roster events" {
+  MOCK_PULL_MIXED=1
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  restart_mock_server
+
+  # A snapshot at sequence "5" covering the first 5 of the fixture's 7
+  # member_joined events (member-1..member-5); server_seq 6 and 7 are
+  # deliberately left out, so a correct pull must get them from replay, not
+  # from the snapshot.
+  local blob
+  blob="$(node -e '
+    const { pathToFileURL } = await import("node:url");
+    const { sealRosterSnapshot } = await import(pathToFileURL(process.argv[1]).href);
+    const members = Array.from({ length: 5 }, (_, i) => ({
+      member_id: `018f3f7e-4444-7000-8000-${String(i + 1).padStart(12, "0")}`,
+      name: `member-${i + 1}`,
+    }));
+    const blob = sealRosterSnapshot({
+      teamId: process.argv[2], epoch: "0", sequence: "5", cipher: "none",
+      maxBlobBytes: 1048576, protocolVersion: 1,
+      projection: { kind: "roster_snapshot", epoch: "0", sequence: "5", members },
+    });
+    process.stdout.write(blob);
+  ' --input-type=module "$SCRIPTS/internal/sync-cipher.mjs" "$PULL_TEAM_ID")"
+  run curl -sS -X POST "$ENDPOINT/v1/roster-snapshot" \
+    -H "Agmsg-Team-ID: $PULL_TEAM_ID" -H "Agmsg-Protocol-Version: 1" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg blob "$blob" '{sequence: "5", epoch: 0, blob: $blob}')"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" seeded
+  [ "$status" -eq 0 ]
+  grep -qF "80 message(s)" <<<"$output"
+
+  local cfg
+  cfg="$TEST_SKILL_DIR/teams/seeded/config.json"
+  [ "$(sqlite_mem "SELECT COUNT(*) FROM json_each(
+      json_extract(readfile('$(rf "$cfg")'), '\$.agents'));")" -eq 7 ]
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  [ "$(storage_history seeded | jq -s 'length')" -eq 73 ]
+}
+
+@test "remote pull: a roster snapshot that cannot be read fails the pull, not silently, once retention has cut the history" {
+  MOCK_PULL_MIXED=1
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  # Past the mixed fixture's own roster events (server_seq 1-7): retention
+  # has cut the history a replay would otherwise reconstruct the roster
+  # from, so a snapshot that cannot be read must stop the pull rather than
+  # fall back to that now-incomplete replay.
+  MOCK_PULL_MIN_AVAILABLE_SEQ="8"
+  restart_mock_server
+  run curl -sS "$ENDPOINT/_test/fail-next?route=roster-snapshot"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" unreadable
+  [ "$status" -ne 0 ]
+  grep -qF "snapshot could not be read" <<<"$output"
+  grep -qF "remote.sh' pull --endpoint" <<<"$output"
+
+  # Not just a string that mentions a command -- the exact line printed, run
+  # as-is, must resolve (an absolute, shell-quoted path to remote.sh) rather
+  # than fail with "command not found" before ever reaching the network.
+  local retry_cmd
+  retry_cmd="$(grep -o 'Rerun: .*$' <<<"$output" | sed -e 's/^Rerun: //')"
+  [ -n "$retry_cmd" ]
+  run bash -c "$retry_cmd"
+  [ "$status" -ne 127 ]
+}
+
+@test "remote pull: a roster snapshot that cannot be read still succeeds, with one warning, when the full history is on the server" {
+  MOCK_PULL_MIXED=1
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  # MOCK_PULL_MIN_AVAILABLE_SEQ left unset ("0"): nothing has been
+  # retention-cut, so the ordinary replay below reconstructs the whole
+  # roster correctly on its own even without the snapshot.
+  restart_mock_server
+  run curl -sS "$ENDPOINT/_test/fail-next?route=roster-snapshot"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" warned
+  [ "$status" -eq 0 ]
+  grep -qF "roster snapshot could not be read" <<<"$output"
+  grep -qF "full roster history is still on the server" <<<"$output"
+  grep -qF "80 message(s)" <<<"$output"
+
+  local cfg
+  cfg="$TEST_SKILL_DIR/teams/warned/config.json"
+  [ "$(sqlite_mem "SELECT COUNT(*) FROM json_each(
+      json_extract(readfile('$(rf "$cfg")'), '\$.agents'));")" -eq 7 ]
+}
+
 @test "remote pull: a stream that carried the roster keeps the ordinary advice (#743)" {
   # The positive control for the warning asserted in "clones a team". Without a
   # pull that DOES materialise a roster, a warning printed on every pull and one
@@ -3572,6 +3668,7 @@ start_second_mock_server() {
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
   MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
   MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
+  MOCK_PULL_MIN_AVAILABLE_SEQ="${MOCK_PULL_MIN_AVAILABLE_SEQ:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server-b.port" 2>"$TEST_SKILL_DIR/server-b.log" 3>&- &
   MOCK_SERVER_B_PID=$!
