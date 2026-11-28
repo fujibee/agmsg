@@ -811,29 +811,42 @@ _remote_device_activate() {
 # _remote_device_field <doc> <json path> -> value or empty
 _remote_device_field() { _remote_json_field "$1" "$2" 2>/dev/null || true; }
 
+# _remote_device_rerun_command <origin> <team-id> <local-name> [<machine-name>]
+# prints the command that pulls that team. Every argument is quoted as given:
+# the display text of a team name never goes into one.
+_remote_device_rerun_command() {
+  local cmd
+  cmd="bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") pull --endpoint $(agmsg_shq "$1") --team-id $(agmsg_shq "$2")"
+  [ -z "${4:-}" ] || cmd="$cmd --machine-name $(agmsg_shq "$4")"
+  printf '%s' "$cmd $(agmsg_shq "$3")"
+}
+
 # _remote_device_team_check <asked-id> <asked-name> <granted-id> <granted-name>
+#   <origin> <local-name> <machine-name>
 # Returns 1, with a stated line, when the approval is for a different team than
 # the one asked for (by id, or by name when no id was given). Nothing is written
 # before this runs, and the server's name is shown only as printable text.
+#
+# The token step has already created a device under <machine-name> on the
+# server, and a server keeps one live device per name per team, so the command
+# offered for recovery carries a fresh machine name: the same name would be
+# refused as already connected.
 _remote_device_team_check() {
-  local asked_id="$1" asked_name="$2" got_id="$3" got_name="$4" origin="$5" local_name="$6" shown cmd
+  local asked_id="$1" asked_name="$2" got_id="$3" got_name="$4" origin="$5" local_name="$6" machine="${7:-}" \
+    shown fresh
   [ -n "$got_id" ] || return 0
+  if [ -n "$asked_id" ] && [ "$asked_id" = "$got_id" ]; then return 0; fi
+  if [ -z "$asked_id" ] && { [ -z "$asked_name" ] || [ "$asked_name" = "$got_name" ]; }; then return 0; fi
   shown="$(printf '%s' "$got_name" | LC_ALL=C tr -cd '[:print:]' | cut -c1-64)"
-  if [ -n "$asked_id" ] && [ "$asked_id" != "$got_id" ]; then
+  fresh="${machine:0:100}-r${RANDOM}"
+  if [ -n "$asked_id" ]; then
     echo "agmsg: you asked for team id $asked_id, but the approval is for team '$shown' ($got_id); nothing was changed." >&2
-    cmd="bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") pull --endpoint $(agmsg_shq "$origin") --team-id $(agmsg_shq "$got_id") $(agmsg_shq "$local_name")"
-    echo "agmsg: to pull that team, run: $cmd" >&2
-    echo "agmsg: to pull the team you meant, ask for it and approve that one." >&2
-    return 1
-  fi
-  if [ -z "$asked_id" ] && [ -n "$asked_name" ] && [ "$asked_name" != "$got_name" ]; then
+  else
     echo "agmsg: you asked for team '$asked_name', but the approval is for team '$shown' ($got_id); nothing was changed." >&2
-    cmd="bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") pull --endpoint $(agmsg_shq "$origin") --team-id $(agmsg_shq "$got_id") $(agmsg_shq "$local_name")"
-    echo "agmsg: to pull that team, run: $cmd" >&2
-    echo "agmsg: or use its name as the local team name: pull --endpoint $(agmsg_shq "$origin") $(agmsg_shq "$shown")" >&2
-    return 1
   fi
-  return 0
+  echo "agmsg: to pull that team, run: $(_remote_device_rerun_command "$origin" "$got_id" "$local_name" "$fresh")" >&2
+  echo "agmsg: (a new --machine-name is needed because this attempt already registered '$machine' on the server.)" >&2
+  return 1
 }
 
 # _remote_device_approve <origin> <team> <position> [<team-id>] [<asked-name>] -> sets REMOTE_DEVICE_ADDRESS
@@ -860,7 +873,8 @@ _remote_device_approve() {
       echo "  using the approval made earlier for team '$team'" >&2
       if [ -n "$team_id_arg" ] && [ -n "$saved_team" ] && [ "$team_id_arg" != "$saved_team" ]; then
         echo "agmsg: you asked for team id $team_id_arg, but the saved approval is for team id $saved_team; nothing was changed." >&2
-        echo "agmsg: run the command again with --team-id $saved_team, or remove the saved approval to approve again." >&2
+        echo "agmsg: to pull that team, run: $(_remote_device_rerun_command "$origin" "$saved_team" "$team")" >&2
+        echo "agmsg: to approve again instead, remove $pending and run the command again." >&2
         return 1
       fi
       if [ "$activated" != "1" ]; then
@@ -1007,7 +1021,7 @@ _remote_device_approve() {
   esac
   [ -n "$granted_name" ] || granted_team=""
   # An approval for another team is never joined silently, and nothing is saved.
-  _remote_device_team_check "$team_id_arg" "$asked_name" "$granted_team" "$granted_name" "$origin" "$team" || return 1
+  _remote_device_team_check "$team_id_arg" "$asked_name" "$granted_team" "$granted_name" "$origin" "$team" "$machine" || return 1
   _remote_device_pending_write "$pending" "$address" "$position" 0 "$granted_team" || {
     echo "agmsg: could not save the approved address; nothing was changed" >&2; return 1; }
   rc=0

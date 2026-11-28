@@ -46,6 +46,10 @@ DEVICE_INTERVAL = int(os.environ.get("MOCK_DEVICE_INTERVAL", "0") or 0)
 DEVICE_ERROR = os.environ.get("MOCK_DEVICE_ERROR", "")
 # The team the token answer names, as the reference server does for an approval
 # bound to one team. Either may be left empty to send one without the other.
+# A server that keeps one live device per name: a second token for a name it has
+# already issued one for is refused, as the reference server does.
+DEVICE_UNIQUE_NAMES = os.environ.get("MOCK_DEVICE_UNIQUE_NAMES") == "1"
+DEVICE_MINTED = set()
 DEVICE_TOKEN_TEAM_ID = os.environ.get("MOCK_DEVICE_TOKEN_TEAM_ID", "")
 DEVICE_TOKEN_TEAM_NAME = os.environ.get("MOCK_DEVICE_TOKEN_TEAM_NAME", "")
 # A status every request under a capability prefix (/t/<secret>/...) answers with:
@@ -698,6 +702,12 @@ class Handler(BaseHTTPRequestHandler):
             if DEVICE_STATE["polls"] <= DEVICE_PENDING:
                 self._send_json(400, {"error": "authorization_pending"})
                 return
+            if DEVICE_UNIQUE_NAMES:
+                name = str(DEVICE_STATE.get("last_code_body", {}).get("machine_name", ""))
+                if name in DEVICE_MINTED:
+                    self._send_json(400, {"error": "machine_exists"})
+                    return
+                DEVICE_MINTED.add(name)
             host = self.headers.get("Host", "127.0.0.1")
             answer = {
                 "capability_url": "http://%s/t/%s" % (host, DEVICE_SECRET),
