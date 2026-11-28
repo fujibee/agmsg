@@ -29,6 +29,22 @@ function credential(value) {
   return { url: url.href, secret: match[1] };
 }
 
+// These validate untrusted HTTP/plaintext values. Keep diagnostics fixed:
+// equality assertions would include the server-controlled actual value.
+export function assertKeyMetadata(body, teamId) {
+  if (Object.hasOwn(body, "protocol_version")) assert.ok(body.protocol_version === 1, "response protocol version differs");
+  if (Object.hasOwn(body, "team_id")) assert.ok(body.team_id === teamId, "response team binding differs");
+  if (Object.hasOwn(body, "server_instance_id")) nonempty(body.server_instance_id, "response server ID");
+}
+export function assertKeyEpoch(body, epoch) {
+  assert.ok(body.epoch === epoch, "response epoch differs");
+}
+export function assertKeyHandoffHeader(body) {
+  object(body, ["format_version", "type", "snapshots", "identities"], "handoff plaintext");
+  assert.ok(body.format_version === 1, "handoff format version differs");
+  assert.ok(body.type === "agmsg_age_v1_handoff", "handoff type differs");
+}
+
 export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }) {
   const controlOrigin = urlOf(baseUrl).href.replace(/\/$/, "");
   for (const name of ["primary", "foreign", "revoked"]) {
@@ -81,9 +97,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
     assert.ok([...forbiddenText].every(value => !response.raw.includes(value)), "response reflected private key material or a capability secret");
   }
   function metadata(response, teamId) {
-    if (Object.hasOwn(response.body, "protocol_version")) assert.equal(response.body.protocol_version, 1);
-    if (Object.hasOwn(response.body, "team_id")) assert.ok(response.body.team_id === teamId, "response team binding differs");
-    if (Object.hasOwn(response.body, "server_instance_id")) nonempty(response.body.server_instance_id, "response server ID");
+    assertKeyMetadata(response.body, teamId);
   }
   function error(response, status, codes, teamId) {
     assert.equal(response.status, status, "key refusal status");
@@ -134,7 +148,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
     assert.equal(response.status, status);
     object(response.body, status === 201 ? ["status", "epoch"] : ["status", "epoch", "key_id", "recipient"], "epoch result", METADATA);
     assert.ok(response.body.status === (status === 201 ? "registered" : "exists"), "epoch result status differs");
-    assert.equal(response.body.epoch, epoch);
+    assertKeyEpoch(response.body, epoch);
     if (status === 200) assert.ok(response.body.key_id === winner.key_id && response.body.recipient === winner.recipient, "existing epoch must return the winner's public half");
     metadata(response, fixture.primary.teamId); noStore(response); noSecretEcho(response);
   }
@@ -154,9 +168,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
       opened = JSON.parse(plaintext);
       assert.ok(plaintext === canonicalJson(opened));
     } catch { throw new Error("bundle must decrypt to canonical JSON for the calling device"); }
-    object(opened, ["format_version", "type", "snapshots", "identities"], "handoff plaintext");
-    assert.equal(opened.format_version, 1);
-    assert.ok(opened.type === "agmsg_age_v1_handoff", "handoff type differs");
+    assertKeyHandoffHeader(opened);
     assert.ok(canonicalJson(opened.snapshots) === canonicalJson(expected.map(row => row.snapshot)), "handoff must contain exactly the retained snapshots");
     validateChain(opened.snapshots);
     assert.ok(response.body.snapshot_sha256 === ageSnapshotDigest(opened.snapshots.at(-1)), "returned digest must match the locally computed latest snapshot digest");
