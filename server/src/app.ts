@@ -139,7 +139,7 @@ export function createApp(
     });
     // The origin probe is open, so it must not say which teams exist: it ignores
     // Agmsg-Team-ID entirely, where the open profile uses it as a binding check.
-    app.get("/v1/health", healthHandler(pool, originFeatures("accounts"), false));
+    app.get("/v1/health", healthHandler(pool, originFeatures("accounts", config.escrowBackend), false));
     // Fastify's default 404 writes the requested URL into the log, and under a
     // capability URL that is the secret. Answer without logging it.
     app.setNotFoundHandler((_request, reply) => {
@@ -209,7 +209,7 @@ async function dataPlaneRoutes(
 
   app.setErrorHandler(protocolErrorHandler);
 
-  app.get("/v1/health", healthHandler(pool, originFeatures(config.profile)));
+  app.get("/v1/health", healthHandler(pool, originFeatures(config.profile, config.escrowBackend)));
 
   app.get("/v1/capabilities", async (request, reply) => {
     emptyQuerySchema.parse(request.query);

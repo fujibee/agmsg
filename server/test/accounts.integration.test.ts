@@ -123,6 +123,17 @@ describeDatabase("accounts profile", () => {
       expect(response.headers["agmsg-protocol-version"]).toBe("1");
     });
 
+    it("lists key-escrow at the origin only when a backend is configured", async () => {
+      const escrowed = createApp(pool, { ...config("accounts"), escrowBackend: "keyfile" });
+      await escrowed.ready();
+      try {
+        const response = await escrowed.inject({ method: "GET", url: "/v1/health" });
+        expect(response.json().features).toEqual(["device-approval", "env-markers", "key-escrow"]);
+      } finally {
+        await escrowed.close();
+      }
+    });
+
     it("has no bare /v1 data route", async () => {
       for (const url of ["/v1/capabilities", "/v1/members", "/v1/messages", "/v1/teams", `/v1/teams/${teamA}`]) {
         const response = await app.inject({ method: "GET", url, headers: { ...wire, "agmsg-team-id": teamA } });

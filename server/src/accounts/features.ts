@@ -8,8 +8,19 @@ import { hasLimits, type Limits } from "../limits.js";
 //
 // Origin-level: readable before any team exists, from unauthenticated
 // GET /v1/health.
-export function originFeatures(profile: Profile): string[] {
-  return profile === "accounts" ? ["device-approval", "env-markers"] : [];
+//
+// key-escrow is listed here as well as at team level: a client decides which
+// cipher a team connects with before /v1/connect, so it must learn that keys are
+// escrowed before any team exists. Same rule as at team level: only with a
+// backend, only in the accounts profile.
+export function originFeatures(
+  profile: Profile,
+  escrowBackend: EscrowBackendName = "none",
+): string[] {
+  if (profile !== "accounts") return [];
+  return escrowBackend === "none"
+    ? ["device-approval", "env-markers"]
+    : ["device-approval", "env-markers", "key-escrow"];
 }
 
 // Team-level: from authenticated GET /v1/capabilities, after connect.
