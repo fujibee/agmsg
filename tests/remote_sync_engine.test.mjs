@@ -4091,6 +4091,155 @@ test("localStoreFingerprint: stable across repeated reads, moves on a write, and
   }
 });
 
+const realIdleCases = [
+  { name: "empty pulls and repeated read state arm prepare skipping (WAL held: false)" },
+  { name: "empty pulls and repeated read state arm prepare skipping (WAL held: true)", keepWalOpen: true },
+  { name: "deferred quarantine cleanup continues on empty pulls before idle arming", deferSweep: true },
+  { name: "a departed member with covered reads does not prevent idle arming", departed: true },
+];
+for (const { name, keepWalOpen = false, deferSweep = false, departed = false } of realIdleCases) {
+  test(`runLoop: ${name}`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "agmsg-idle-store-"));
+    let keeper = null;
+    t.after(async () => {
+      if (keeper !== null) {
+        const exited = once(keeper, "exit");
+        keeper.stdin.end();
+        await exited;
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+    const script = fileURLToPath(new URL("../scripts/internal/storage-sync-driver.sh", import.meta.url));
+    const configPath = join(root, "config.json");
+    const journalPath = join(root, "roster.jsonl");
+    await writeFile(configPath, "{}");
+    await writeFile(journalPath, "");
+    const members = [
+      { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "bob" },
+      { member_id: "018f3f7e-0000-7000-8000-000000000011", name: "carol" },
+      { member_id: "018f3f7e-0000-7000-8000-000000000012", name: "dana" },
+    ];
+    const activeMembers = departed ? [members[0], members[2]] : [members[0]];
+    const localAgents = activeMembers.map((member) => member.name);
+    const server = readStateHarness(activeMembers, localAgents, []);
+    const currentSeq = deferSweep || departed ? "1" : "0";
+    const message = { id: "550e8400-e29b-41d4-a716-446655440901", server_seq: "1",
+      server_received_at: "2026-07-21T06:00:00.000000Z",
+      envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" } };
+    const evaluated = { status: "importable", policy_revision: "0", local_security_revision: "0",
+      projection: { from_agent: "alice", to_agent: departed ? "carol" : "bob", body: "example",
+        created_at: message.server_received_at } };
+    const storageCall = (operation, records, sweepMs = "200") => {
+      const result = spawnSync("bash", [script, operation, config.local_team,
+        config.server_instance_id, config.remote_team_id, "1", "1000"], {
+        input: records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+        env: { ...process.env, AGMSG_STORAGE_PATH: root, AGMSG_SYNC_SWEEP_MS: sweepMs }, encoding: "utf8",
+      });
+      assert.equal(result.status, 0, `${operation}: ${result.stderr}`);
+      return parseStrictJsonl(result.stdout);
+    };
+    const query = (sql) => {
+      const result = spawnSync("sqlite3", [join(root, "messages.db"), sql], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    if (departed) {
+      storageCall("apply", [{ type: "sync_pull_message", ...message, ...evaluated },
+        { type: "sync_pull_cursor", next_after: "1" }]);
+      storageCall("read-prepare", [{ type: "sync_read_context", min_available_seq: "0", current_seq: "1",
+        members, local_agents: members.map((member) => member.name), roster_seqs: [] }]);
+      storageCall("read-apply", [{ type: "sync_read_snapshot", min_available_seq: "0", current_seq: "1" },
+        ...members.map((member) => ({ type: "sync_read_frontier", member_id: member.member_id,
+          server_seq: member.name === "carol" ? "1" : "0" }))]);
+      assert.equal(query("SELECT COUNT(*) FROM events WHERE type='message_read';"), "1");
+    }
+    const operations = [];
+    const results = [];
+    const waits = [];
+    const remainingQuarantine = [];
+    const events = [];
+    let clock = 0;
+    let slept = 0;
+    let messagePulled = false;
+    const dependencies = {
+      ...idleCycleBaseDeps(),
+      readStateCycleCall: readStateCycle,
+      localStoreFingerprintCall: localStoreFingerprint,
+      localAgentsCall: async () => localAgents,
+      rosterSequencesCall: async () => [],
+      evaluateCall: async () => evaluated,
+      eventCall: async (name) => { events.push(name); },
+      requestCall: async (config, path, init) => {
+        if (path.startsWith("/v1/messages?after=")) {
+          const deliver = deferSweep && !messagePulled;
+          messagePulled = true;
+          return { messages: deliver ? [message] : [], next_after: currentSeq, has_more: false };
+        }
+        const reply = await server.requestCall(config, path, init);
+        if ("current_seq" in reply) reply.current_seq = currentSeq;
+        if ("next_sequence_boundary" in reply) reply.next_sequence_boundary = String(Number(currentSeq) + 1);
+        return reply;
+      },
+      driverCall: async (operation, config, records) => {
+        operations.push(operation);
+        // Exhaust the last nonempty page's cleanup budget, then restore the
+        // normal budget for every empty pull that follows.
+        const defer = deferSweep && operation === "apply" &&
+          records.some((record) => record.type === "sync_pull_message");
+        const result = storageCall(operation, records, defer ? "0" : "200");
+        // Another long-lived reader can keep WAL open across driver calls. In
+        // that case the DB alone can stay unchanged while the WAL records writes.
+        if (keepWalOpen && keeper === null) {
+          keeper = spawn("sqlite3", [join(root, "messages.db")]);
+          const ready = once(keeper.stdout, "data");
+          keeper.stdin.write("SELECT COUNT(*) FROM sqlite_master;\n");
+          await ready;
+        }
+        return result;
+      },
+      rosterDriverCall: async (operation) => {
+        assert.equal(operation, "prepare");
+        return [{ type: "roster_sync_state", transport_cursor: "0",
+          config_path: configPath, journal_path: journalPath }];
+      },
+      clockCall: () => clock,
+      collectInstallBaselineCall: async () => null,
+      recordCycleCall: async () => {},
+      clearRefusalCall: async () => {},
+      cycleCall: async (config, options, deps) => {
+        if (results.length === 6) throw new Error("stop idle fixture");
+        if (results.length > 0) waits.push(slept);
+        slept = 0;
+        const result = await cycle(config, options, deps);
+        results.push(result);
+        remainingQuarantine.push(Number(query("SELECT COUNT(*) FROM sync_quarantine;")));
+        return result;
+      },
+      sleepCall: async (ms) => { clock += ms; slept += ms; },
+      isRetryableCall: () => false,
+    };
+    await assert.rejects(runLoop(config, {}, dependencies), /stop idle fixture/u);
+    // The first read exchange initializes the members/cursors. After that,
+    // two real prepares must bracket an unchanged store before the skip arms.
+    assert.ok(results.slice(2).some((result) => result.checkpoint !== null));
+    assert.ok(operations.filter((operation) => operation === "prepare").length < results.length);
+    assert.ok(waits.some((wait) => wait > 5000), JSON.stringify(waits));
+    if (deferSweep) {
+      assert.equal(remainingQuarantine[0], 1, "the last nonempty page must leave cleanup work");
+      assert.equal(remainingQuarantine.at(-1), 0, "empty pulls must finish the deferred cleanup");
+      for (const [index, result] of results.entries()) {
+        if (result.checkpoint !== null) assert.equal(remainingQuarantine[index], 0);
+      }
+      assert.equal(events.filter((name) => name === "pull.applied").length, results.length);
+    }
+    if (departed) {
+      assert.equal(query("SELECT active FROM sync_read_members WHERE agent='carol';"), "0");
+      assert.equal(query("SELECT COUNT(*) FROM events WHERE type='message_read';"), "1");
+      assert.equal(query("SELECT COUNT(*) FROM sync_read_aliases;"), "0");
+    }
+  });
+}
+
 test("storage-sync-driver.sh prepare: the real driver reports the db_path it actually opened (#1836)", async () => {
   const storageDir = await mkdtemp(join(tmpdir(), "agmsg-dbpath-real-"));
   const script = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "storage-sync-driver.sh");

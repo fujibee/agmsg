@@ -1571,9 +1571,15 @@ storage_sync_apply_pull() {
   exec 3<&-
   rm -f "$jq_err"; _AGMSG_SYNC_JQ_ERR=""
   [ -n "$final_cursor" ] || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
+  # Keep cursor-only applies (and their bounded cleanup) even when idle. The
+  # condition keeps an unchanged cursor from rewriting the store. A same-value
+  # UPDATE of a column in no index leaves the page unwritten (checked on SQLite
+  # 3.54); the condition keeps that true if the column is ever indexed or on a
+  # build that rewrites the row.
   printf "%s\n" "UPDATE sync_bindings SET transport_cursor='$final_cursor'
     WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
-      AND protocol_version=$protocol AND driver_generation='$generation';
+      AND protocol_version=$protocol AND driver_generation='$generation'
+      AND transport_cursor<>'$final_cursor';
     COMMIT;" >> "$sql_file"
   # -bail, for the reason the local write path already carries it: the CLI
   # reports a statement error and keeps going, so a failure partway through this
@@ -1879,17 +1885,32 @@ EOF
   fi
 
   # Stdin, third of the same kind (#882): `$insert_members` carries one row per
-  # roster member and `$insert_local_agents` one per local agent.
+  # roster member and `$insert_local_agents` one per local agent. Recompute the
+  # full projection under the write lock. Idle read preparation must not rewrite
+  # the store, or the engine's two-prepare fingerprint bracket never holds: so
+  # members are not all deactivated and reactivated, prepared frontiers are not
+  # deleted and reinserted, and covered aliases are not recreated (below). The
+  # remaining conditional updates only persist changed values.
+  # Aliases already covered by a stored remote frontier are not recreated just
+  # to be compacted by read-apply. The outgoing exact set and end-of-cycle state
+  # are unchanged: prepared frontiers are at least the stored remote frontier.
+  # The original read events and remote coverage remain durable even if the
+  # engine stops between prepare and apply; no unacknowledged read is omitted.
+  # Include inactive members in the coverage check, as read-apply's compaction
+  # does. The binding's unique agent row retains its monotonic remote frontier
+  # across departure/rejoin, while only active members can export exact reads.
   _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
     CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
     CREATE TEMP TABLE roster_read_seqs(server_seq INTEGER PRIMARY KEY);
+    CREATE TEMP TABLE next_read_prepared AS SELECT * FROM sync_read_prepared WHERE 0;
     $insert_members
     $insert_local_agents
     $insert_roster_seqs
     UPDATE sync_read_members SET active=0 WHERE local_team='$tl'
       AND server_instance_id='$server' AND remote_team_id='$remote'
-      AND protocol_version=$protocol AND driver_generation='$generation';
+      AND protocol_version=$protocol AND driver_generation='$generation' AND active<>0
+      AND member_id NOT IN (SELECT member_id FROM incoming_read_members);
     INSERT INTO sync_read_members
       (local_team,server_instance_id,remote_team_id,protocol_version,
        driver_generation,member_id,agent,remote_agent,active,name_mismatch,
@@ -1905,7 +1926,13 @@ EOF
         AND EXISTS(SELECT 1 FROM local_read_agents l WHERE l.agent=excluded.agent)
         THEN 0 ELSE 1 END,
       remote_server_seq=CAST(MAX(CAST(sync_read_members.remote_server_seq AS INTEGER),$floor) AS TEXT),
-      min_available_seq=CAST(MAX(CAST(sync_read_members.min_available_seq AS INTEGER),$floor) AS TEXT);
+      min_available_seq=CAST(MAX(CAST(sync_read_members.min_available_seq AS INTEGER),$floor) AS TEXT)
+    WHERE sync_read_members.remote_agent<>excluded.agent OR sync_read_members.active<>1
+      OR sync_read_members.name_mismatch<>CASE WHEN sync_read_members.agent=excluded.agent
+        AND EXISTS(SELECT 1 FROM local_read_agents l WHERE l.agent=excluded.agent)
+        THEN 0 ELSE 1 END
+      OR CAST(sync_read_members.remote_server_seq AS INTEGER)<$floor
+      OR CAST(sync_read_members.min_available_seq AS INTEGER)<$floor;
     INSERT OR IGNORE INTO sync_read_aliases
       (local_team,server_instance_id,remote_team_id,protocol_version,
        driver_generation,agent,local_id,wire_id,server_seq)
@@ -1916,7 +1943,12 @@ EOF
        AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
        AND m.driver_generation='$generation' AND m.server_seq IS NOT NULL
        AND EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
-         AND r.team=e.team AND r.agent=e.to_agent AND r.msg_id=e.id);
+         AND r.team=e.team AND r.agent=e.to_agent AND r.msg_id=e.id)
+       AND NOT EXISTS(SELECT 1 FROM sync_read_members rm
+         WHERE rm.local_team=m.local_team AND rm.server_instance_id=m.server_instance_id
+           AND rm.remote_team_id=m.remote_team_id AND rm.protocol_version=m.protocol_version
+           AND rm.driver_generation=m.driver_generation AND rm.agent=e.to_agent
+           AND CAST(m.server_seq AS INTEGER)<=CAST(rm.remote_server_seq AS INTEGER));
     UPDATE sync_read_aliases AS x SET server_seq=(
       SELECT m.server_seq FROM sync_messages m
        WHERE m.local_team=x.local_team AND m.server_instance_id=x.server_instance_id
@@ -1925,11 +1957,13 @@ EOF
          AND m.wire_id=x.wire_id)
      WHERE x.local_team='$tl' AND x.server_instance_id='$server'
        AND x.remote_team_id='$remote' AND x.protocol_version=$protocol
-       AND x.driver_generation='$generation' AND x.server_seq IS NULL;
-    DELETE FROM sync_read_prepared WHERE local_team='$tl'
-      AND server_instance_id='$server' AND remote_team_id='$remote'
-      AND protocol_version=$protocol AND driver_generation='$generation';
-    INSERT INTO sync_read_prepared
+       AND x.driver_generation='$generation' AND x.server_seq IS NULL
+       AND EXISTS(SELECT 1 FROM sync_messages m
+         WHERE m.local_team=x.local_team AND m.server_instance_id=x.server_instance_id
+           AND m.remote_team_id=x.remote_team_id AND m.protocol_version=x.protocol_version
+           AND m.driver_generation=x.driver_generation AND m.local_id=x.local_id
+           AND m.wire_id=x.wire_id AND m.server_seq IS NOT NULL);
+    INSERT INTO next_read_prepared
       (local_team,server_instance_id,remote_team_id,protocol_version,
        driver_generation,member_id,server_seq)
     WITH held AS (
@@ -2022,6 +2056,14 @@ EOF
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1
        AND rm.name_mismatch=0;
+    DELETE FROM sync_read_prepared WHERE local_team='$tl'
+      AND server_instance_id='$server' AND remote_team_id='$remote'
+      AND protocol_version=$protocol AND driver_generation='$generation'
+      AND member_id NOT IN (SELECT member_id FROM next_read_prepared);
+    INSERT INTO sync_read_prepared SELECT * FROM next_read_prepared WHERE 1
+    ON CONFLICT(local_team,server_instance_id,remote_team_id,protocol_version,
+                driver_generation,member_id) DO UPDATE SET server_seq=excluded.server_seq
+    WHERE sync_read_prepared.server_seq<>excluded.server_seq;
     COMMIT;" >/dev/null || { _sqlite_sync_why; return 13; }
 
   _sqlite_data "$team" "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
@@ -2123,7 +2165,11 @@ storage_sync_unblock_read_state() {
 
 # Merge one authenticated server read-state page and project coverage only onto
 # already imported/reconciled local messages. Transport/decrypt cursors are not
-# touched by this operation.
+# touched by this operation. Its updates are conditional on a changed value. A
+# same-value UPDATE of a column in no index leaves the page unwritten (checked on
+# SQLite 3.54), so this is a precaution for an indexed column or a build that
+# rewrites the row. Always re-evaluate projection against durable state, since local
+# imports and read changes still matter when the server returns the same page.
 storage_sync_apply_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
@@ -2175,7 +2221,8 @@ storage_sync_apply_read_state() {
           CAST(MAX(CAST(remote_server_seq AS INTEGER),$seq) AS TEXT)
           WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
             AND protocol_version=$protocol AND driver_generation='$generation'
-            AND member_id='$member' AND active=1;" >> "$sql_file"
+            AND member_id='$member' AND active=1
+            AND CAST(remote_server_seq AS INTEGER)<$seq;" >> "$sql_file"
         ;;
       sync_read_exact)
         [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
@@ -2210,7 +2257,9 @@ storage_sync_apply_read_state() {
       min_available_seq=CAST(MAX(CAST(min_available_seq AS INTEGER),$floor) AS TEXT),
       remote_server_seq=CAST(MAX(CAST(remote_server_seq AS INTEGER),$floor) AS TEXT)
      WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
-       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1;
+       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1
+       AND (CAST(min_available_seq AS INTEGER)<$floor
+         OR CAST(remote_server_seq AS INTEGER)<$floor);
     INSERT INTO events(type,id,team,agent,msg_id,at)
     SELECT 'message_read',lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||
            '-7'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||
@@ -2241,15 +2290,22 @@ storage_sync_apply_read_state() {
       SELECT '$tl',agent,0 FROM sync_read_members WHERE local_team='$tl'
        AND server_instance_id='$server' AND remote_team_id='$remote'
        AND protocol_version=$protocol AND driver_generation='$generation' AND active=1;
-    UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
+    WITH next_read_cursors AS (
+      SELECT agent,MAX(local_position,COALESCE((
       SELECT MIN(e.seq)-1 FROM events e WHERE e.type='message_sent' AND e.team='$tl'
        AND e.to_agent=read_cursors.agent AND e.seq>read_cursors.local_position
        AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
          AND r.team=e.team AND r.agent=read_cursors.agent AND r.msg_id=e.id)
-    ),$(_sqlite_highwater))) WHERE team='$tl' AND agent IN (
+      ),$(_sqlite_highwater))) AS position FROM read_cursors
+      WHERE team='$tl' AND agent IN (
       SELECT agent FROM sync_read_members WHERE local_team='$tl'
        AND server_instance_id='$server' AND remote_team_id='$remote'
-       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1);
+       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1)
+    )
+    UPDATE read_cursors SET local_position=(
+      SELECT position FROM next_read_cursors n WHERE n.agent=read_cursors.agent)
+     WHERE team='$tl' AND local_position<(
+      SELECT position FROM next_read_cursors n WHERE n.agent=read_cursors.agent);
     DELETE FROM sync_read_remote_exact AS x WHERE x.local_team='$tl'
       AND x.server_instance_id='$server' AND x.remote_team_id='$remote'
       AND x.protocol_version=$protocol AND x.driver_generation='$generation'
