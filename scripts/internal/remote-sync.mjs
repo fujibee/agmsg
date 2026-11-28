@@ -2629,6 +2629,21 @@ function ageHistory(config) {
   ];
 }
 
+// The epoch a roster snapshot AT `sequence` is sealed under: the one
+// effective for the message that would come right after it (effective_from_seq
+// <= sequence + 1), not currentAgeEpoch's own target (effective_from_seq <=
+// sequence) -- that selector answers "which epoch sealed the message AT this
+// sequence", and a snapshot taken before any message exists (sequence "0",
+// a fresh connect) has no message at sequence 0 to ask that of: every epoch's
+// effective_from_seq is >= "1", so currentAgeEpoch(config, "0") always finds
+// no candidate and a first E2EE snapshot could never be written. A snapshot
+// describes the roster as of `sequence`, sealed under whichever key is
+// current for whatever comes next, which is well-defined even when nothing
+// has been written yet.
+function rosterSnapshotAgeEpoch(config, sequence) {
+  return currentAgeEpoch(config, String(BigInt(sequence) + 1n));
+}
+
 function currentAgeEpoch(config, serverSeq) {
   const history = ageHistory(config);
   if (!Array.isArray(history) || history.length < 1) return null;
@@ -4693,21 +4708,28 @@ async function localRosterMembers(team) {
 export async function writeRosterSnapshot(args, dependencies = {}) {
   const requestCall = dependencies.requestCall ?? request;
   const team = requireName(args.team, "team");
-  const binding = await readConnectedBinding(team);
-  const features = Array.isArray(binding.capabilities?.features) ? binding.capabilities.features : [];
+  const config = await loadConfig(team);
+  // Fetched fresh, not read from the binding's connect-time capabilities: a
+  // retry runs long after connect, and `features` can have changed, but more
+  // importantly the stored current_seq is frozen at connect time while
+  // `localRosterMembers` below always reads the CURRENT local roster -- pairing
+  // a stale sequence with a fresh roster would write a snapshot whose "as of"
+  // claim does not match what it actually contains. Fetching current_seq here,
+  // immediately before reading the roster, keeps the two as close together as
+  // this client can get them.
+  const capabilities = await requestCall(config, "/v1/capabilities");
+  const features = Array.isArray(capabilities?.features) ? capabilities.features : [];
   if (!features.includes("roster-snapshot")) {
     return { type: "roster_snapshot_skipped", reason: "server does not list roster-snapshot" };
   }
-  const config = await loadConfig(team);
-  const sequence = SEQUENCE.test(binding.capabilities.current_seq ?? "") ?
-    binding.capabilities.current_seq : "0";
+  const sequence = SEQUENCE.test(capabilities.current_seq ?? "") ? capabilities.current_seq : "0";
   const members = await localRosterMembers(team);
   let epoch = "0";
   let cipher = "none";
   let keyId;
   let recipients;
   if (config.cipher_profile === "age-v1") {
-    const effectiveEpoch = currentAgeEpoch(config, sequence);
+    const effectiveEpoch = rosterSnapshotAgeEpoch(config, sequence);
     if (!effectiveEpoch) throw new Error("no age-v1 epoch is effective at the connect sequence");
     epoch = String(effectiveEpoch.epoch_revision);
     cipher = "age-v1";

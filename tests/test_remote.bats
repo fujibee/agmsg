@@ -301,6 +301,20 @@ skip_if_no_age() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"roster snapshot could not be written"* ]]
   [[ "$output" == *"write-roster-snapshot --team"* ]]
+  # Not just a string that mentions the command -- the exact line printed,
+  # run as-is, must actually resolve and run the real script (bare
+  # "remote-sync.sh" is not on PATH, which fails as "command not found", exit
+  # 127, before ever reaching the network -- this catches that regression
+  # directly rather than trusting a substring match). The mock still answers
+  # 500 here, so this run fails too, but for the SAME reason the first one
+  # did (the server refused the write), not because the shell could not find
+  # the script.
+  local retry_cmd
+  retry_cmd="$(grep -o 'Run: .*to retry\.' <<<"$output" | sed -e 's/^Run: //' -e 's/ to retry\.$//')"
+  [ -n "$retry_cmd" ]
+  run bash -c "$retry_cmd"
+  [ "$status" -ne 127 ]
+  [[ "$output" == *"HTTP 500"* ]]
 }
 
 @test "connect: without --e2ee, an address outside the allowlist is still refused (control)" {

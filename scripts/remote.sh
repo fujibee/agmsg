@@ -3276,7 +3276,7 @@ cmd_connect() {
   # be true today.
   if _remote_binding_lists_feature "$cfg" roster-snapshot; then
     if ! bash "$SCRIPT_DIR/remote-sync.sh" write-roster-snapshot --team "$team" >/dev/null; then
-      echo "agmsg: team '$team' is connected, but the initial roster snapshot could not be written. Run: remote-sync.sh write-roster-snapshot --team $(agmsg_shq "$team") to retry." >&2
+      echo "agmsg: team '$team' is connected, but the initial roster snapshot could not be written. Run: bash $(agmsg_shq "$SCRIPT_DIR/remote-sync.sh") write-roster-snapshot --team $(agmsg_shq "$team") to retry." >&2
     fi
   fi
 

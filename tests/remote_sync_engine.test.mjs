@@ -289,6 +289,10 @@ test("connect writes the first roster snapshot only when the server lists the fe
   process.env.AGMSG_SYNC_CONNECTION_DIR = root;
   process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
   const teamDir = join(root, "teams", "demo");
+  // capabilities.current_seq in the binding is the STALE, connect-time value
+  // (deliberately different from what a fresh GET answers below) -- the fix
+  // must read current_seq fresh, immediately before the roster, not trust
+  // this stored copy.
   const bindingFor = (features) => ({
     name: "demo",
     agents: {
@@ -299,7 +303,7 @@ test("connect writes the first roster snapshot only when the server lists the fe
       endpoint: "https://sync.example.test",
       server_instance_id: config.server_instance_id,
       remote_team_id: config.remote_team_id, protocol_version: 1,
-      capabilities: { write_allowed_ciphers: ["none"], features, current_seq: "5" },
+      capabilities: { write_allowed_ciphers: ["none"], features, current_seq: "1" },
       cipher_profile: "none", connected_at: "2026-07-29T00:00:00Z", disconnected_at: null,
     },
   });
@@ -308,22 +312,23 @@ test("connect writes the first roster snapshot only when the server lists the fe
 
     await writeFile(join(teamDir, "config.json"),
       `${JSON.stringify(bindingFor([]))}\n`, authorityFileOptions);
-    const skipped = await writeRosterSnapshot({ team: "demo" },
-      { requestCall: async () => { throw new Error("must not be called"); } });
+    const skipped = await writeRosterSnapshot({ team: "demo" }, {
+      requestCall: async () => ({ features: [], current_seq: "5" }),
+    });
     assert.equal(skipped.type, "roster_snapshot_skipped");
 
     await writeFile(join(teamDir, "config.json"),
       `${JSON.stringify(bindingFor(["roster-snapshot"]))}\n`, authorityFileOptions);
-    let sentPath;
+    // The fresh GET answers current_seq "5" -- different from the stale "1"
+    // in the binding above -- so a written sequence of "5" proves the fix
+    // reads live, not stored, capabilities.
     let sentBody;
-    const result = await writeRosterSnapshot({ team: "demo" }, {
-      requestCall: async (_cfg, path, init) => {
-        sentPath = path;
-        sentBody = JSON.parse(init.body);
-        return { sequence: sentBody.sequence, epoch: sentBody.epoch };
-      },
-    });
-    assert.equal(sentPath, "/v1/roster-snapshot");
+    const requestCall = async (_cfg, path, init) => {
+      if (path === "/v1/capabilities") return { features: ["roster-snapshot"], current_seq: "5" };
+      sentBody = JSON.parse(init.body);
+      return { sequence: sentBody.sequence, epoch: sentBody.epoch };
+    };
+    const result = await writeRosterSnapshot({ team: "demo" }, { requestCall });
     assert.equal(sentBody.sequence, "5");
     assert.equal(sentBody.epoch, 0);
     const opened = JSON.parse(Buffer.from(sentBody.blob, "base64").toString("utf8"));
@@ -343,6 +348,95 @@ test("connect writes the first roster snapshot only when the server lists the fe
     else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
     if (previousStorage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
     else process.env.AGMSG_SYNC_STORAGE_DIR = previousStorage;
+    await rm(root, { recursive: true });
+  }
+});
+
+test("a fresh age-v1 connect (current_seq 0) still writes a roster snapshot", async () => {
+  // current_seq "0" (no message has ever been sent) is exactly the case that
+  // broke: the initial epoch's effective_from_seq is "1", so looking up the
+  // epoch effective AT sequence "0" (currentAgeEpoch's own target) finds no
+  // candidate. A roster snapshot has to seal under the epoch that is current
+  // for whatever comes NEXT, which is well-defined even here.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-roster-snapshot-fresh-age-"));
+  const saved = {
+    connection: process.env.AGMSG_SYNC_CONNECTION_DIR,
+    storage: process.env.AGMSG_SYNC_STORAGE_DIR,
+    trust: process.env.AGMSG_SYNC_TRUST_DIR,
+  };
+  const keyId = "epoch-initial";
+  const recipient = "age1mmqjrejftea4f6xh47lhpc0jn4vw0yuhz349sw2e3sfl22k5gcjsv6xcvp";
+  const initial = {
+    profile: "age-v1",
+    server_instance_id: config.server_instance_id,
+    team_id: config.remote_team_id,
+    epoch_revision: "0",
+    writer_generation: "0",
+    authorized_writers: [keyId],
+    previous_snapshot_sha256: null,
+    history: [{ epoch_revision: "0", effective_from_seq: "1", cipher: "age-v1",
+      key_id: keyId, recipients: [recipient] }],
+  };
+  const freshConfig = {
+    ...config,
+    server_url: "https://sync.example.test",
+    cipher_profile: "age-v1",
+    local_security_history: [{ local_security_revision: "0", effective_from_seq: "1",
+      minimum_security_mode: "e2ee-required" }],
+    age_v1: {
+      epoch_snapshots: [initial],
+      checkpoint: { epoch_revision: "0", writer_generation: "0",
+        snapshot_sha256: ageSnapshotDigest(initial), confirmed_at: "2026-07-29T00:00:00Z" },
+      identity_files: {},
+      age_version: "v1.3.1",
+    },
+  };
+  try {
+    process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+    process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
+    process.env.AGMSG_SYNC_TRUST_DIR = join(root, "trust");
+    const teamDir = join(root, "teams", "demo");
+    await mkdir(teamDir, { recursive: true });
+    await mkdir(join(root, "store", "remote-sync"), { recursive: true });
+    await mkdir(join(root, "trust"), { recursive: true });
+    await writeFile(join(teamDir, "config.json"), `${JSON.stringify({
+      name: "demo",
+      agents: { alice: { member_id: "018f3f7e-0000-7000-8000-000000000001" } },
+      remote_binding: { endpoint: "https://sync.example.test",
+        server_instance_id: config.server_instance_id,
+        remote_team_id: config.remote_team_id, protocol_version: 1,
+        capabilities: { write_allowed_ciphers: ["age-v1"] },
+        cipher_profile: "age-v1", connected_at: "2026-07-29T00:00:00Z", disconnected_at: null },
+    })}\n`, authorityFileOptions);
+    await writeFile(join(teamDir, "roster.jsonl"), "");
+    await writeFile(join(root, "store", "remote-sync", "demo.json"), JSON.stringify(freshConfig));
+    await writeFile(join(root, "trust",
+      `age-v1-${config.server_instance_id}-${config.remote_team_id}-v1.json`),
+      `${JSON.stringify({ format_version: 1, profile: "age-v1",
+        server_instance_id: config.server_instance_id, team_id: config.remote_team_id,
+        protocol_version: 1, epoch_revision: "0",
+        snapshot_sha256: ageSnapshotDigest(initial), writer_generation: "0",
+        confirmation: { method: "operator-live", confirmed_at: "2026-07-29T00:00:00Z" } })}\n`,
+      { mode: 0o600 });
+    let sentBody;
+    const result = await writeRosterSnapshot({ team: "demo" }, {
+      requestCall: async (_cfg, path, init) => {
+        if (path === "/v1/capabilities") return { features: ["roster-snapshot"], current_seq: "0" };
+        sentBody = JSON.parse(init.body);
+        return { sequence: sentBody.sequence, epoch: sentBody.epoch };
+      },
+    });
+    assert.deepEqual(result, { type: "roster_snapshot_written", sequence: "0", epoch: 0 });
+    const opened = JSON.parse(Buffer.from(sentBody.blob, "base64").toString("utf8"));
+    assert.equal(opened.cipher, "age-v1");
+    assert.equal(opened.key_id, keyId);
+  } finally {
+    if (saved.connection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = saved.connection;
+    if (saved.storage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
+    else process.env.AGMSG_SYNC_STORAGE_DIR = saved.storage;
+    if (saved.trust === undefined) delete process.env.AGMSG_SYNC_TRUST_DIR;
+    else process.env.AGMSG_SYNC_TRUST_DIR = saved.trust;
     await rm(root, { recursive: true });
   }
 });
