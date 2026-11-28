@@ -4820,9 +4820,19 @@ async function openSnapshotForSeed(config, snapshot) {
 // older rename or leave undoing what the snapshot already reflects), and
 // idempotence by mutation_id does not help here because these synthetic ids
 // are not the real mutation_ids those messages carry.
+// A fixed sentinel, not wall-clock time: a retried bootstrap must produce
+// the IDENTICAL record on every attempt, not just the identical
+// mutation_id. roster-sync.mjs's own apply() compares a mutation_id's
+// full projection content across attempts (sameRecord) and throws "roster
+// mutation id maps to different content" the moment anything -- including
+// occurred_at -- differs from what an earlier attempt already journaled.
+// The seed has no real "when" to report anyway; it is a reconstruction as
+// of a sequence, not an event that happened at a moment.
+const SEEDED_ROSTER_OCCURRED_AT = "1970-01-01T00:00:00.000000Z";
+
 async function applySeededRoster(config, opened, rosterDriverCall) {
   const { seedSequence, members } = opened;
-  const occurredAt = new Date().toISOString().replace(/Z$/u, "000Z");
+  const occurredAt = SEEDED_ROSTER_OCCURRED_AT;
   const records = members.map((member) => {
     const mutationId = seededMutationId(
       config.remote_team_id, opened.epoch, seedSequence, member.member_id);
@@ -4923,8 +4933,13 @@ export async function pullBootstrap(args, dependencies = {}) {
   // same field. Anything not recognizably canonical is treated as NOT
   // intact -- the safe default, since it forces the stop-before-writing
   // path rather than a silent replay fallback on an unverified value.
-  const historyIntact = SEQUENCE.test(teamSnapshot.min_available_seq ?? "") &&
-    BigInt(teamSnapshot.min_available_seq) <= 1n;
+  //
+  // Exactly "0", not "<= 1": the server's retention deletes every row with
+  // team_seq <= through and then stores min_available_seq = through, so a
+  // floor of "1" already means the row at sequence 1 itself is gone, not
+  // merely that replay starts there. Only "0" (through has never moved)
+  // means nothing has ever been cut.
+  const historyIntact = teamSnapshot.min_available_seq === "0";
   if (Array.isArray(teamSnapshot.features) && teamSnapshot.features.includes("roster-snapshot")) {
     let opened;
     try {

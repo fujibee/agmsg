@@ -4860,6 +4860,69 @@ test("pull bootstrap warns and falls back to full replay when a snapshot read fa
   assert.match(warned, /full roster history is still on the server/u);
 });
 
+test("pull bootstrap stops, not warns, when min_available_seq is 1 -- the row at sequence 1 is already gone, not merely a floor", async () => {
+  // The server's retention deletes every row with team_seq <= through and
+  // THEN stores min_available_seq = through, so a floor of "1" already
+  // means the row at sequence 1 is gone -- not "replay starts at 1 and
+  // reaches everything", the way "<= 1" would wrongly treat it. Only "0"
+  // (through has never moved) means nothing has ever been cut.
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  await assert.rejects(pullBootstrap(
+    { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        min_available_seq: "1", features: ["roster-snapshot"],
+      }),
+      requestPublicCall: async (_config, path) => {
+        if (path === "/v1/roster-snapshot") throw new Error("HTTP 503 unavailable");
+        throw new Error("must not fetch messages before the stop is resolved");
+      },
+      rosterDriverCall: async () => { throw new Error("must not seed on a failed read"); },
+      eventCall: async () => {},
+    },
+  ), /snapshot could not be read or verified.*retention has already cut.*Rerun: bash .*remote\.sh. pull --endpoint/su);
+});
+
+test("pull bootstrap seeds the identical records on a retried bootstrap, not just the identical mutation_id", async () => {
+  // roster-sync.mjs's own apply() compares a mutation_id's full projection
+  // content across attempts and throws "roster mutation id maps to
+  // different content" the moment anything -- including occurred_at --
+  // differs from what an earlier attempt already journaled. A seed built
+  // from wall-clock time would make every retry fail this way.
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const member = { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "alice" };
+  const blob = sealedRosterSnapshotBlob(teamId, "0", "5", [member]);
+  const captured = [];
+  const run = () => pullBootstrap(
+    { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        min_available_seq: "0", features: ["roster-snapshot"],
+      }),
+      requestPublicCall: async (_config, path) => {
+        if (path === "/v1/roster-snapshot") return { sequence: "5", epoch: 0, blob };
+        return { messages: [], next_after: "0", has_more: false };
+      },
+      rosterDriverCall: async (_operation, _config, input) => {
+        captured.push(input);
+        return [{ type: "roster_sync_apply_outcome", status: "imported" }];
+      },
+      driverCall: async () => [{ type: "sync_apply_result" }],
+      eventCall: async () => {},
+    },
+  );
+  await run();
+  // A real retry does not land in the same millisecond; wait long enough
+  // that a wall-clock-derived record would actually differ, so this test
+  // cannot pass by accident on two calls fast enough to share a timestamp.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await run();
+  assert.equal(captured.length, 2);
+  assert.deepEqual(captured[0], captured[1]);
+});
+
 test("pull bootstrap distinguishes a local write failure from a read/verify failure, and always stops", async () => {
   const teamId = "018f3f7e-0000-7000-8000-000000000001";
   const serverId = "018f3f7e-0000-7000-8000-000000000002";
