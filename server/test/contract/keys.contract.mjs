@@ -1,6 +1,6 @@
 // HTTP-only key contract. Fixtures own key generation and real age decryption.
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 import { canonicalJson, ageSnapshotDigest, validateAgeConfiguration } from "../../../scripts/internal/remote-sync.mjs";
 
@@ -59,7 +59,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
   }
   assert.notEqual(fixture.primary.teamId, fixture.foreign.teamId, "fixtures must cross an ownership boundary");
   assert.ok(fixture.primary.deviceIdentity !== fixture.foreign.deviceIdentity && fixture.primary.devicePubkey !== fixture.foreign.devicePubkey, "fixture devices must use different age keys");
-  for (const name of ["newEpoch", "openSealed", "dispose"]) assert.equal(typeof fixture[name], "function", `fixture.${name} is required`);
+  for (const name of ["newEpoch", "openSealed", "sealMessage", "revokeDevice", "dispose"]) assert.equal(typeof fixture[name], "function", `fixture.${name} is required`);
   const primary = credential(fixture.primary.capabilityUrl);
   const foreign = credential(fixture.foreign.capabilityUrl);
   const revoked = credential(fixture.revoked.capabilityUrl);
@@ -68,6 +68,8 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
   const unknown = { url: primary.url.replace(/\/t\/[^/]+$/, `/t/${unknownSecret}`), secret: unknownSecret };
   const forbiddenText = new Set([primary.secret, foreign.secret, revoked.secret, unregistered.secret, unknown.secret, fixture.primary.deviceIdentity, fixture.foreign.deviceIdentity]);
   let serverId;
+  let retained = [];
+  let fencedMessage;
 
   async function request(root, path, { method = "GET", headers = {}, body } = {}) {
     let response, raw;
@@ -99,7 +101,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
   function metadata(response, teamId) {
     assertKeyMetadata(response.body, teamId);
   }
-  function error(response, status, codes, teamId) {
+  function error(response, status, codes, teamId, { requireNoStore = true } = {}) {
     noSecretEcho(response);
     assert.equal(response.status, status, "key refusal status");
     object(response.body, ["error"], "key refusal", METADATA);
@@ -110,7 +112,8 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
       const details = response.body.error.details;
       assert.ok(details && typeof details === "object" && !Array.isArray(details), "key error details must be an object");
     }
-    metadata(response, teamId); noStore(response);
+    metadata(response, teamId);
+    if (requireNoStore) noStore(response);
   }
   function flatError(response, status, code) {
     noSecretEcho(response);
@@ -186,6 +189,24 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
     let wrongRecipientRejected = false;
     try { await fixture.openSealed(sealed, fixture.foreign.deviceIdentity); } catch { wrongRecipientRejected = true; }
     assert.ok(wrongRecipientRejected, "bundle must be sealed only to the calling device");
+  }
+  async function encryptedMessage(epoch) {
+    const plaintext = JSON.stringify({
+      body: "fence-contract", created_at: new Date().toISOString(),
+      from_agent: "contract-writer", to_agent: "contract-reader",
+    });
+    let blob;
+    try {
+      blob = await fixture.sealMessage(plaintext, epoch.recipient);
+      assert.ok(typeof blob === "string" && blob.length > 0 && Buffer.from(blob, "base64").toString("base64") === blob);
+      assert.ok(await fixture.openSealed(blob, epoch.identity) === plaintext);
+    } catch { throw new Error("fixture could not seal a real message to the retained epoch"); }
+    return { messages: [{ id: randomUUID(), envelope: { v: 1, cipher: "age-v1", key_id: epoch.key_id, blob } }] };
+  }
+  async function write(body) {
+    const response = await data(primary, "/messages", fixture.primary.teamId, { method: "POST", body });
+    noSecretEcho(response);
+    return response;
   }
 
   describe("device registration and escrow HTTP contract", { concurrency: false }, () => {
@@ -264,6 +285,7 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
       epochResponse(await data(primary, "/keys/epochs", fixture.primary.teamId, { method: "POST", body: second }), 201, 2, second);
       epochResponse(await data(primary, "/keys/epochs", fixture.primary.teamId, { method: "POST", body: second }), 200, 2, second);
       await bundle([winner, second]);
+      retained = [winner, second];
     });
 
     it("keeps unknown/revoked secrets and foreign/nonexistent teams indistinguishable", async () => {
@@ -285,6 +307,41 @@ export function defineKeysContract({ baseUrl, fixture, requestTimeoutMs = 5000 }
       const candidate = await material(1, null);
       error(await data(unregistered, "/keys/bundle", fixture.primary.teamId), 403, "forbidden", fixture.primary.teamId);
       error(await data(unregistered, "/keys/epochs", fixture.primary.teamId, { method: "POST", body: candidate }), 403, "forbidden", fixture.primary.teamId);
+    });
+
+    it("refuses writes under a controlled epoch fence while other retained keys still write", async () => {
+      assert.equal(retained.length, 2, "the complete retained chain must be registered first");
+      const previous = retained.at(-1);
+      assert.equal((await write(await encryptedMessage(previous))).status, 200, "the current epoch must write before removal");
+      try { await fixture.revokeDevice({ teamId: fixture.primary.teamId, keyId: previous.key_id }); }
+      catch { throw new Error("fixture could not establish a controlled epoch fence"); }
+      const blocked = await encryptedMessage(previous);
+      fencedMessage = blocked;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await write(blocked);
+        error(response, 409, "epoch-fenced", fixture.primary.teamId, { requireNoStore: false });
+        object(response.body.error.details, ["team_id", "key_id"], "fenced epoch details");
+        assert.ok(response.body.error.details.team_id === fixture.primary.teamId && response.body.error.details.key_id === previous.key_id, "fence must identify exactly the removed device's current team key");
+      }
+      assert.equal((await write(await encryptedMessage(retained[0]))).status, 200, "a different retained key must remain unfenced");
+    });
+
+    it("publishing the next epoch lifts the fence and accepts its previously refused write", async () => {
+      assert.ok(retained.length === 2 && fencedMessage, "the controlled fence must be established first");
+      const previous = retained.at(-1);
+      const next = await material(3, previous);
+      validateChain([...retained.map(row => row.snapshot), next.snapshot]);
+      epochResponse(await data(primary, "/keys/epochs", fixture.primary.teamId, { method: "POST", body: next }), 201, 3, next);
+      const accepted = await write(fencedMessage);
+      assert.equal(accepted.status, 200, "publishing the next epoch must lift the old epoch fence");
+      assert.ok(Array.isArray(accepted.body.acks) && accepted.body.acks.length === 1, "lifted write must acknowledge its message");
+      const ack = accepted.body.acks[0];
+      assert.ok(ack.id === fencedMessage.messages[0].id && ack.disposition === "stored" && typeof ack.server_seq === "string" && /^[1-9][0-9]*$/.test(ack.server_seq), "the previously refused message must be newly stored after lift");
+      const replayed = await write(fencedMessage);
+      assert.equal(replayed.status, 200);
+      assert.ok(Array.isArray(replayed.body.acks) && replayed.body.acks.length === 1 && replayed.body.acks[0].id === ack.id && replayed.body.acks[0].disposition === "duplicate" && replayed.body.acks[0].server_seq === ack.server_seq, "replaying the lifted write must keep its stored sequence");
+      assert.equal((await write(await encryptedMessage(next))).status, 200, "the new epoch must accept writes");
+      await bundle([...retained, next]);
     });
   });
 }
