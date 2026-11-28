@@ -4796,26 +4796,36 @@ function seededMutationId(teamId, epoch, sequence, memberId) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-// Seeds the roster from a snapshot at sequence S: the member list AS OF S,
-// applied as synthetic member_joined records so the driver's own roster
-// state ends up holding exactly that membership before any real mutation is
-// replayed.
+// Opens and validates a roster snapshot at sequence S, WITHOUT writing
+// anything -- kept separate from applySeededRoster below so a failure here
+// (a network error, a bad binding id, a bad digest, a non-canonical form)
+// is distinguishable from a failure writing what this already validated.
+// Conflating the two would tell an operator the SERVER's data is bad when
+// the real problem is this machine's own local storage, or the reverse.
+async function openSnapshotForSeed(config, snapshot) {
+  const seedSequence = sequence(snapshot.sequence, "roster snapshot sequence");
+  const opened = await openRosterSnapshot({
+    teamId: config.remote_team_id, epoch: snapshot.epoch, sequence: snapshot.sequence,
+    blob: snapshot.blob, protocolVersion: config.protocol_version, maxBlobBytes: 1_048_576,
+  });
+  return { seedSequence, epoch: snapshot.epoch, members: opened.members };
+}
+
+// Writes the validated snapshot's member list AS OF S as synthetic
+// member_joined records, so the driver's own roster state ends up holding
+// exactly that membership before any real mutation is replayed.
 //
 // Returns the BigInt sequence S so the caller can skip any roster mutation
 // at or before it -- replaying one after the seed can regress state (an
 // older rename or leave undoing what the snapshot already reflects), and
 // idempotence by mutation_id does not help here because these synthetic ids
 // are not the real mutation_ids those messages carry.
-async function seedRosterFromSnapshot(config, snapshot, rosterDriverCall) {
-  const seedSequence = sequence(snapshot.sequence, "roster snapshot sequence");
-  const opened = await openRosterSnapshot({
-    teamId: config.remote_team_id, epoch: snapshot.epoch, sequence: snapshot.sequence,
-    blob: snapshot.blob, protocolVersion: config.protocol_version, maxBlobBytes: 1_048_576,
-  });
+async function applySeededRoster(config, opened, rosterDriverCall) {
+  const { seedSequence, members } = opened;
   const occurredAt = new Date().toISOString().replace(/Z$/u, "000Z");
-  const records = opened.members.map((member) => {
+  const records = members.map((member) => {
     const mutationId = seededMutationId(
-      config.remote_team_id, snapshot.epoch, snapshot.sequence, member.member_id);
+      config.remote_team_id, opened.epoch, seedSequence, member.member_id);
     return {
       type: "sync_pull_message", id: mutationId, server_seq: seedSequence,
       server_received_at: occurredAt, status: "importable",
@@ -4884,37 +4894,63 @@ export async function pullBootstrap(args, dependencies = {}) {
     min_available_seq: teamSnapshot.min_available_seq,
   });
 
-  // When the server does not advertise roster-snapshot, nothing here
-  // changes: today's path (replay every roster mutation from
-  // min_available_seq) is exactly what runs below. Advertised and
-  // anything about reading or opening it fails -- a network error, a bad
-  // binding id, a bad digest, a non-canonical form -- this throws rather
-  // than falling back to replay: after retention has cut the early
-  // history, a silent fallback would reconstruct the WRONG roster with
-  // nothing to say so. `seedSequence` stays null when there is nothing to
-  // skip against (feature absent, or a server that has never had one
-  // written -- sequence null, an empty team): every roster mutation in
-  // the stream applies exactly as it does today.
+  // Decision (2026-11-28): when the server does not advertise
+  // roster-snapshot, nothing here changes -- today's path (replay every
+  // roster mutation from min_available_seq) is exactly what runs below.
+  // Advertised, and the GET or the snapshot's own open/verify fails (a
+  // network error, a bad binding id, a bad digest, a non-canonical form):
+  // (a) if the full roster history is still on the server as of the start
+  // of this pull (min_available_seq here was already as low as it can be,
+  // so a plain replay would still reconstruct the whole roster correctly
+  // on its own) -- warn once, on one stated line, and fall back to that
+  // replay, exactly as today; (b) if retention has already cut that
+  // history, a replay could reconstruct the WRONG roster with nothing to
+  // say so, so this stops before writing anything, with the reason and the
+  // exact rerun command. A failure WRITING a snapshot this machine already
+  // validated (the local roster driver) is kept distinct from a failure
+  // reading or verifying it: that is this machine's own storage, not the
+  // server's data, and always stops the same way (b) does -- a local write
+  // failure here means the replay below would likely fail the same way.
+  // `seedSequence` stays null when there is nothing to skip against
+  // (feature absent, a server that has never written one -- sequence null,
+  // an empty team -- or (a) above): every roster mutation in the stream
+  // applies exactly as it does today.
   let seedSequence = null;
+  // Lenient on purpose, unlike `sequence()`'s hard throw: a malformed
+  // min_available_seq is an existing, unrelated display-safety case (the
+  // cursor is shown as a placeholder, not trusted), and must not turn into
+  // a crash of the whole bootstrap just because this feature now reads the
+  // same field. Anything not recognizably canonical is treated as NOT
+  // intact -- the safe default, since it forces the stop-before-writing
+  // path rather than a silent replay fallback on an unverified value.
+  const historyIntact = SEQUENCE.test(teamSnapshot.min_available_seq ?? "") &&
+    BigInt(teamSnapshot.min_available_seq) <= 1n;
   if (Array.isArray(teamSnapshot.features) && teamSnapshot.features.includes("roster-snapshot")) {
-    let snapshot;
+    let opened;
     try {
-      snapshot = await requestPublicCall(config, "/v1/roster-snapshot");
+      const snapshot = await requestPublicCall(config, "/v1/roster-snapshot");
+      if (snapshot.sequence !== null) opened = await openSnapshotForSeed(config, snapshot);
     } catch (error) {
-      throw new Error(
-        `the server lists roster-snapshot but the snapshot could not be read (${error.message}); ` +
-        `nothing was seeded. Rerun: ${pullRerunCommand(args, serverUrl)}`);
+      if (!historyIntact) {
+        throw new Error(
+          `the server's roster snapshot could not be read or verified (${error.message}), and ` +
+          `retention has already cut the roster history this would otherwise replay; nothing ` +
+          `was written. Rerun: ${pullRerunCommand(args, serverUrl)}`);
+      }
+      process.stderr.write(
+        `agmsg: the server's roster snapshot could not be read or verified (${error.message}); ` +
+        "the full roster history is still on the server, so it will be replayed instead.\n");
     }
-    if (snapshot.sequence !== null) {
+    if (opened) {
       try {
-        seedSequence = await seedRosterFromSnapshot(config, snapshot, rosterDriverCall);
+        seedSequence = await applySeededRoster(config, opened, rosterDriverCall);
       } catch (error) {
         throw new Error(
-          `the server's roster snapshot could not be opened or verified (${error.message}); ` +
-          `nothing was seeded. Rerun: ${pullRerunCommand(args, serverUrl)}`);
+          `the roster snapshot was read and verified, but could not be written locally (${error.message}); ` +
+          `nothing further was done. Rerun: ${pullRerunCommand(args, serverUrl)}`);
       }
       await eventCall("pull.bootstrap.roster_snapshot_seeded", {
-        sequence: snapshot.sequence, epoch: snapshot.epoch,
+        sequence: String(seedSequence), epoch: opened.epoch,
       });
     }
   }

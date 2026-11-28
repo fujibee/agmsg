@@ -16,6 +16,7 @@ setup() {
   MOCK_TEAM_CIPHER_PROFILE=age-v1
   MOCK_CONNECT_STATUS=""
   export MOCK_CONNECT_STATUS
+  MOCK_PULL_MIN_AVAILABLE_SEQ=""
   export PEER_SKILL_DIR=""
   # Some cases deliberately remove python3 from PATH to verify the control-plane
   # gate. Resolve the fixture interpreter in each test process before that
@@ -35,6 +36,7 @@ setup() {
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
   MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
   MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
+  MOCK_PULL_MIN_AVAILABLE_SEQ="${MOCK_PULL_MIN_AVAILABLE_SEQ:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
@@ -214,6 +216,7 @@ restart_mock_server() {
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
   MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
   MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
+  MOCK_PULL_MIN_AVAILABLE_SEQ="${MOCK_PULL_MIN_AVAILABLE_SEQ:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
@@ -2534,9 +2537,14 @@ PY_BIND
   [ "$(storage_history seeded | jq -s 'length')" -eq 73 ]
 }
 
-@test "remote pull: a roster snapshot that cannot be read fails the pull, not silently (#2081-follow-up)" {
+@test "remote pull: a roster snapshot that cannot be read fails the pull, not silently, once retention has cut the history" {
   MOCK_PULL_MIXED=1
   MOCK_TEAM_FEATURES="roster-snapshot"
+  # Past the mixed fixture's own roster events (server_seq 1-7): retention
+  # has cut the history a replay would otherwise reconstruct the roster
+  # from, so a snapshot that cannot be read must stop the pull rather than
+  # fall back to that now-incomplete replay.
+  MOCK_PULL_MIN_AVAILABLE_SEQ="8"
   restart_mock_server
   run curl -sS "$ENDPOINT/_test/fail-next?route=roster-snapshot"
   [ "$status" -eq 0 ]
@@ -2554,6 +2562,28 @@ PY_BIND
   [ -n "$retry_cmd" ]
   run bash -c "$retry_cmd"
   [ "$status" -ne 127 ]
+}
+
+@test "remote pull: a roster snapshot that cannot be read still succeeds, with one warning, when the full history is on the server" {
+  MOCK_PULL_MIXED=1
+  MOCK_TEAM_FEATURES="roster-snapshot"
+  # MOCK_PULL_MIN_AVAILABLE_SEQ left unset ("0"): nothing has been
+  # retention-cut, so the ordinary replay below reconstructs the whole
+  # roster correctly on its own even without the snapshot.
+  restart_mock_server
+  run curl -sS "$ENDPOINT/_test/fail-next?route=roster-snapshot"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" warned
+  [ "$status" -eq 0 ]
+  grep -qF "roster snapshot could not be read" <<<"$output"
+  grep -qF "full roster history is still on the server" <<<"$output"
+  grep -qF "80 message(s)" <<<"$output"
+
+  local cfg
+  cfg="$TEST_SKILL_DIR/teams/warned/config.json"
+  [ "$(sqlite_mem "SELECT COUNT(*) FROM json_each(
+      json_extract(readfile('$(rf "$cfg")'), '\$.agents'));")" -eq 7 ]
 }
 
 @test "remote pull: a stream that carried the roster keeps the ordinary advice (#743)" {
@@ -3638,6 +3668,7 @@ start_second_mock_server() {
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
   MOCK_TEAM_FEATURES="${MOCK_TEAM_FEATURES:-}" \
   MOCK_ROSTER_SNAPSHOT_WRITE_STATUS="${MOCK_ROSTER_SNAPSHOT_WRITE_STATUS:-}" \
+  MOCK_PULL_MIN_AVAILABLE_SEQ="${MOCK_PULL_MIN_AVAILABLE_SEQ:-}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server-b.port" 2>"$TEST_SKILL_DIR/server-b.log" 3>&- &
   MOCK_SERVER_B_PID=$!

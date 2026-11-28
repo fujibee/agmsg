@@ -4787,14 +4787,17 @@ test("pull bootstrap seeds from a roster snapshot even when retention has cut th
   assert.equal(seedCall[0].projection.member_id, alice.member_id);
 });
 
-test("pull bootstrap rejects rather than silently falling back when a listed roster snapshot cannot be read", async () => {
+test("pull bootstrap rejects rather than silently replaying when a listed roster snapshot cannot be read and retention has cut the history", async () => {
   const teamId = "018f3f7e-0000-7000-8000-000000000001";
   const serverId = "018f3f7e-0000-7000-8000-000000000002";
   await assert.rejects(pullBootstrap(
     { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
       publicSnapshotCall: async () => ({
         server_instance_id: serverId, team_id: teamId, team_name: "source",
-        min_available_seq: "0", features: ["roster-snapshot"],
+        // Retention has moved past sequence 1, so a plain replay from here
+        // could never reconstruct the roster this snapshot would have --
+        // case (b): stop before writing anything.
+        min_available_seq: "10", features: ["roster-snapshot"],
       }),
       requestPublicCall: async (_config, path) => {
         if (path === "/v1/roster-snapshot") throw new Error("HTTP 503 unavailable");
@@ -4803,17 +4806,17 @@ test("pull bootstrap rejects rather than silently falling back when a listed ros
       rosterDriverCall: async () => { throw new Error("must not seed on a failed read"); },
       eventCall: async () => {},
     },
-  ), /snapshot could not be read.*Rerun: bash .*remote\.sh. pull --endpoint/su);
+  ), /snapshot could not be read or verified.*retention has already cut.*Rerun: bash .*remote\.sh. pull --endpoint/su);
 });
 
-test("pull bootstrap rejects rather than silently falling back when a listed roster snapshot does not open", async () => {
+test("pull bootstrap rejects rather than silently replaying when a listed roster snapshot does not open and retention has cut the history", async () => {
   const teamId = "018f3f7e-0000-7000-8000-000000000001";
   const serverId = "018f3f7e-0000-7000-8000-000000000002";
   await assert.rejects(pullBootstrap(
     { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
       publicSnapshotCall: async () => ({
         server_instance_id: serverId, team_id: teamId, team_name: "source",
-        min_available_seq: "0", features: ["roster-snapshot"],
+        min_available_seq: "10", features: ["roster-snapshot"],
       }),
       requestPublicCall: async (_config, path) => {
         if (path === "/v1/roster-snapshot") return { sequence: "5", epoch: 0, blob: "not-canonical-base64!!" };
@@ -4822,7 +4825,62 @@ test("pull bootstrap rejects rather than silently falling back when a listed ros
       rosterDriverCall: async () => { throw new Error("must not seed on a failed open"); },
       eventCall: async () => {},
     },
-  ), /snapshot could not be opened or verified.*Rerun: bash .*remote\.sh. pull --endpoint/su);
+  ), /snapshot could not be read or verified.*retention has already cut.*Rerun: bash .*remote\.sh. pull --endpoint/su);
+});
+
+test("pull bootstrap warns and falls back to full replay when a snapshot read fails but the full history is still on the server", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const originalWrite = process.stderr.write;
+  let warned = "";
+  process.stderr.write = (chunk) => { warned += chunk; return true; };
+  try {
+    const result = await pullBootstrap(
+      { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+        publicSnapshotCall: async () => ({
+          server_instance_id: serverId, team_id: teamId, team_name: "source",
+          // min_available_seq "0" -- nothing has ever been retention-cut, so
+          // the replay below reconstructs the roster correctly on its own.
+          min_available_seq: "0", features: ["roster-snapshot"],
+        }),
+        requestPublicCall: async (_config, path) => {
+          if (path === "/v1/roster-snapshot") throw new Error("HTTP 503 unavailable");
+          return { messages: [], next_after: "0", has_more: false };
+        },
+        rosterDriverCall: async () => { throw new Error("must not seed when the read failed"); },
+        driverCall: async () => [{ type: "sync_apply_result" }],
+        eventCall: async () => {},
+      },
+    );
+    assert.equal(result.imported, 0);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  assert.match(warned, /roster snapshot could not be read or verified/u);
+  assert.match(warned, /full roster history is still on the server/u);
+});
+
+test("pull bootstrap distinguishes a local write failure from a read/verify failure, and always stops", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  const member = { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "alice" };
+  const blob = sealedRosterSnapshotBlob(teamId, "0", "5", [member]);
+  await assert.rejects(pullBootstrap(
+    { team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787" }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        // Full history on the server; a write failure must still stop,
+        // since it is this machine's own storage, not retention.
+        min_available_seq: "0", features: ["roster-snapshot"],
+      }),
+      requestPublicCall: async (_config, path) => {
+        if (path === "/v1/roster-snapshot") return { sequence: "5", epoch: 0, blob };
+        throw new Error("must not fetch messages before the write failure is resolved");
+      },
+      rosterDriverCall: async () => { throw new Error("disk full"); },
+      eventCall: async () => {},
+    },
+  ), /read and verified, but could not be written locally \(disk full\).*Rerun: bash .*remote\.sh. pull --endpoint/su);
 });
 
 test("pull bootstrap skips the roster snapshot read entirely when the feature is not listed", async () => {

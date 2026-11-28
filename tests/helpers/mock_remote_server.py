@@ -115,6 +115,10 @@ PULL_TEAM_ID = (
     os.environ.get("MOCK_PULL_TEAM_ID")
     or "018f3f7e-2222-7000-8000-000000000002"
 )
+# Lets a test simulate retention having already cut the early roster-mutation
+# history, which a plain replay from here could never reconstruct -- the
+# case the roster-snapshot feature's stop-before-write path exists for.
+PULL_MIN_AVAILABLE_SEQ = os.environ.get("MOCK_PULL_MIN_AVAILABLE_SEQ") or "0"
 PULL_MEMBERS = [
     {"member_id": "018f3f7e-4444-7000-8000-000000000001",
      "name": "member-1", "registrations": []},
@@ -654,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
                 "server_instance_id": PULL_SERVER_ID,
                 "team_id": PULL_TEAM_ID,
                 "team_name": "pulled-team",
-                "min_available_seq": "0",
+                "min_available_seq": PULL_MIN_AVAILABLE_SEQ,
                 "cipher_profile": TEAM_CIPHER_PROFILE or None,
                 "current_seq": str(len(_log_for(PULL_TEAM_ID))),
                 "policy_revision": "0",
