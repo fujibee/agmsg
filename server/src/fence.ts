@@ -36,6 +36,23 @@ export async function liftEpochFence(
   );
 }
 
+// Called when epoch `epoch` is published: lifts every unlifted fence on a key of
+// an earlier epoch, not only the one just before it. A fence on any key older than
+// the epoch being published guards nothing the new epoch does not already replace,
+// so none may outlive it, whatever order removals and registrations ran in.
+export async function liftFencesBefore(
+  client: PoolClient,
+  teamId: string,
+  epoch: bigint,
+): Promise<void> {
+  await client.query(
+    `UPDATE team_epoch_fences SET lifted_at = clock_timestamp()
+      WHERE team_id = $1 AND lifted_at IS NULL
+        AND key_id IN (SELECT key_id FROM team_key_epochs WHERE team_id = $1 AND epoch < $2)`,
+    [teamId, epoch.toString()],
+  );
+}
+
 // The key ids among `keyIds` that are currently fenced for the team.
 export async function fencedKeyIds(
   pool: Pick<Pool, "query">,
