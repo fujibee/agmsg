@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { teamFeatures } from "../src/accounts/features.js";
+import { originFeatures, teamFeatures } from "../src/accounts/features.js";
 import { loadConfig } from "../src/config.js";
 import {
   createKeyfileBackend,
@@ -82,5 +82,9 @@ describe("key-escrow feature", () => {
     expect(teamFeatures("accounts", "none")).not.toContain("key-escrow");
     expect(teamFeatures("accounts")).not.toContain("key-escrow");
     expect(teamFeatures("open", "keyfile")).toEqual(["roster-snapshot"]);
+    expect(originFeatures("accounts", "keyfile")).toEqual(["device-approval", "env-markers", "key-escrow"]);
+    expect(originFeatures("accounts", "none")).toEqual(["device-approval", "env-markers"]);
+    expect(originFeatures("accounts")).toEqual(["device-approval", "env-markers"]);
+    expect(originFeatures("open", "keyfile")).toEqual([]);
   });
 });
