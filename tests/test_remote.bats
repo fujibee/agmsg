@@ -299,8 +299,8 @@ skip_if_no_age() {
   restart_mock_server
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" == *"roster snapshot could not be written"* ]]
-  [[ "$output" == *"write-roster-snapshot --team"* ]]
+  grep -qF "roster snapshot could not be written" <<<"$output"
+  grep -qF "write-roster-snapshot --team" <<<"$output"
   # Not just a string that mentions the command -- the exact line printed,
   # run as-is, must actually resolve and run the real script (bare
   # "remote-sync.sh" is not on PATH, which fails as "command not found", exit
