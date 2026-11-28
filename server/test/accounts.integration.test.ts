@@ -119,7 +119,7 @@ describeDatabase("accounts profile", () => {
     it("answers health at the origin with the origin features, no credential needed", async () => {
       const response = await app.inject({ method: "GET", url: "/v1/health" });
       expect(response.statusCode).toBe(200);
-      expect(response.json().features).toEqual(["device-approval"]);
+      expect(response.json().features).toEqual(["device-approval", "env-markers"]);
       expect(response.headers["agmsg-protocol-version"]).toBe("1");
     });
 

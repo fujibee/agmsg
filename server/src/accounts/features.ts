@@ -9,7 +9,7 @@ import { hasLimits, type Limits } from "../limits.js";
 // Origin-level: readable before any team exists, from unauthenticated
 // GET /v1/health.
 export function originFeatures(profile: Profile): string[] {
-  return profile === "accounts" ? ["device-approval"] : [];
+  return profile === "accounts" ? ["device-approval", "env-markers"] : [];
 }
 
 // Team-level: from authenticated GET /v1/capabilities, after connect.
