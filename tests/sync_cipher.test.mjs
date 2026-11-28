@@ -189,6 +189,53 @@ test("legacy messages remain discriminator-free while roster mutations use kind"
   assert.equal(Buffer.from(rotationEnvelope.blob, "base64").toString("utf8").includes("age1"), false);
 });
 
+test("a roster snapshot round-trips sealed and unsealed, and its fields are closed and sorted", async () => {
+  const base = {
+    type: "sync_seal",
+    envelope_v: 1,
+    cipher: "none",
+    key_id: null,
+    recipients: [],
+    max_blob_bytes: 1_048_576,
+    wire_id: "550e8400-e29b-41d4-a716-446655440004",
+    team_id: manifest.binding.team_id,
+    protocol_version: 1,
+  };
+  const snapshot = {
+    kind: "roster_snapshot",
+    epoch: "1",
+    sequence: "42",
+    members: [
+      { member_id: "018f3f7e-0000-7000-8000-000000000001", name: "alice" },
+      { member_id: "018f3f7e-0000-7000-8000-000000000002", name: "bob" },
+    ],
+  };
+  const sealed = sealEnvelope({ ...base, projection: snapshot });
+  assert.deepEqual(await openEnvelope({ envelope: sealed, max_blob_bytes: 1_048_576 }), snapshot);
+
+  // Plaintext teams carry the same projection unsealed, exactly as messages do today.
+  const plainBlob = Buffer.from(JSON.stringify(snapshot), "utf8").toString("base64");
+  assert.deepEqual(
+    await openEnvelope({ envelope: { ...sealed, blob: plainBlob, cipher: "none" }, max_blob_bytes: 1_048_576 }),
+    snapshot,
+  );
+
+  const unknownField = { ...snapshot, extra: "nope" };
+  assert.throws(() => sealEnvelope({ ...base, projection: unknownField }));
+
+  const unknownMemberField = {
+    ...snapshot,
+    members: [{ ...snapshot.members[0], extra: "nope" }],
+  };
+  assert.throws(() => sealEnvelope({ ...base, projection: unknownMemberField }));
+
+  const unsorted = { ...snapshot, members: [snapshot.members[1], snapshot.members[0]] };
+  assert.throws(() => sealEnvelope({ ...base, projection: unsorted }));
+
+  const duplicate = { ...snapshot, members: [snapshot.members[0], snapshot.members[0]] };
+  assert.throws(() => sealEnvelope({ ...base, projection: duplicate }));
+});
+
 test("a late concurrent rotation may use the preceding key but ordinary data may not", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "agmsg-age-rotation-race-"));
   const oldIdentity = join(scratch, "old.identity");

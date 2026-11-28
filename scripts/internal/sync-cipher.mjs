@@ -218,12 +218,58 @@ function canonicalRosterMutation(projection) {
   }), "utf8");
 }
 
+// A roster snapshot is the member list as of one sequence, under one key
+// epoch -- not a mutation, so it does not join canonicalRosterMutation's
+// union. `epoch` and `sequence` share canonicalRosterMutation's key_rotated
+// epoch shape (canonical decimal, no leading zero): both are small ordinal
+// counters read without arithmetic, never summed or diffed, so there is no
+// reason to give them a different shape from each other or from an existing
+// one in this file. `members` must be sorted ascending and duplicate-free by
+// `member_id` -- the server cannot check this (the blob is opaque to it), so
+// a reader that trusted an unsorted or duplicate list could be made to see
+// two different rosters depending on which occurrence of a repeated id it
+// processed last.
+function canonicalRosterSnapshot(projection) {
+  if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
+      projection.kind !== "roster_snapshot" ||
+      !EPOCH_REVISION.test(projection.epoch ?? "") ||
+      !EPOCH_REVISION.test(projection.sequence ?? "") ||
+      !Array.isArray(projection.members) || projection.members.length > 1000) {
+    malformed("roster snapshot projection is invalid");
+  }
+  const extraKeys = Object.keys(projection).filter((key) =>
+    !["kind", "epoch", "sequence", "members"].includes(key));
+  if (extraKeys.length > 0) malformed("roster snapshot projection is invalid");
+  let previousId = null;
+  const members = projection.members.map((member) => {
+    if (!member || Array.isArray(member) || typeof member !== "object" ||
+        !UUID_V7.test(member.member_id ?? "")) {
+      malformed("roster snapshot projection is invalid");
+    }
+    const memberKeys = Object.keys(member).filter((key) => key !== "member_id" && key !== "name");
+    if (memberKeys.length > 0) malformed("roster snapshot projection is invalid");
+    requireName(member.name, "name");
+    if (previousId !== null && member.member_id <= previousId) {
+      malformed("roster snapshot members must be sorted by member_id with no duplicates");
+    }
+    previousId = member.member_id;
+    return { member_id: member.member_id, name: member.name };
+  });
+  return Buffer.from(JSON.stringify({
+    kind: "roster_snapshot",
+    epoch: projection.epoch,
+    sequence: projection.sequence,
+    members,
+  }), "utf8");
+}
+
 // Legacy message plaintext has no discriminator and remains canonical forever.
 // Only new union branches carry `kind`; requiring it for messages would make
 // every existing sealed blob unreadable.
 function canonicalProjection(projection) {
-  return projection?.kind === undefined ?
-    canonicalMessage(projection) : canonicalRosterMutation(projection);
+  if (projection?.kind === undefined) return canonicalMessage(projection);
+  if (projection.kind === "roster_snapshot") return canonicalRosterSnapshot(projection);
+  return canonicalRosterMutation(projection);
 }
 
 // Roster mutations keep the closed-field contract: only their own kind, name,
@@ -270,6 +316,11 @@ function parseCanonicalProjection(bytes) {
     }
     return fields.body.includes("\u0000") ?
       { ...fields, body: "", body_hex: Buffer.from(fields.body, "utf8").toString("hex") } : fields;
+  }
+  if (value.kind === "roster_snapshot") {
+    canonicalRosterSnapshot(value);
+    assertKnownFields(value, ["kind", "epoch", "sequence", "members"], "roster snapshot projection");
+    return value;
   }
   canonicalRosterMutation(value);
   assertKnownFields(value, ROSTER_MUTATION_FIELDS[value.kind], "roster mutation projection");
