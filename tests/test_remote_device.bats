@@ -500,7 +500,7 @@ marker_dir() {
   # MOCK_LOOKUP_BAD makes every name lookup fail: a pull that still succeeds did
   # not make one.
   start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
-    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=cloud-name
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=cloned
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
   [ "$status" -eq 0 ]
   has "$output" "Pulled "
@@ -508,13 +508,46 @@ marker_dir() {
   stop_engine_of cloned
 }
 
-@test "device pull: --team-id given on the command line wins over the team the approval names" {
+@test "device pull: --team-id equal to the approval's team is accepted" {
   start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none \
-    MOCK_DEVICE_TOKEN_TEAM_ID=01900000-0000-7000-8000-00000000dead MOCK_DEVICE_TOKEN_TEAM_NAME=other
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=anything
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
   [ "$status" -eq 0 ]
   [ "$(jq -r '.team_id' "$TEST_SKILL_DIR/teams/cloned/config.json")" = "$PULL_TEAM_ID" ]
   stop_engine_of cloned
+}
+
+@test "device pull: asked for a team by name, an approval for another team stops before anything is written" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none \
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=other-team
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "you asked for team 'cloned', but the approval is for team 'other-team' ($PULL_TEAM_ID); nothing was changed."
+  has "$output" "to pull that team, run: bash "
+  has "$output" "pull --endpoint '$ENDPOINT' --team-id '$PULL_TEAM_ID' 'cloned'"
+  has "$output" "pull --endpoint '$ENDPOINT' 'other-team'"
+  [ ! -e "$TEST_SKILL_DIR/teams/cloned" ]
+  [ -z "$(saved_approvals)" ]
+  [ "$(device_state | jq -r '.activations')" = 0 ]
+}
+
+@test "device pull: --team-id that differs from the approval's team stops the same way" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none \
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=other-team
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id 01900000-0000-7000-8000-00000000dead cloned
+  [ "$status" -eq 1 ]
+  has "$output" "you asked for team id 01900000-0000-7000-8000-00000000dead, but the approval is for team 'other-team' ($PULL_TEAM_ID); nothing was changed."
+  [ ! -e "$TEST_SKILL_DIR/teams/cloned" ]
+  [ -z "$(saved_approvals)" ]
+}
+
+@test "device pull: the other team's name is shown as printable text only" {
+  start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none \
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=$'evil\x1b[2Jname'
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
+  [ "$status" -eq 1 ]
+  has "$output" "approval is for team 'evil"
+  lacks "$output" $'\x1b'
 }
 
 @test "device pull: a team id without its name is not used" {
@@ -527,7 +560,7 @@ marker_dir() {
 
 @test "device pull: a team id that is not a UUID is not used either" {
   start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
-    MOCK_DEVICE_TOKEN_TEAM_ID="../not-a-uuid" MOCK_DEVICE_TOKEN_TEAM_NAME=cloud-name
+    MOCK_DEVICE_TOKEN_TEAM_ID="../not-a-uuid" MOCK_DEVICE_TOKEN_TEAM_NAME=cloned
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
   [ "$status" -eq 1 ]
   has "$output" "could not look up"
@@ -535,7 +568,7 @@ marker_dir() {
 
 @test "device pull: the team the approval named is kept with a saved approval, so the re-run needs no lookup" {
   start_mock MOCK_FEATURES=device-approval MOCK_TEAM_CIPHER_PROFILE=none MOCK_LOOKUP_BAD=http_error \
-    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=cloud-name MOCK_DATA_STATUS=503
+    MOCK_DEVICE_TOKEN_TEAM_ID="$PULL_TEAM_ID" MOCK_DEVICE_TOKEN_TEAM_NAME=cloned MOCK_DATA_STATUS=503
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" cloned
   [ "$status" -eq 1 ]
   [ "$(sed -n 4p "$(saved_approvals)")" = "$PULL_TEAM_ID" ]
