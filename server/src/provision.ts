@@ -158,9 +158,37 @@ try {
     }
 
     await client.query("DELETE FROM registrations WHERE team_id = $1", [manifest.team_id]);
+    // read_frontiers/read_exact no longer carry a foreign key to members (a
+    // late joiner may sync read state before its member row exists), so a
+    // retired member's read state no longer cascades off this delete and
+    // must be cleared explicitly, the same as it was before that FK existed.
+    //
+    // Only a member actually being RETIRED here is cleared -- not every
+    // member_id absent from this manifest. A late joiner's read state has
+    // never had a members row (that is the whole point of dropping the FK),
+    // so re-provisioning the same manifest must not sweep it away just
+    // because it, too, is absent from manifest.members.
+    const retainedMemberIds = manifest.members.map((member) => member.member_id);
+    const retiredMemberIds = (
+      await client.query<{ member_id: string }>(
+        `SELECT member_id::text FROM members
+          WHERE team_id = $1 AND NOT (member_id = ANY($2::uuid[]))`,
+        [manifest.team_id, retainedMemberIds],
+      )
+    ).rows.map((row) => row.member_id);
+    if (retiredMemberIds.length > 0) {
+      await client.query(
+        "DELETE FROM read_frontiers WHERE team_id = $1 AND member_id = ANY($2::uuid[])",
+        [manifest.team_id, retiredMemberIds],
+      );
+      await client.query(
+        "DELETE FROM read_exact WHERE team_id = $1 AND member_id = ANY($2::uuid[])",
+        [manifest.team_id, retiredMemberIds],
+      );
+    }
     await client.query(
       "DELETE FROM members WHERE team_id = $1 AND NOT (member_id = ANY($2::uuid[]))",
-      [manifest.team_id, manifest.members.map((member) => member.member_id)],
+      [manifest.team_id, retainedMemberIds],
     );
     for (const member of manifest.members) {
       await client.query(

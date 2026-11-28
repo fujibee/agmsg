@@ -7,6 +7,7 @@ import {
   type Envelope,
   type MessageInput,
   type ReadStateSyncInput,
+  type RosterSnapshotInput,
 } from "./protocol.js";
 import { inTransaction } from "./db.js";
 import { limitReached, limitsCapability, NO_LIMITS, type Limits } from "./limits.js";
@@ -411,24 +412,10 @@ export async function syncReadState(
     const floor = BigInt(team.min_available_seq);
     const current = BigInt(team.current_seq);
 
-    const memberIds = input.updates.map((update) => update.member_id);
-    if (memberIds.length > 0) {
-      const members = await client.query<{ member_id: string }>(
-        `SELECT member_id::text FROM members
-          WHERE team_id = $1 AND member_id = ANY($2::uuid[])`,
-        [teamId, memberIds],
-      );
-      if (members.rows.length !== memberIds.length) {
-        throw new ProtocolError(
-          400,
-          "invalid-request",
-          "read-state update contains an inactive member",
-          {},
-          binding,
-        );
-      }
-    }
-
+    // member_id is opaque read-state identity here, the same as wire_id
+    // below: a late joiner may sync read state before its own member row
+    // has propagated, so this no longer requires membership to exist first
+    // (migration 003 drops the matching foreign keys for the same reason).
     for (const update of input.updates) {
       if (BigInt(update.server_seq) > current) {
         throw new ProtocolError(
@@ -1075,6 +1062,85 @@ export async function getTeamSnapshot(
     readOnly: true,
     repeatableRead: true,
   });
+}
+
+// A client that already has the roster writes it here after any roster
+// change, so a new machine can bootstrap from it instead of replaying the
+// whole stream. Only the latest snapshot is kept per team -- this is a
+// pointer, not a history -- and a write older than what is already stored is
+// refused: that would move a reader backwards, past roster or key-epoch
+// changes it may already have applied from a newer snapshot or from the
+// stream itself. The same sequence may be resent (an at-least-once retry of
+// an unacknowledged write) and overwrites in place; the content for a given
+// sequence is the writer's responsibility, not something the server can
+// check since the blob is sealed.
+export async function writeRosterSnapshot(
+  pool: Pool,
+  teamId: string,
+  input: RosterSnapshotInput,
+): Promise<Record<string, unknown>> {
+  return inTransaction(pool, async (client) => {
+    const serverId = await serverInstanceId(client);
+    const team = await teamRow(client, teamId, true);
+    if (!team) throw notFound(serverId, teamId);
+    const binding = { serverInstanceId: serverId, teamId };
+    const existing = await client.query<{ sequence: string }>(
+      "SELECT sequence::text FROM roster_snapshots WHERE team_id = $1",
+      [teamId],
+    );
+    const incoming = BigInt(input.sequence);
+    const current = existing.rows[0] ? BigInt(existing.rows[0].sequence) : null;
+    if (current !== null && incoming < current) {
+      throw new ProtocolError(
+        409,
+        "roster-snapshot-stale",
+        "a newer roster snapshot is already stored for this team",
+        { stored_sequence: current.toString(), rejected_sequence: input.sequence },
+        binding,
+      );
+    }
+    await client.query(
+      `INSERT INTO roster_snapshots (team_id, sequence, epoch, blob)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (team_id) DO UPDATE
+         SET sequence = EXCLUDED.sequence, epoch = EXCLUDED.epoch, blob = EXCLUDED.blob`,
+      [teamId, input.sequence, input.epoch, input.blob],
+    );
+    return { ...common(serverId, team), sequence: input.sequence, epoch: input.epoch };
+  });
+}
+
+export async function getRosterSnapshot(
+  pool: Pool,
+  teamId: string,
+): Promise<Record<string, unknown>> {
+  return inTransaction(
+    pool,
+    async (client) => {
+      const serverId = await serverInstanceId(client);
+      const team = await teamRow(client, teamId);
+      if (!team) throw notFound(serverId, teamId);
+      const stored = await client.query<{
+        sequence: string;
+        epoch: string;
+        blob: string;
+      }>(
+        // epoch is BIGINT: node-pg returns int8 columns as strings to avoid
+        // precision loss, regardless of an explicit ::text cast, so the
+        // response type above already matches what comes back at runtime.
+        "SELECT sequence::text, epoch::text, blob FROM roster_snapshots WHERE team_id = $1",
+        [teamId],
+      );
+      const row = stored.rows[0];
+      return {
+        ...common(serverId, team),
+        ...(row
+          ? { sequence: row.sequence, epoch: Number(row.epoch), blob: row.blob }
+          : { sequence: null, epoch: null, blob: null }),
+      };
+    },
+    { readOnly: true, repeatableRead: true },
+  );
 }
 
 export async function getMembers(

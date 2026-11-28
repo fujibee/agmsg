@@ -92,7 +92,7 @@ describeDatabase("accounts profile", () => {
       await app.close();
     });
 
-    it("lists no features on health or capabilities", async () => {
+    it("lists no origin features on health, and only roster-snapshot on capabilities", async () => {
       const app = createApp(pool, config("open"));
       await app.ready();
       expect((await app.inject({ method: "GET", url: "/v1/health" })).json().features).toEqual([]);
@@ -100,7 +100,7 @@ describeDatabase("accounts profile", () => {
         method: "GET", url: "/v1/capabilities", headers: { ...wire, "agmsg-team-id": teamA },
       });
       expect(caps.statusCode).toBe(200);
-      expect(caps.json().features).toEqual([]);
+      expect(caps.json().features).toEqual(["roster-snapshot"]);
       await app.close();
     });
   });
@@ -136,7 +136,7 @@ describeDatabase("accounts profile", () => {
       const response = await at(live.secret, "/v1/capabilities");
       expect(response.statusCode).toBe(200);
       expect(response.json().team_id).toBe(teamA);
-      expect(response.json().features).toEqual(["devices"]);
+      expect(response.json().features).toEqual(["roster-snapshot", "devices"]);
     });
 
     it("answers an unknown, malformed, provisional and revoked secret identically", async () => {

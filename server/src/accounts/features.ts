@@ -13,12 +13,13 @@ export function originFeatures(profile: Profile): string[] {
 }
 
 // Team-level: from authenticated GET /v1/capabilities, after connect.
+// roster-snapshot has no profile dependency -- the open profile has it too.
 export function teamFeatures(
   profile: Profile,
   escrowBackend: EscrowBackendName = "none",
   limits?: Limits,
 ): string[] {
-  const features: string[] = [];
+  const features: string[] = ["roster-snapshot"];
   if (profile === "accounts") {
     features.push("devices");
     // key-escrow only when this server will actually hold wrapped keys.

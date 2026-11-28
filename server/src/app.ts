@@ -20,6 +20,7 @@ import {
   parseSequence,
   postMessagesSchema,
   readStateSyncSchema,
+  rosterSnapshotSchema,
   teamNameSchema,
   uuidV7Schema,
 } from "./protocol.js";
@@ -27,12 +28,14 @@ import {
   connectTeam,
   getCapabilities,
   getMembers,
+  getRosterSnapshot,
   getTeamSnapshot,
   resolveTeamsByName,
   getMessages,
   health,
   postMessages,
   syncReadState,
+  writeRosterSnapshot,
 } from "./storage.js";
 
 const emptyQuerySchema = z.object({}).strict();
@@ -239,6 +242,21 @@ async function dataPlaneRoutes(
     const body = readStateSyncSchema.parse(request.body);
     reply.header("Cache-Control", "no-store");
     return syncReadState(pool, teamId, body);
+  });
+
+  app.post("/v1/roster-snapshot", { bodyLimit: MAX_REQUEST_BYTES }, async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const teamId = await scopedTeamId(pool, request);
+    const body = rosterSnapshotSchema.parse(request.body);
+    reply.header("Cache-Control", "no-store");
+    return writeRosterSnapshot(pool, teamId, body);
+  });
+
+  app.get("/v1/roster-snapshot", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const teamId = await scopedTeamId(pool, request);
+    reply.header("Cache-Control", "no-store");
+    return getRosterSnapshot(pool, teamId);
   });
 
   // Registers a team the client owns. No credential: reaching the server is the

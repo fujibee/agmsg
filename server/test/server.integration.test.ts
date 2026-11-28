@@ -403,6 +403,7 @@ describeDatabase("remote storage HTTP API v1", () => {
       policy_revision: "0",
       effective_from_seq: "1",
       policy_history: [{ policy_revision: "0", effective_from_seq: "1" }],
+      features: ["roster-snapshot"],
     });
 
     const members = await app.inject({
@@ -420,6 +421,216 @@ describeDatabase("remote storage HTTP API v1", () => {
         },
       ],
     });
+  });
+
+  it("has no roster snapshot until one is written", async () => {
+    const empty = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({ sequence: null, epoch: null, blob: null });
+  });
+
+  it("writes and reads back a roster snapshot, and refuses an older one", async () => {
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "5", epoch: 0, blob: "c2VhbGVkLXJvc3Rlci12MQ==" },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.json()).toMatchObject({ sequence: "5", epoch: 0 });
+
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toMatchObject({
+      sequence: "5",
+      epoch: 0,
+      blob: "c2VhbGVkLXJvc3Rlci12MQ==",
+    });
+
+    // The same sequence resent (an at-least-once retry) overwrites in place.
+    const resent = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "5", epoch: 1, blob: "c2VhbGVkLXJvc3Rlci12MQ==" },
+    });
+    expect(resent.statusCode).toBe(200);
+
+    const olderRejected = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "4", epoch: 1, blob: "c2VhbGVkLXJvc3Rlci1zdGFsZQ==" },
+    });
+    expect(olderRejected.statusCode).toBe(409);
+    expect(olderRejected.json().error).toMatchObject({
+      code: "roster-snapshot-stale",
+      details: { stored_sequence: "5", rejected_sequence: "4" },
+    });
+
+    // The rejected write must not have replaced the stored one.
+    const unchanged = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(unchanged.json()).toMatchObject({ sequence: "5", epoch: 1 });
+
+    const newer = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers,
+      payload: { sequence: "6", epoch: 1, blob: "c2VhbGVkLXJvc3Rlci12Mg==" },
+    });
+    expect(newer.statusCode).toBe(200);
+    const afterNewer = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(afterNewer.json()).toMatchObject({ sequence: "6", epoch: 1 });
+  });
+
+  it("isolates roster snapshots across teams", async () => {
+    const otherTeam = "018f3f7e-0000-7000-8000-0000000000b1";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'other-roster-team')`, [otherTeam]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none','age-v1']::TEXT[])`,
+      [otherTeam],
+    );
+    const otherHeaders = { ...headers, "agmsg-team-id": otherTeam };
+
+    const otherEmpty = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers: otherHeaders,
+    });
+    expect(otherEmpty.json()).toMatchObject({ sequence: null });
+
+    const write = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers: otherHeaders,
+      payload: { sequence: "1", epoch: 0, blob: "b3RoZXItdGVhbS1yb3N0ZXI=" },
+    });
+    expect(write.statusCode).toBe(200);
+
+    // The other team's write must not be visible under the original team.
+    const original = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers,
+    });
+    expect(original.json()).toMatchObject({ sequence: "6", epoch: 1 });
+
+    const otherRead = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers: otherHeaders,
+    });
+    expect(otherRead.json()).toMatchObject({
+      sequence: "1",
+      epoch: 0,
+      blob: "b3RoZXItdGVhbS1yb3N0ZXI=",
+    });
+  });
+
+  it("stores and returns the maximum wire epoch (0xffffffff)", async () => {
+    const epochTeam = "018f3f7e-0000-7000-8000-0000000000b2";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'epoch-boundary-team')`, [epochTeam]);
+    await pool.query(
+      `INSERT INTO team_policy_history (team_id, policy_revision, effective_from_seq,
+         accepted_envelope_versions, write_allowed_ciphers)
+       VALUES ($1, 0, 1, ARRAY[1], ARRAY['none','age-v1']::TEXT[])`,
+      [epochTeam],
+    );
+    const epochHeaders = { ...headers, "agmsg-team-id": epochTeam };
+
+    // 0xffffffff is the top of the wire's validated epoch range and
+    // overflows a signed 32-bit column; this must round-trip exactly, not
+    // 500 on insert.
+    const atMax = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers: epochHeaders,
+      payload: { sequence: "1", epoch: 0xffffffff, blob: "bWF4LWVwb2No" },
+    });
+    expect(atMax.statusCode).toBe(200);
+    expect(atMax.json()).toMatchObject({ epoch: 0xffffffff });
+
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/roster-snapshot",
+      headers: epochHeaders,
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toMatchObject({ sequence: "1", epoch: 0xffffffff });
+
+    // One past the wire's own max is a validation error, never reaches the DB.
+    const overWireMax = await app.inject({
+      method: "POST",
+      url: "/v1/roster-snapshot",
+      headers: epochHeaders,
+      payload: { sequence: "2", epoch: 0x100000000, blob: "b3Zlci1tYXg=" },
+    });
+    expect(overWireMax.statusCode).toBe(400);
+  });
+
+  it("re-provisioning the same manifest does not wipe a late joiner's read state", async () => {
+    const lateTeam = "018f3f7e-0000-7000-8000-0000000000b3";
+    const lateMember = "018f3f7e-0000-7000-8000-0000000000b4";
+    const retainedMember = "018f3f7e-0000-7000-8000-0000000000b5";
+    await pool.query(`INSERT INTO teams (team_id, team_name) VALUES ($1, 'late-joiner-provision-team')`, [lateTeam]);
+    await pool.query(
+      `INSERT INTO members (team_id, member_id, name) VALUES ($1, $2, 'retained-member')`,
+      [lateTeam, retainedMember],
+    );
+    // The late joiner has read state but, by design, no members row.
+    await pool.query(
+      `INSERT INTO read_frontiers(team_id, member_id, server_seq) VALUES ($1, $2, 3)`,
+      [lateTeam, lateMember],
+    );
+
+    const directory = await mkdtemp(join(tmpdir(), "agmsg-late-joiner-provision-"));
+    const manifestPath = join(directory, "team.json");
+    const connection = new URL(databaseUrl ?? "");
+    connection.searchParams.set("options", `-c search_path=${schema}`);
+    const environment = { ...process.env, DATABASE_URL: connection.toString() };
+    try {
+      await writeFile(
+        manifestPath,
+        JSON.stringify({
+          team_id: lateTeam,
+          team_name: "late-joiner-provision-team",
+          members: [{ member_id: retainedMember, name: "retained-member", registrations: [] }],
+        }),
+      );
+      await execFileAsync(
+        process.execPath,
+        ["node_modules/tsx/dist/cli.mjs", "src/provision.ts", manifestPath],
+        { cwd: process.cwd(), env: environment },
+      );
+
+      const stillThere = await pool.query<{ server_seq: string }>(
+        "SELECT server_seq::text FROM read_frontiers WHERE team_id=$1 AND member_id=$2",
+        [lateTeam, lateMember],
+      );
+      expect(stillThere.rows[0]?.server_seq).toBe("3");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await pool.query("DELETE FROM read_frontiers WHERE team_id=$1", [lateTeam]);
+    }
   });
 
   it("max-merges and paginates composite read state", async () => {
@@ -494,6 +705,43 @@ describeDatabase("remote storage HTTP API v1", () => {
     expect(future.json().error.code).toBe("invalid-request");
   });
 
+  it("accepts read state for a member not yet present in members (late joiner)", async () => {
+    const unknownMemberId = "018f3f7e-0000-7000-8000-0000000000aa";
+    const present = await pool.query<{ member_id: string }>(
+      "SELECT member_id::text FROM members WHERE team_id=$1 AND member_id=$2",
+      [teamId, unknownMemberId],
+    );
+    expect(present.rows).toHaveLength(0);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: {
+        updates: [
+          { member_id: unknownMemberId, server_seq: "1", exact_wire_ids: [] },
+        ],
+        page_after: null,
+        page_limit: 10,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const stored = await pool.query<{ server_seq: string }>(
+      "SELECT server_seq::text FROM read_frontiers WHERE team_id=$1 AND member_id=$2",
+      [teamId, unknownMemberId],
+    );
+    expect(stored.rows[0]?.server_seq).toBe("1");
+
+    // This describe block shares one team/pool across tests; later tests
+    // assert exact read-state item lists for this team, so clean up the
+    // state this test introduced rather than leaving it to leak forward.
+    await pool.query(
+      "DELETE FROM read_frontiers WHERE team_id=$1 AND member_id=$2",
+      [teamId, unknownMemberId],
+    );
+  });
+
   it("attributes a team-wide exact overflow to a causal request member", async () => {
     const coveredWire = "750e8400-e29b-41d4-a716-446655440008";
     const causalWire = "750e8400-e29b-41d4-a716-446655440009";
@@ -556,6 +804,15 @@ describeDatabase("remote storage HTTP API v1", () => {
         details: { member_id: causalMember, team_exact_count: "65537" },
       });
     } finally {
+      // read_frontiers/read_exact no longer cascade off a members delete
+      // (migration 003), so this seeded read_exact data must be cleared
+      // explicitly or it leaks into every later test against this team.
+      await pool.query(
+        `DELETE FROM read_exact WHERE team_id=$1 AND member_id IN (
+           SELECT member_id FROM members WHERE team_id=$1 AND name LIKE 'limit-%'
+         )`,
+        [teamId],
+      );
       await pool.query(
         `DELETE FROM members WHERE team_id=$1 AND name LIKE 'limit-%'`,
         [teamId],
