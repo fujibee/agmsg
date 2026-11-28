@@ -204,6 +204,7 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
 If argument is "fix" (no further words):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/fix.sh` — with NO arguments. `fix` repairs THIS session's own seat marks (placement record, pane label, agent key, session name) at the pane the seat PROVES it is in. It takes no location: the seat establishes where it is from its own process ancestry (and, when that cannot decide, by writing a token to its own screen and finding it), and when it cannot establish that, it writes nothing and says why. Whoever invokes it — a `poke` from another member, a person at the keyboard, or this skill — gets the same answer. Passing a pane, a `--pane`, or any word is refused by name: a location handed in from outside is exactly the mistake this exists to remove.
 2. Show the output. Exit 0: every seat this session holds was written. Exit 2: at least one seat was left unwritten, with `state=` and `reason=` on its line. Exit 1: refused (an argument, no session id, or no seat held by this session).
+3. When a line says `reason=locate_token_emitted_call_fix_again`, the next `fix` looks for the token on this session's own screen, and the CLI may have folded the tool output so the token is not visible there. Write the `AGMSG_LOCATE_TOKEN(...)` line from the output in your reply, verbatim, and only then run `fix` again, once. Running `fix` again without writing it emits a new token that is just as hidden.
 
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" __AGENT_TYPE__`

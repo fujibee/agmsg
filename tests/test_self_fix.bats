@@ -162,7 +162,7 @@ _fake_herdr_driver_hooks() {
   # that folds a long call's output to its first few lines still shows it)
   # and the status line both land in $output -- `run` merges stdout+stderr.
   [ "$(printf '%s\n' "$output" | head -1)" = "AGMSG_LOCATE_TOKEN(T/alice): fixed-fix-token" ]
-  [ "$(printf '%s\n' "$output" | tail -1)" = "fix seat=T/alice state=undetermined reason=locate_token_emitted_call_fix_again via=emit_observe (written nothing)" ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "fix seat=T/alice state=undetermined reason=locate_token_emitted_call_fix_again via=emit_observe (written nothing; write the AGMSG_LOCATE_TOKEN line above in your reply, verbatim, then run fix again)" ]
   refute grep -q '^search must not run' "$SPY"
   refute grep -q '^write' "$SPY"
   run agmsg_token_locate_pending T alice "$ME"

@@ -259,6 +259,11 @@ _sw_rename_confirm_count() {   # <id> <confirm_prefix> <expected>
   printf '%s\n' "$screen" | grep -cF -- "$2 $3." || true
 }
 
+# How many times the title is read again after a rename keystroke while it
+# still shows the old name (0.2 s apart; see _sw_cell_session). A constant,
+# not a setting.
+_SW_RENAME_SETTLE_TRIES=10
+
 # The session cell. Prints "attempt=... readback=...".
 _sw_cell_session() {   # <id> <team> <agent> <type>
   local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why rename_confirm marker boxed placeholder_style
@@ -327,6 +332,19 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
   agmsg_safe_poke "$id" "$rename_cmd $expected" "$marker" "$boxed" "$team" "$agent" --placeholder-style "$placeholder_style" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then printf 'attempt=failed:%s readback=not_attempted\n' "$rc"; return 0; fi
   after="$(_sw_title_now "$id" "$type")"
+  # The keystroke lands in the seat's own TUI, which applies the rename on its
+  # own schedule: measured on a Claude Code seat (#2053), the new name was set
+  # about the moment fix returned, so a single read right after the keystroke
+  # still saw the old one and reported a rename that worked as unchanged. Read
+  # again while the name is still the old one, for at most
+  # _SW_RENAME_SETTLE_TRIES x 0.2 s, and stop at the first change.
+  local settle=0
+  while [ "$after" = "$before" ] && [ "$before" != "$expected" ] && [ "$settle" -lt "$_SW_RENAME_SETTLE_TRIES" ]; do
+    case "$after" in n/a:*|unknown:*) break ;; esac
+    sleep 0.2 2>/dev/null || true
+    after="$(_sw_title_now "$id" "$type")"
+    settle=$((settle + 1))
+  done
   case "$after" in
     "$expected")
       if [ "$before" = "$expected" ]; then printf 'attempt=ok readback=matched_no_delta\n'

@@ -42,6 +42,14 @@ _fake_herdr() {
 { printf 'herdr'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$ARGV_LOG"
 fx() { sed -n "s/^$1=//p" "$FIX" | head -1; }
 if [ "$1" = pane ] && [ "$2" = get ]; then
+  if [ -s "$SKILL_DIR/lag" ]; then
+    n=$(cat "$SKILL_DIR/lag"); n=$((n - 1)); printf '%s\n' "$n" > "$SKILL_DIR/lag"
+    if [ "$n" -le 0 ]; then
+      t="$(cat "$SKILL_DIR/lag.title")"
+      sed -i '' -e "s/^title=.*/title=$t/" "$FIX" 2>/dev/null || sed -i "s/^title=.*/title=$t/" "$FIX"
+      : > "$SKILL_DIR/lag"
+    fi
+  fi
   [ "$3" = "$(fx pane)" ] || [ -z "$(fx pane)" ] || { echo '{"error":"pane_not_found"}'; exit 1; }
   printf '{"result":{"pane":{"agent_status":"%s","label":"%s","terminal_title":"%s","terminal_id":"%s"}}}\n' \
     "$(fx status)" "$(fx label)" "$(fx title)" "$(fx terminal_id)"
@@ -64,6 +72,10 @@ elif [ "$1" = agent ] && [ "$2" = prompt ]; then
   [ "$(fx poke_fail)" = 1 ] && exit 1
   case "$4" in
     "/rename "*)
+      if [ -n "$(fx rename_lag)" ]; then
+        printf '%s\n' "$(fx rename_lag)" > "$SKILL_DIR/lag"; printf '✳ %s\n' "${4#/rename }" > "$SKILL_DIR/lag.title"
+        exit 0
+      fi
       sed -i '' -e "s/^title=.*/title=✳ ${4#/rename }/" "$FIX" 2>/dev/null || sed -i "s/^title=.*/title=✳ ${4#/rename }/" "$FIX"
       confirm="$(fx confirm)"
       [ -n "$confirm" ] && printf '%s %s.\n' "$confirm" "${4#/rename }" >> "$SCREEN_FILE"
@@ -146,6 +158,30 @@ _rec()  { cat "$(agmsg_spawn_path T alice)"; }
   [ "$status" -eq 0 ]
   [ "$(_line session)" = "session attempt=ok readback=matched_no_delta" ]
   [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 1 ]
+}
+
+@test "session: a rename the TUI applies a few reads later reads verified, not unchanged (#2053)" {
+  # Measured on a Claude Code seat: the new name was set about when fix
+  # returned, after the one read that used to follow the keystroke.
+  _fixture terminal_id term_AAA title "◐ T-old" label "" key "" status idle kind claude rename_lag 3
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line session)" = "session attempt=ok readback=verified" ]
+  [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 1 ]
+}
+
+@test "session: a rename that never lands still reads unchanged, after a bounded wait (#2053)" {
+  _fixture terminal_id term_AAA title "◐ T-old" label "" key "" status idle kind claude rename_lag 1000
+  : > "$ARGV_LOG"
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line session)" = "session attempt=ok readback=unchanged:T-old" ]
+  # the title is read again at most _SW_RENAME_SETTLE_TRIES times after the
+  # first read that follows the keystroke
+  local after_prompt
+  after_prompt="$(sed -n '/herdr \[agent\] \[prompt\]/,$p' "$ARGV_LOG" | grep -c 'herdr \[pane\] \[get\]')"
+  [ "$after_prompt" -le $((1 + _SW_RENAME_SETTLE_TRIES)) ]
+  [ "$after_prompt" -ge $((1 + _SW_RENAME_SETTLE_TRIES)) ]
 }
 
 # --- a rename_confirm type (codex, #1109/#1152 stage C) --------------------------
