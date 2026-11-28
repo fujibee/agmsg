@@ -76,7 +76,7 @@ function noStore(reply: FastifyReply): void {
 
 export async function registerDeviceRoutes(
   app: FastifyInstance,
-  options: { pool: Pool; config: Config },
+  options: { pool: Pool; config: Config; onRemoved?: () => void },
 ): Promise<void> {
   const { pool, config } = options;
   const accountId = await ensureOwnerAccount(pool);
@@ -362,7 +362,10 @@ export async function registerDeviceRoutes(
     const id = uuid.safeParse((request.params as { id?: string }).id);
     if (!id.success) return reply.status(404).send({ error: "not_found" });
     const removed = await removeDevice(pool, id.data);
-    return removed.ok ? reply.status(204).send() : reply.status(404).send({ error: "not_found" });
+    if (!removed.ok) return reply.status(404).send({ error: "not_found" });
+    // Step 2 starts after step 1 has committed, and never decides its answer.
+    options.onRemoved?.();
+    return reply.status(204).send();
   });
 
   app.post("/v1/device/approve", async (request, reply) => {
