@@ -3270,11 +3270,13 @@ cmd_connect() {
   # the capabilities just recorded in $cfg — without it, today's path is
   # unchanged. Best-effort: a connect that already wrote the binding and
   # moved the store must not fail here over this, so a failure is reported
-  # and the sync engine, which can write a later snapshot on its own cycle,
-  # still starts.
+  # rather than silent, and connect still continues and exits 0. Nothing
+  # retries this write on its own yet, so the line names the exact command
+  # that does -- not a claim a later sync will pick it up, which would not
+  # be true today.
   if _remote_binding_lists_feature "$cfg" roster-snapshot; then
     if ! bash "$SCRIPT_DIR/remote-sync.sh" write-roster-snapshot --team "$team" >/dev/null; then
-      echo "agmsg: connected, but the initial roster snapshot could not be written; a later sync still delivers the roster normally." >&2
+      echo "agmsg: team '$team' is connected, but the initial roster snapshot could not be written. Run: remote-sync.sh write-roster-snapshot --team $(agmsg_shq "$team") to retry." >&2
     fi
   fi
 
